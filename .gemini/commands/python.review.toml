@@ -1,0 +1,20 @@
+description = "Perform a findings-first read-only review of Digital Life Python changes."
+
+prompt = """
+Review the requested Python changes without editing unless explicitly asked.
+
+User input:
+{{args}}
+
+Required workflow:
+1. Read docs/development/python-coding-standards.md.
+2. Read docs/development/python-testing-and-review.md.
+3. Inspect the relevant diff, surrounding code, contracts, and tests.
+4. Prioritize correctness, security, data safety, architecture, error handling,
+   concurrency, types, and missing tests before style.
+5. Run relevant available focused tests or checks when useful.
+6. List findings first by severity with file and line references.
+7. If no issue is found, state that and identify residual risk or test gaps.
+
+Treat unavailable checks as unverified, not passed.
+"""

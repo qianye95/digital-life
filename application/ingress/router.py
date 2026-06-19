@@ -1,0 +1,93 @@
+"""Ingress message router — chat_id / bot_app_id → instance_id."""
+
+from __future__ import annotations
+
+import logging
+import os
+
+from interfaces.ingress.base import NormalizedMessage
+
+logger = logging.getLogger(__name__)
+
+
+def _instance_app_id(instance_id: str) -> str:
+    """Read messenger.app_id from apps/{id}/config/app.yaml."""
+    from infrastructure.config import get_project_root
+    import yaml
+    config_file = get_project_root() / "apps" / instance_id / "config" / "app.yaml"
+    if not config_file.exists():
+        return ""
+    try:
+        cfg = yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
+        app_id = ((cfg.get("messenger") or {}).get("app_id") or "").strip()
+        return app_id
+    except Exception:
+        return ""
+
+
+def resolve_instance(msg: NormalizedMessage) -> str:
+    """Map an incoming normalized message to ONE digital life instance.
+
+    Scans apps/{id}/config/app.yaml for Feishu mappings.
+    Falls back to DIGITAL_LIFE_INSTANCE_ID env var or "zero".
+
+    路由优先级：
+      1. 群聊 + @ 了某个 bot → 路由给那个 bot 对应的实例
+      2. chat_id 精确匹配
+      3. bot_app_id 兜底
+    """
+    from infrastructure.config import discover_instances, get_project_root
+    import yaml
+
+    if msg.platform == "feishu":
+        bot_app_id = ""
+        if msg.raw:
+            try:
+                header = getattr(msg.raw, "header", None)
+                if header:
+                    bot_app_id = getattr(header, "app_id", "") or ""
+            except Exception:
+                pass
+
+        # 1) 群聊 + @ 路由：优先级最高
+        # 注意：多进程架构下，每个 instance subprocess 自己跑 feishu WS。
+        # 每个进程收到的同一群消息 header.app_id 是自己的 bot，
+        # 因此优先级 3 (bot_app_id 兜底) 会让每个进程都路由到"自己"——
+        # 这是预期行为：两个实例是两个人，**都看完整消息、各自响应**。
+        # 不要在这里加 name 匹配让"被 @ 的那个独占响应"，会破坏这个语义。
+        if msg.is_group and getattr(msg, "mentioned_bot_app_ids", None):
+            mentioned = list(msg.mentioned_bot_app_ids)
+            for instance_id in discover_instances():
+                iid = _instance_app_id(instance_id)
+                if iid and iid in mentioned:
+                    logger.info("Group mention routed to %s (mentioned=%s)", instance_id[:8], mentioned)
+                    return instance_id
+
+        if msg.chat_id or bot_app_id:
+            # 2) chat_id 精确匹配
+            for instance_id in discover_instances():
+                config_file = get_project_root() / "apps" / instance_id / "config" / "app.yaml"
+                if not config_file.exists():
+                    continue
+                try:
+                    cfg = yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
+                    chat_ids = (cfg.get("messenger") or {}).get("chat_ids") or []
+                    if msg.chat_id and msg.chat_id in chat_ids:
+                        return instance_id
+                except Exception:
+                    pass
+
+            # 3) bot_app_id 兜底
+            for instance_id in discover_instances():
+                config_file = get_project_root() / "apps" / instance_id / "config" / "app.yaml"
+                if not config_file.exists():
+                    continue
+                try:
+                    cfg = yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
+                    cfg_app_id = ((cfg.get("messenger") or {}).get("app_id") or "").strip()
+                    if bot_app_id and cfg_app_id == bot_app_id:
+                        return instance_id
+                except Exception:
+                    pass
+
+    return os.environ.get("DIGITAL_LIFE_INSTANCE_ID") or os.environ.get("L4_AGENT_ID") or "zero"

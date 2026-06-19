@@ -1,0 +1,13 @@
+# 图像识别与语音处理能力依赖
+# 已安装: pillow, opencv-python, pyttsx3, SpeechRecognition
+
+# OCR文字识别（二选一）
+# pytesseract  # 已安装，但需安装tesseract binary
+# paddleocr    # 中文OCR，需下载模型约1GB
+
+# 语音识别增强
+# openai-whisper  # OpenAI开源语音识别，需ffmpeg（已安装）
+
+# 图像处理（已安装）
+# pillow
+# opencv-python

@@ -1,0 +1,68 @@
+"""Message ingress abstraction — platform-neutral message model + adapter interface."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
+
+
+@dataclass
+class NormalizedMessage:
+    """Platform-neutral message — shields downstream code from platform details."""
+
+    platform: str
+    chat_id: str
+    message_id: str
+    sender_id: str
+    content: str
+    reply_to: str = ""
+    sender_name: str = ""
+    chat_name: str = ""
+    is_group: bool = False
+    mentions_bot: bool = False
+    # 被 @ 的标识列表（app_id / open_id / "name:<显示名>"，给路由用）
+    mentioned_bot_app_ids: list = field(default_factory=list)
+    # mention 显示名列表，例：["alpha", "张三"]。prompt 注入用，不修改 text。
+    mention_names: list = field(default_factory=list)
+    # mention key→name 映射，例：["@_user_1→alpha"]。让模型理解 text 里脱敏占位符
+    mention_map: list = field(default_factory=list)
+    # 发送者是不是机器人(app)。飞书 event.sender.sender_type=='app' 时为 True。
+    # 用于把兄弟/其它机器人联系人标记为 kind='bot'，并在发送侧判断"@ 到了机器人"。
+    sender_is_bot: bool = False
+    raw: Any = None
+
+
+MessageHandler = Callable[[NormalizedMessage], Awaitable[None]]
+
+
+@runtime_checkable
+class IngressAdapter(Protocol):
+    """Message platform adapter interface.
+
+    Each platform (Feishu, Telegram, WeChat, ...) implements one adapter.
+    平台知识（凭证、ID 解析、@ 语义等）的**唯一家园**——上游不应直接读
+    platform-specific 字段，一律通过本协议暴露的属性拿。
+    """
+
+    platform: str
+    # 该 adapter 在本平台的稳定身份标识。每个平台语义不同：
+    #   飞书 = app_id (cli_xxx)；钉钉 = agent_id+corp_id 拼；企微 = corp_id+agent_id
+    # 上游（如 unified_contact 体系区分"哪个 app 视角"）一律走这个，
+    # 不直接读 app.yaml 的具体平台字段——这是平台适配的边界。
+    app_identity: str
+
+    async def start(self) -> None:
+        """Start the adapter (WebSocket connect, webhook listen, etc.)."""
+        ...
+
+    async def stop(self) -> None:
+        """Stop the adapter gracefully."""
+        ...
+
+    async def send(self, chat_id: str, content: str, reply_to: str = "") -> bool:
+        """Send a message. Returns True on success."""
+        ...
+
+    def on_message(self, handler: MessageHandler) -> None:
+        """Register a callback for incoming messages."""
+        ...

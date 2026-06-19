@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REMOTE_NAME="${1:-}"
+REMOTE_URL="${2:-}"
+
+if [[ "${SKIP_SECURITY_SCAN:-}" == "1" ]]; then
+  printf 'Skipping pre-push security scan because SKIP_SECURITY_SCAN=1.\n'
+  exit 0
+fi
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+cd "$ROOT_DIR"
+
+printf 'Running pre-push security scan'
+if [[ -n "$REMOTE_NAME" || -n "$REMOTE_URL" ]]; then
+  printf ' for %s %s' "${REMOTE_NAME:-<unknown-remote>}" "${REMOTE_URL:-}"
+fi
+printf '...\n'
+
+bash "$ROOT_DIR/scripts/security_scan.sh" --quick

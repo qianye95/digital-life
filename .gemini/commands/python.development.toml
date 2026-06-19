@@ -1,0 +1,21 @@
+description = "Implement or refactor Digital Life Python code using project standards and risk-based tests."
+
+prompt = """
+Implement the requested Python change.
+
+User input:
+{{args}}
+
+Required workflow:
+1. Read docs/development/python-coding-standards.md.
+2. Read docs/development/python-testing-and-review.md.
+3. Inspect the owning module, affected contracts, callers or consumers, and tests.
+4. Preserve unrelated work and mutable apps/{id}/data/.
+5. Add or update focused behavior or regression tests when behavior changes.
+6. Implement the smallest coherent change within current layer boundaries.
+7. Run focused tests first and expand according to risk.
+8. Report verification, documentation updates, and remaining risks.
+
+Do not mass-format or refactor unrelated Python. Do not claim unavailable tools
+passed.
+"""

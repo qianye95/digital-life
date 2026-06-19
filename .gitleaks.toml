@@ -1,0 +1,18 @@
+title = "Digital Life Gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Documented placeholder IDs and empty example secret fields"
+paths = [
+  '''config/secrets.example.env''',
+  '''config/templates/app.yaml''',
+  '''docs/operations/instances.md''',
+  '''docs/analysis/hermes-dependency-analysis.md''',
+]
+regexes = [
+  '''cli_x{6,}''',
+  '''oc_x{6,}''',
+  '''sk-\.\.\.''',
+]

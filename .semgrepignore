@@ -1,0 +1,14 @@
+interfaces/web/employee-console/dist/
+interfaces/web/employee-console/node_modules/
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+var/
+runtime/
+apps/*/data/
+apps/*/runtime/
+backups/

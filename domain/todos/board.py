@@ -1,0 +1,335 @@
+"""Board rendering for wake prompt — 单一渲染入口。
+
+设计原则（2026-06-14 重构）：
+  - todos 实体是面板的唯一真相。todo_triggers 降级为属性徽章
+  - 只在这里渲染面板。scheduler 注入、sense_todos 工具都调 render_my_board
+  - 完整展开但分层：每条 todo 最多 5 行（标题/描述/完成标准/笔记/步骤）
+
+为什么单独成模块：scheduler.py 之前有 130 行硬编码渲染逻辑，
+wake_context.py 又有另一套等价渲染——两套都在改字段时会漏。
+收敛到这一处以后改面板只动这个文件。
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, Optional
+
+from .core.constants import CN_PRIORITIES
+from ._infra import get_db
+
+logger = logging.getLogger("digital_life.domain.todos.board")
+
+# 面板会显示的状态（done / cancelled 不上面板——做完了就没必要每轮提醒）
+ACTIVE_STATUSES = ("in_progress", "planned", "paused", "idea")
+
+# 状态徽章顺序（用于同项目内排序）
+_STATUS_ORDER = {
+    "in_progress": 0,  # 进行中最高
+    "planned": 1,
+    "paused": 2,
+    "idea": 3,
+}
+
+
+def _truncate(text: str, n: int) -> str:
+    """单行截断 + 去换行（面板里不要折行）。"""
+    if not text:
+        return ""
+    one_line = " ".join(text.split())
+    return one_line if len(one_line) <= n else one_line[:n] + "…"
+
+
+def _relative_days(due_iso: str, now_dt: Any) -> Optional[float]:
+    """返回 due_at 距 now 的天数（负数=已过期）。解析失败返回 None。"""
+    if not due_iso:
+        return None
+    try:
+        from domain.lifecycle import clock
+        due_dt = clock.parse_iso(due_iso)
+        return (due_dt - now_dt).total_seconds() / 86400
+    except Exception:
+        return None
+
+
+def _load_board_data(iid: str):
+    """一次拉所有面板需要的数据：活跃 todos + 每个 todo 的 trigger 徽章/最近笔记/待执行步数。
+
+    返回结构：list[dict]，每条含 task + triggers(list) + latest_note(dict|None) + pending_plan(dict|None) + plan_counts(dict)
+    """
+    db = get_db()
+    try:
+        # 活跃 todos（assignee 是我，状态非终态）
+        placeholders = ",".join("?" * len(ACTIVE_STATUSES))
+        task_rows = db.execute(
+            f"SELECT * FROM todos WHERE assignee_instance=? AND status IN ({placeholders}) "
+            f"ORDER BY updated_at DESC",
+            (iid, *ACTIVE_STATUSES),
+        ).fetchall()
+
+        if not task_rows:
+            return []
+
+        from .core.models import row_to_task
+        tasks = [row_to_task(r) for r in task_rows]
+        task_ids = [t.id for t in tasks]
+        id_placeholders = ",".join("?" * len(task_ids))
+
+        # trigger 徽章：每个 todo 关联到的非终态 triggers（pending/active）
+        trigger_rows = db.execute(
+            f"SELECT task_id, trigger_type, due_at, trigger_condition FROM todo_triggers "
+            f"WHERE task_id IN ({id_placeholders}) AND status IN ('pending', 'active')",
+            tuple(task_ids),
+        ).fetchall()
+        triggers_by_task: dict[str, list[dict]] = {}
+        for r in trigger_rows:
+            triggers_by_task.setdefault(r["task_id"], []).append({
+                "trigger_type": r["trigger_type"],
+                "due_at": r["due_at"] or "",
+                "trigger_condition": r["trigger_condition"] or "",
+            })
+
+        # 最近笔记（每条 todo 取最新一条）
+        note_rows = db.execute(
+            f"SELECT n.task_id, n.content, n.created_at FROM todo_notes n "
+            f"INNER JOIN (SELECT task_id, MAX(id) as max_id FROM todo_notes "
+            f"WHERE task_id IN ({id_placeholders}) GROUP BY task_id) m ON n.id = m.max_id",
+            tuple(task_ids),
+        ).fetchall()
+        latest_note_by_task: dict[str, dict] = {
+            r["task_id"]: {"content": r["content"], "created_at": r["created_at"]}
+            for r in note_rows
+        }
+
+        # plan 计数：每条 todo 的 pending / total + 最早一条 pending 的 content
+        plan_rows = db.execute(
+            f"SELECT task_id, "
+            f"SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending, "
+            f"COUNT(*) as total FROM todo_plans "
+            f"WHERE task_id IN ({id_placeholders}) GROUP BY task_id",
+            tuple(task_ids),
+        ).fetchall()
+        plan_counts: dict[str, dict] = {
+            r["task_id"]: {"pending": r["pending"] or 0, "total": r["total"] or 0}
+            for r in plan_rows
+        }
+
+        # 每条 todo 的下一个待执行步骤（最早的 pending plan）
+        next_plan_rows = db.execute(
+            f"SELECT task_id, content FROM todo_plans "
+            f"WHERE status='pending' AND task_id IN ({id_placeholders}) "
+            f"ORDER BY task_id, order_num, id",
+            tuple(task_ids),
+        ).fetchall()
+        next_plan_by_task: dict[str, str] = {}
+        for r in next_plan_rows:
+            if r["task_id"] not in next_plan_by_task:
+                next_plan_by_task[r["task_id"]] = r["content"]
+    finally:
+        db.close()
+
+    result = []
+    for t in tasks:
+        result.append({
+            "task": t,
+            "triggers": triggers_by_task.get(t.id, []),
+            "latest_note": latest_note_by_task.get(t.id),
+            "plan_counts": plan_counts.get(t.id, {"pending": 0, "total": 0}),
+            "next_plan": next_plan_by_task.get(t.id, ""),
+        })
+    return result
+
+
+def _project_label(project_id: str) -> str:
+    """把 project_id 翻译成项目名（找不到就显示 id）。"""
+    if not project_id:
+        return "个人"
+    try:
+        from domain.project.loader import load_project
+        cfg = load_project(project_id)
+        if cfg and cfg.name:
+            return cfg.name
+    except Exception:
+        pass
+    return f"项目:{project_id}"
+
+
+def _render_badges(item: dict, now_dt: Any) -> str:
+    """生成徽章列表（紧凑的一行）。"""
+    task = item["task"]
+    badges = []
+
+    # 状态（中文短词）
+    status_cn = {
+        "in_progress": "进行中",
+        "planned": "计划中",
+        "paused": "暂停",
+        "idea": "想法",
+    }.get(task.status, task.status)
+    badges.append({"emoji": "·", "text": status_cn})
+
+    # 优先级（只有 urgent / high 才标）
+    if task.priority in ("urgent", "high"):
+        badges.append({"emoji": "⚡", "text": CN_PRIORITIES.get(task.priority, task.priority)})
+
+    # deadline
+    if task.deadline:
+        days = _relative_days(task.deadline, now_dt)
+        if days is not None:
+            if days < 0:
+                badges.append({"emoji": "⚠️", "text": f"已过期 {int(-days)} 天"})
+            elif days < 1:
+                badges.append({"emoji": "⏰", "text": "今天到期"})
+            elif days < 7:
+                badges.append({"emoji": "⏰", "text": f"{int(days)+1} 天后"})
+
+    # trigger 徽章（取最早的 due_at 作为时间紧迫度信号）
+    for tr in item["triggers"]:
+        ttype = tr.get("trigger_type", "")
+        if ttype == "ongoing":
+            badges.append({"emoji": "🔄", "text": "持续"})
+        elif ttype == "condition":
+            badges.append({"emoji": "❓", "text": "等条件"})
+        elif ttype == "time":
+            dd = tr.get("due_at", "")
+            days = _relative_days(dd, now_dt)
+            if days is not None and days < 0:
+                badges.append({"emoji": "🚨", "text": "提醒已逾期"})
+
+    # has_workspace
+    if task.has_workspace:
+        badges.append({"emoji": "🗂️", "text": "工作空间"})
+
+    return " ".join(f"{b['emoji']} {b['text']}" for b in badges)
+
+
+def _render_todo_lines(item: dict, now_dt: Any) -> list[str]:
+    """渲染单条 todo（最多 5 行）。"""
+    task = item["task"]
+    lines: list[str] = []
+
+    # 行 1：标题 + id + 徽章
+    badges = _render_badges(item, now_dt)
+    lines.append(f"- **{task.title}** (id={task.id})  {badges}")
+
+    # 行 2：描述摘要（不重复标题）
+    if task.description:
+        lines.append(f"  · {_truncate(task.description, 100)}")
+
+    # 行 3：完成标准（缺失要 ⚠️）
+    if task.acceptance_criteria:
+        lines.append(f"  ✅ {_truncate(task.acceptance_criteria, 100)}")
+    else:
+        lines.append(f"  ⚠️ 完成标准未写 —— 用 `todo(action=\"update\", todo_id=\"{task.id}\", acceptance_criteria=\"...\")` 先补")
+
+    # 行 4：最近笔记
+    note = item.get("latest_note")
+    if note and note.get("content"):
+        note_text = _truncate(note["content"], 80)
+        try:
+            from domain.lifecycle import clock
+            note_dt = clock.parse_iso(note["created_at"])
+            ndays = (now_dt - note_dt).total_seconds() / 86400
+            age = "今天" if ndays < 1 else (f"{int(ndays)} 天前" if ndays < 30 else f"{int(ndays/30)} 月前")
+        except Exception:
+            age = ""
+        lines.append(f"  💭 {note_text} ({age})")
+
+    # 行 5：待执行步骤
+    pc = item.get("plan_counts") or {"pending": 0, "total": 0}
+    if pc["total"] > 0:
+        next_step = item.get("next_plan", "")
+        next_str = f" → 下一步: {_truncate(next_step, 60)}" if next_step else ""
+        lines.append(f"  📋 {pc['pending']}/{pc['total']} 待执行{next_str}")
+
+    return lines
+
+
+def _sort_key(item: dict, now_dt: Any) -> tuple:
+    """同项目内排序：进行中 → 已逾期 trigger → 今天/本周 → future → 无 trigger。"""
+    task = item["task"]
+    status_pri = _STATUS_ORDER.get(task.status, 99)
+
+    # 看最紧迫的 due（task.deadline 或 trigger due_at）
+    candidates = []
+    if task.deadline:
+        d = _relative_days(task.deadline, now_dt)
+        if d is not None:
+            candidates.append(d)
+    for tr in item["triggers"]:
+        dd = tr.get("due_at", "")
+        if dd:
+            d = _relative_days(dd, now_dt)
+            if d is not None:
+                candidates.append(d)
+    earliest_due = min(candidates) if candidates else None
+
+    # 已逾期 (earliest_due < 0) → 在前面；今天/本周内 (0-7) → 次之；其余最后
+    due_pri = 0 if earliest_due is None else (
+        1 if earliest_due < 0 else (2 if earliest_due < 7 else 3)
+    )
+
+    return (status_pri, due_pri, earliest_due if earliest_due is not None else 1e9)
+
+
+def _render_stats(items: list[dict]) -> str:
+    """末尾统计行。简洁强提示，让模型自觉补齐/推进。"""
+    total = len(items)
+    if total == 0:
+        return ""
+
+    in_progress = sum(1 for i in items if i["task"].status == "in_progress")
+    no_criteria = sum(1 for i in items if not i["task"].acceptance_criteria)
+    pending_plans = sum((i["plan_counts"] or {}).get("pending", 0) for i in items)
+
+    parts = [f"共 {total} 条（进行中 {in_progress}）"]
+    if no_criteria > 0:
+        parts.append(f"⚠️ {no_criteria} 条缺完成标准")
+    if pending_plans > 0:
+        parts.append(f"📋 {pending_plans} 个待执行步骤")
+    return "\n".join(["", "> **面板状态**：" + " · ".join(parts)])
+
+
+def render_my_board(iid: str, now_dt: Any) -> str:
+    """渲染「我的待办」面板。
+
+    返回完整 markdown 字符串（含 ## 标题段）。空字符串=没有任何活跃 todo。
+
+    iid: 当前实例 id
+    now_dt: 用 domain.lifecycle.clock.now_dt() 得到的 tz-aware datetime
+    """
+    if not iid:
+        return ""
+
+    items = _load_board_data(iid)
+    if not items:
+        return ""
+
+    # 按项目分组
+    by_project: dict[str, list[dict]] = {}
+    for item in items:
+        pid = item["task"].project_id or ""
+        by_project.setdefault(pid, []).append(item)
+
+    # 项目顺序：个人在前，其它按字母序
+    pids_sorted = sorted(
+        by_project.keys(),
+        key=lambda p: (0 if p == "" else 1, _project_label(p))
+    )
+
+    lines = ["## ── 我的待办 ──"]
+    for pid in pids_sorted:
+        proj_items = by_project[pid]
+        # 同项目内按紧迫度排序
+        proj_items.sort(key=lambda i: _sort_key(i, now_dt))
+        lines.append(f"\n### {_project_label(pid)}（{len(proj_items)} 条）")
+        for item in proj_items:
+            lines.extend(_render_todo_lines(item, now_dt))
+
+    lines.append(_render_stats(items))
+    lines.append("## ── /待办 ──")
+
+    return "\n".join(lines)
+
+
+__all__ = ["render_my_board"]

@@ -1,0 +1,208 @@
+"""系统级 Skill 工具函数。
+
+Skill 是系统级定义（interfaces/skills/），实例通过 app.yaml 注册使用。
+参考 Anthropic progressive disclosure 模型。
+
+核心工具（可直接复用 Hermes 代码）：
+- parse_frontmatter()：解析 YAML frontmatter
+- skill_matches_platform()：平台过滤
+
+注册与渲染：
+- get_instance_registered_skills()：读 app.yaml skills 字段
+- render_skill_index()：渲染 skill 索引供 system prompt 注入
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+logger = logging.getLogger(__name__)
+
+# ── 目录路径 ──────────────────────────────────────────────────────────────
+
+SKILLS_DIR = Path(__file__).parent.resolve()
+
+
+def get_system_skills_dir() -> Path:
+    """返回系统级 skill 目录：interfaces/skills/"""
+    return SKILLS_DIR
+
+
+def get_instance_skills_dir(instance_id: str | None = None) -> Path:
+    """返回实例级 skill 目录：apps/{uuid}/skills/"""
+    from infrastructure.config import get_instance_skills_dir as _cfg
+    return _cfg(instance_id)
+
+
+# ── Frontmatter 解析（复用 Hermes） ──────────────────────────────────────
+
+
+def parse_frontmatter(content: str):
+    """解析 YAML frontmatter + body。
+
+    返回：(frontmatter_dict, body_str)
+    frontmatter 解析失败时返回空 dict，body 为原文。
+    """
+    frontmatter: dict[str, Any] = {}
+    body = content
+
+    if not content.startswith("---"):
+        return frontmatter, body
+
+    end_match = re.search(r"\n---\s*\n", content[3:])
+    if not end_match:
+        return frontmatter, body
+
+    yaml_content = content[3 : end_match.start() + 3]
+    body = content[end_match.end() + 3 :]
+
+    try:
+        parsed = yaml.safe_load(yaml_content)
+        if isinstance(parsed, dict):
+            frontmatter = parsed
+    except Exception:
+        for line in yaml_content.strip().split("\n"):
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            frontmatter[key.strip()] = value.strip()
+
+    return frontmatter, body
+
+
+# ── 平台过滤 ──────────────────────────────────────────────────────────────
+
+
+_PLATFORM_MAP = {
+    "macos": "darwin",
+    "linux": "linux",
+    "windows": "win32",
+}
+
+
+def skill_matches_platform(frontmatter: dict[str, Any]) -> bool:
+    """skill 的 platforms 声明是否与当前 OS 兼容。
+
+    platforms 为空或缺失 → 全平台兼容。
+    """
+    platforms = frontmatter.get("platforms")
+    if not platforms:
+        return True
+    if not isinstance(platforms, list):
+        platforms = [platforms]
+    current = sys.platform
+    for platform in platforms:
+        normalized = str(platform).lower().strip()
+        mapped = _PLATFORM_MAP.get(normalized, normalized)
+        if current.startswith(mapped):
+            return True
+    return False
+
+
+# ── Skill 文件遍历 ────────────────────────────────────────────────────────
+
+
+EXCLUDED_SKILL_DIRS = frozenset((".git", ".github", ".hub"))
+
+
+def iter_skill_files(skills_dir: Path, filename: str = "SKILL.md"):
+    """遍历 skills_dir，返回所有匹配 filename 的路径（递归，排除特定目录）。"""
+    matches = []
+    for root, dirs, files in os.walk(skills_dir):
+        dirs[:] = [d for d in dirs if d not in EXCLUDED_SKILL_DIRS]
+        if filename in files:
+            matches.append(Path(root) / filename)
+    return sorted(matches, key=lambda p: str(p.relative_to(skills_dir)))
+
+
+# ── 实例注册 ──────────────────────────────────────────────────────────────
+
+
+def get_instance_registered_skills(instance_id: str | None = None) -> list[str]:
+    """读取 app.yaml 的 skills 字段，返回实例注册的 skill 名称列表。"""
+    from infrastructure.config import (
+        get_instance_app_config_path,
+        get_app_instance_id,
+        get_global_config_dir,
+    )
+
+    uuid = get_app_instance_id(instance_id)
+    app_yaml = get_instance_app_config_path(uuid)
+
+    if app_yaml.exists():
+        try:
+            cfg = yaml.safe_load(app_yaml.read_text(encoding="utf-8")) or {}
+            skills = cfg.get("skills")
+            if isinstance(skills, list):
+                return [str(s).strip() for s in skills if str(s).strip()]
+        except Exception as e:
+            logger.warning("Failed to load skills from %s: %s", app_yaml, e)
+
+    return []
+
+
+# ── Skill 索引渲染（供 system prompt） ────────────────────────────────────
+
+
+def load_skill_metadata(skill_name: str, instance_id: str | None = None) -> dict[str, Any] | None:
+    """加载指定 skill 的 frontmatter。
+
+    查找顺序：实例 skills/ → 系统 skills/。
+    找不到或 platform 不兼容返回 None。
+    """
+    from infrastructure.config import get_app_instance_id
+
+    uuid = get_app_instance_id(instance_id)
+    instance_dir = get_instance_skills_dir(uuid)
+    system_dir = get_system_skills_dir()
+
+    # 实例优先
+    for base in [instance_dir, system_dir]:
+        skill_dir = base / skill_name
+        skill_file = skill_dir / "SKILL.md"
+        if skill_file.exists():
+            try:
+                content = skill_file.read_text(encoding="utf-8")
+                fm, _ = parse_frontmatter(content)
+                if not skill_matches_platform(fm):
+                    return None
+                return fm
+            except Exception as e:
+                logger.debug("Failed to load skill %s from %s: %s", skill_name, skill_file, e)
+    return None
+
+
+def render_skill_index(instance_id: str | None = None) -> str:
+    """渲染已注册 skill 的索引段落（供 system prompt 注入）。
+
+    返回 markdown 格式的技能列表，或空字符串（无注册 skill）。
+    """
+    registered = get_instance_registered_skills(instance_id)
+    if not registered:
+        return ""
+
+    items = []
+    for name in sorted(registered):
+        meta = load_skill_metadata(name, instance_id)
+        if meta is None:
+            # skill 不存在或 platform 不兼容，跳过
+            continue
+        desc = meta.get("description", "")
+        if desc:
+            items.append(f"- `{name}`：{desc}")
+
+    if not items:
+        return ""
+
+    skill_index = "\n".join([
+        "**技能**（需要时调 `skill_view(name)` 查看完整说明）：",
+        *items,
+    ])
+    return skill_index

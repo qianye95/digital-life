@@ -1,0 +1,1998 @@
+"""行动工具集 (Actions) — Agent 对外部世界与自我状态施加影响。
+
+工具分类：
+  通信类：
+    - express_to_human: 发送消息给用户（飞书 API 直连）
+    - rest: 进入休息（设置 WaitIntent + 闹钟 + BLOCKED 状态）
+
+  记忆类：
+    - record_thought: 留思绪（意识残留，穿越睡眠保持连续性）
+    - write_diary: 写日记
+    - remember_him: 记录关于用户的观察
+    - update_scratchpad: 更新草稿本（append/replace）
+    - add_lesson: 记录经验教训
+    - update_self_knowledge: 更新自我认知档案
+
+  管理类：
+    - manage_work: 工作看板 CRUD
+    - manage_goals: 目标管理
+    - manage_plan: 长期计划里程碑
+    - manage_daily: 每日计划
+    - update_rules: 长期行为规则
+    - update_context: 交接上下文
+
+express_to_human 发送拦截：
+  调用前会经过 communication.check_before_send() 检查是否有未读消息。
+  如果被拦截 → 返回完整消息上下文，让模型看到新消息后重新决定回复内容。
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any, Dict
+
+logger = logging.getLogger("tools.action_tools")
+
+# 注：旧 _schedule_hint_shown_sessions cache 已随 schedule_check 删除（rest 新语义不再用）
+
+from domain.vital.simulation import (
+    ENERGY_COST_PER_CALL,
+    get_engine,
+)
+from datetime import timedelta, datetime
+import domain.vital as vitals
+from domain.memory.memory.consciousness.runtime import (
+    record_thought as _record,
+    write_diary as _diary,
+    write_about_him as _him,
+    update_scratchpad as _scratchpad,
+    add_work_item as _add_work,
+    start_work_item as _start_work,
+    complete_work_item as _complete_work,
+    remove_work_item as _remove_work,
+    manage_goal as _manage_goal,
+    manage_plan_item as _manage_plan,
+    plan_daily as _plan_daily,
+    add_planned_item as _add_daily,
+    complete_planned_item as _complete_daily,
+    check_daily as _check_daily,
+    update_rules as _update_rules,
+    update_context as _update_context,
+    add_lesson as _add_lesson,
+    update_self_knowledge as _update_self_knowledge,
+)
+
+from interfaces.tools.registry import registry
+
+
+_BLOCK_SENTINEL = "__l4_block__"
+
+
+def _j(obj: Any) -> str:
+    return json.dumps(obj, ensure_ascii=False, default=str)
+
+
+def _resolve_chat_id(short_or_full: str) -> str:
+    """通用短码→完整 ID 补全。模型传 chat_id 时可能给的是 prompt 里的短码
+    (oc_5ff7967bf5… / ou_eb5083…)，本函数负责还原成完整 ID 给飞书 API。
+
+    对 oc_(群) 和 ou_(私聊 open_id) 一视同仁——补全是通用机制，不分通道。
+    匹配策略（依次尝试）：
+      1) 已是完整 ID（>= 32 字符）→ 透传
+      2) 当前实例的 reply context（group/dm 上下文）反查前缀匹配
+      3) 全局 reply context 变量反查
+      4) contacts DB：遍历 platform_ids 找前缀匹配（覆盖 ou_ 私聊）
+    失败 → 返回原值，让飞书报 invalid receive_id，便于排查。
+    """
+    if not short_or_full:
+        return ""
+    candidate = short_or_full.strip()
+    if len(candidate) >= 32:
+        return candidate
+    needle = candidate.rstrip("…")
+    if not needle:
+        return candidate
+
+    # (2) 当前实例 reply context
+    iid = _get_instance_id_for_context()
+    for full_chat in (_REPLY_CONTEXT.get(iid) or {}).values():
+        if full_chat and full_chat.startswith(needle):
+            return full_chat
+    # (3) 全局 reply context 变量
+    global _DM_REPLY_CHAT_ID, _GROUP_REPLY_CHAT_ID
+    for full_chat in [_DM_REPLY_CHAT_ID or "", _GROUP_REPLY_CHAT_ID or ""]:
+        if full_chat and full_chat.startswith(needle):
+            return full_chat
+    # (4) contacts DB：ou_/oc_ 通用前缀匹配（私聊补全从此覆盖）
+    try:
+        from domain.contacts import list_contacts
+        for c in list_contacts() or []:
+            for p in (c.get("platform_ids") or []):
+                if p.get("platform") == "feishu":
+                    pid = (p.get("platform_id") or "").strip()
+                    if pid.startswith(needle):
+                        return pid
+    except Exception as exc:
+        logger.debug("chat_id resolve via contacts failed: %s", exc)
+    return candidate  # 无法解析，按原值由飞书报错提示
+
+
+def _feishu_receive_id_type(receive_id: str) -> str:
+    """按 ID 前缀识别飞书 receive_id_type。
+
+    飞书 ID 规范：
+      ou_  → open_id
+      oc_  → chat_id（群/单聊 chat 都用这个）
+      on_  → union_id
+      其他 → 默认 open_id（最宽松假设）
+    """
+    if not receive_id:
+        return "open_id"
+    if receive_id.startswith("ou_"):
+        return "open_id"
+    if receive_id.startswith("oc_"):
+        return "chat_id"
+    if receive_id.startswith("on_"):
+        return "union_id"
+    return "open_id"
+
+
+def _explain_feishu_send_failure(resp: dict, channel: str, receive_id: str) -> str:
+    """把飞书 IM 消息发送的错误返回翻译成模型可 actionable 的诊断。
+
+    飞书的 msg 是面向开发者的（如 "invalid receive_id"），模型读不出根因，
+    会不断切换 chat_id / kind 重试也救不回来。这里按 code/msg 关键词给出
+    下一步建议：换 chat / 用其他 chat_id / 沉默退出 / 等接口恢复。
+    """
+    code = resp.get("code")
+    msg = resp.get("msg") or ""
+    raw = f"feishu code={code}, msg={msg}"
+
+    # code 230002: chat not exist / bot not in chat
+    # 关键词 "invalid receive_id" 历史上=bot 不在该群/chat_id 失效
+    if code in (230002, 230009) or "invalid receive_id" in msg.lower():
+        return (
+            f"{raw} | 我（这个 bot）不在 chat_id={receive_id[:16]}… 里，"
+            "或该 chat 已失效。请改用 sense_conversation 查看我真实在的 chat，"
+            "别再用当前 channel。"
+        )
+    # code 99991663 / 99991668 等 token/permission 类
+    if code and 99991000 <= code <= 99992000:
+        return (
+            f"{raw} | 飞书 token/权限临时异常，短期重试或暂不发送；"
+            "如需静默可调 rest()。"
+        )
+    # code 11200 系列：消息被审计/风控
+    if code and 11200 <= code <= 11299:
+        return (
+            f"{raw} | 消息触发了飞书内容合规策略。检查 text 是否含敏感词或过长。"
+        )
+    # 兜底
+    return raw
+
+
+# ──────────────────────────────── express_to_human ────────────────────────────────
+
+# 全局变量：存储群聊回复上下文（备用）
+# 多实例隔离的回复上下文：每个 instance 维护自己的 group/dm chat_id
+_REPLY_CONTEXT: dict[str, dict[str, str]] = {}  # instance_id -> {group: ..., dm: ...}
+
+_GROUP_REPLY_CHAT_ID = None
+_DM_REPLY_CHAT_ID = None
+
+
+def _get_instance_id_for_context() -> str:
+    try:
+        from infrastructure.config import get_app_instance_id
+        return get_app_instance_id() or "_default"
+    except Exception:
+        return "_default"
+
+
+def set_group_reply_context(chat_id: str) -> None:
+    """设置群聊回复上下文（由 wake_digital_life 调用）。"""
+    global _GROUP_REPLY_CHAT_ID
+    _GROUP_REPLY_CHAT_ID = chat_id
+    iid = _get_instance_id_for_context()
+    _REPLY_CONTEXT.setdefault(iid, {})["group"] = chat_id
+    logger.info("set_group_reply_context: instance=%s chat_id=%s", iid[:8], chat_id)
+
+
+def set_dm_reply_context(chat_id: str) -> None:
+    """设置私聊回复上下文（飞书 _route_to_life 调用）。"""
+    global _DM_REPLY_CHAT_ID
+    _DM_REPLY_CHAT_ID = chat_id
+    iid = _get_instance_id_for_context()
+    _REPLY_CONTEXT.setdefault(iid, {})["dm"] = chat_id
+    logger.info("set_dm_reply_context: instance=%s chat_id=%s", iid[:8], chat_id)
+
+
+def _get_group_reply_chat_id() -> str:
+    iid = _get_instance_id_for_context()
+    return (_REPLY_CONTEXT.get(iid) or {}).get("group") or _GROUP_REPLY_CHAT_ID
+
+
+def _get_dm_reply_chat_id() -> str:
+    iid = _get_instance_id_for_context()
+    return (_REPLY_CONTEXT.get(iid) or {}).get("dm") or _DM_REPLY_CHAT_ID
+
+
+def _get_recent_group_chat_id() -> Optional[str]:
+    """从数据库获取最近未消费的群消息 chat_id。"""
+    try:
+        import sqlite3
+        from infrastructure.config import get_runtime_state_db_path
+        db_path = get_runtime_state_db_path()
+        if not db_path.exists():
+            return None
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        # 查找最近 5 分钟内未消费的群消息
+        # 五分钟窗口检查未读 group_message。created_at 现为 UTC ISO，
+        # 比较右值也用 UTC ISO（clock.now_iso - 5min）保证字典序正确。
+        from domain.lifecycle import clock as _clock
+        from datetime import timedelta as _td
+        _since = (_clock.now_dt() - _td(minutes=5)).isoformat(timespec="seconds")
+        row = conn.execute(
+            "SELECT payload FROM events WHERE kind='group_message' "
+            "AND consumed_at IS NULL "
+            "AND created_at > ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (_since,),
+        ).fetchone()
+        conn.close()
+        if row:
+            import json
+            payload = json.loads(row["payload"])
+            return payload.get("chat_id", "")
+    except Exception as e:
+        logger.debug("Failed to get group chat_id: %s", e)
+    return None
+
+
+
+def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
+    """向用户发送消息 — 数字生命唯一的对外表达通道。
+
+    发送流程：
+      1. 发送前拦截（communication.check_before_send）— 检查未读消息
+      2. Channel 解析 — 群聊/私聊上下文 → 飞书 chat_id
+      3. 飞书 API 直连发送（获取 tenant_access_token → POST 消息）
+      4. 发送成功 → 记录到 SENT_LOG + 设置 awaiting_reply 闹钟
+      5. 精力消耗（ENERGY_COST_PER_CALL）
+
+    Channel 解析优先级：群聊上下文 > 私聊上下文 > 当前事件 chat
+    """
+    logger.info("express_to_human CALLED: text=%s, channel=%s, chat_id=%s, mentions=%s",
+                args.get("text", "")[:50], args.get("channel", ""), args.get("chat_id", ""),
+                args.get("mention_user_ids", []))
+    # 显式 import os（函数顶部）；之前在 try 内 import, line 465 提前调 os.getenv 触发
+    # UnboundLocalError。把 import 移到这里，所有 os 用法都被绑定。
+    import os
+    text = (args.get("text") or "").strip()
+    channel = (args.get("channel") or "").strip()
+    chat_id_arg = (args.get("chat_id") or "").strip()
+    wait_minutes = int(args.get("wait_minutes", 5))
+    wait_minutes = max(0, min(wait_minutes, 15))  # clamp to [0, 15], 0 = don't create awaiting_reply
+    # mention_user_ids：模型可在消息里 @ 其他 user/bot（飞书群聊场景）
+    raw_mentions = args.get("mention_user_ids") or []
+    if isinstance(raw_mentions, str):
+        raw_mentions = [raw_mentions]
+    mention_user_ids: list[str] = []
+    invalid_mentions: list[str] = []
+    for m in raw_mentions:
+        ms = str(m or "").strip()
+        if not ms.startswith("ou_"):
+            continue
+        # 校验 ou 在 contacts 表里 — 模型可能 hallucinate 不存在的 ou_xxx
+        # （飞书会渲染 "@" 没有名字 = raw "@" 残留）
+        try:
+            from domain.contacts import lookup_name
+            if lookup_name("feishu", ms):
+                mention_user_ids.append(ms)
+            else:
+                invalid_mentions.append(ms)
+                logger.warning("mention_user_ids 含未注册的 ou_%s，跳过", ms[:16])
+        except Exception:
+            mention_user_ids.append(ms)  # 查询失败 fallback：保留原值
+
+    # 自动 @ 转换：扫 text 里的 "@<displayName>"，按 contacts 表里 kind=human/bot
+    # 的 contact name 匹配 → 替换为 <at user_id="ou_xxx"></at> 标签
+    # 模型只需要在 text 里写"@zero 看看这个"，不用记 open_id 也能命中
+    try:
+        from domain.contacts import list_contacts
+        from infrastructure.config import get_instance_display_name
+        my_display = (get_instance_display_name() or "").strip().lower()
+        all_contacts = list_contacts() or []
+        # 按 name 长度倒序匹配，避免"@小张"被"@张"先命中
+        named = sorted(
+            [c for c in all_contacts if (c.get("name") or "").strip()],
+            key=lambda c: len(c["name"]),
+            reverse=True,
+        )
+        for c in named:
+            cname = c["name"]
+            # @name 形式（带 @ 前缀，更明确）
+            mention_target = f"@{cname}"
+            if mention_target not in text:
+                continue
+            # 跳过自己（不让 bot @ 自己 — 会自循环）
+            if cname.lower() == my_display:
+                continue
+            # 找平台 ID（暂只支持 feishu）
+            feishu_ids = [p["platform_id"] for p in (c.get("platform_ids") or [])
+                          if p.get("platform") == "feishu" and (p.get("platform_id") or "").startswith("ou_")]
+            if not feishu_ids:
+                continue
+            ou = feishu_ids[0]
+            at_tag = f'<at user_id="{ou}"></at>'
+            text = text.replace(mention_target, at_tag)
+            if ou not in mention_user_ids:
+                mention_user_ids.append(ou)
+            logger.info("auto-mention: replaced @%s → %s", cname, ou[:12])
+    except Exception as exc:
+        logger.debug("auto-mention scan failed: %s", exc)
+
+    if not text:
+        return registry.tool_error("text is required")
+
+    # ─── chat_id vs channel 解析（模型自主决策回复目标）──────────
+    # 模型可在 chat_id（飞书 oc_xxx）或 channel（"lark:group:oc_xxx" / "lark:dm:oc_xxx"）二选一：
+    #   - 显式 chat_id → 内部转 channel（按 wake_reason 推 kind）
+    #   - 显式 channel → 直接用
+    #   - 都不给 → fallback current_event_chat_id → reply context → env
+    # 不再强制覆盖模型意图（移除原 is_group_wake force channel 逻辑）
+
+    # 补全是通用机制：channel 形式里嵌入的短码 ID 也要补全（之前只有 chat_id 参数走补全，
+    # 模型写 lark:dm:ou_eb5083… 时短码会被原样发给飞书触发 invalid receive_id）。
+    # 形如 lark:<kind>:<id> → 取 <id> 过 _resolve_chat_id，重组回去。
+    if channel.startswith("lark:") and channel.count(":") >= 2:
+        _parts = channel.split(":", 2)
+        _prefix, _id = f"lark:{_parts[1]}:", _parts[2].strip()
+        if _id:
+            channel = _prefix + _resolve_chat_id(_id)
+
+    if chat_id_arg:
+        # 模型可能传 prompt 显示的短码（如 oc_5ff7967bf5…），还原为完整 ID
+        chat_id_arg = _resolve_chat_id(chat_id_arg)
+        try:
+            from domain.lifecycle.runtime_context import get_current_wake_reason
+            wr = get_current_wake_reason()
+        except Exception:
+            wr = ""
+        explicit_kind = (args.get("kind") or "").strip().lower()
+        if explicit_kind in ("group", "dm"):
+            kind_str = explicit_kind
+        elif wr == "group_message":
+            kind_str = "group"
+        else:
+            kind_str = "dm"
+        channel = f"lark:{kind_str}:{chat_id_arg}"
+    elif not channel:
+        # 都没给 → fallback current_event_chat_id（wake 时 set 的"当前事件来源"）
+        try:
+            from domain.lifecycle.runtime_context import get_current_event_chat_id
+            curr_chat = get_current_event_chat_id()
+        except Exception:
+            curr_chat = ""
+        if curr_chat:
+            try:
+                from domain.lifecycle.runtime_context import get_current_wake_reason
+                wr = get_current_wake_reason()
+            except Exception:
+                wr = ""
+            # 显式 kind=dm + 用 fallback chat：如果 fallback chat 是 oc_ 开头
+            # （群 chat_id，不是真实 ou_ open_id），不能伪装成 dm 发——飞书会拒。
+            # 这种 case 给模型明确错误，避免"被 dm 套前缀后 sanitize 又改回 group"
+            # 的来回拼装陷阱。
+            explicit_kind_fb = (args.get("kind") or "").strip().lower()
+            if explicit_kind_fb == "dm" and curr_chat.startswith("oc_"):
+                return _j({
+                    "sent": False,
+                    "channel": "",
+                    "text": text,
+                    "error": (
+                        "你显式要求 kind=dm，但当前 wake 没有 DM 上下文（current_event_chat_id 是 group chat "
+                        f"{curr_chat[:16]}…）。要么去掉 kind 让系统按 wake 上下文发，要么显式 chat_id=ou_xxx。"
+                    ),
+                })
+            kind_str = "group" if (curr_chat.startswith("oc_") or wr == "group_message") else "dm"
+            channel = f"lark:{kind_str}:{curr_chat}"
+        else:
+            channel = "lark:default"
+    # 模型给出 channel 直接保留，比如 "lark:group:oc_xxx" 或 "lark:dm:ou_xxx" 即可
+
+    # 发送前上下文检查：mid-session 新消息 / 主动发言历史回顾
+    session_id = str(context.get("session_id") or "")
+    try:
+        from domain.lifecycle.communication import check_before_send
+        block = check_before_send(text, session_id=session_id)
+        if block:
+            return _j(block)
+    except Exception:
+        pass
+
+    # 如果有群聊回复上下文（仅作为 initiative wake 时的兜底）
+    global _GROUP_REPLY_CHAT_ID
+    group_chat_id = _get_group_reply_chat_id() or _get_recent_group_chat_id()
+
+    # 注意：移除了"is_group_wake force channel"自动覆盖逻辑。
+    # 现在 channel/chat_id 已在前面解析完成，模型自主决策回复目标。
+    # 仅当 channel 仍是默认值时（initiative / 模型未指定）才用 group context 兜底。
+    if group_chat_id and channel in ("lark:default", "feishu:default"):
+        channel = f"lark:group:{group_chat_id}"
+        logger.info("express_to_human: initiative fallback → group context, channel=%s", channel)
+
+    # 没有显式目标时，退化到当前 wake 的回复上下文（DM/group），仍找不到就显式失败。
+    # 故意不再走全局 HOME_CHANNEL/FEISHU_FALLBACK 兜底——那个值跨实例串味（alpha 会用 zero 的
+    # chat 撞 cross app）。让模型自己填 chat_id，上下文负责补全；查不到就提示用 sense_contacts。
+    if channel in ("lark:default", "feishu:default"):
+        _dm = _get_dm_reply_chat_id()
+        _grp = _get_group_reply_chat_id()
+        if _dm:
+            channel = f"lark:{_dm}"
+        elif _grp:
+            channel = f"lark:{_grp}"
+        else:
+            return _j({
+                "sent": False,
+                "channel": "lark:default",
+                "text": text,
+                "error": (
+                    "你没有指定发给谁（chat_id 必填），且这次唤醒也没有回复上下文（比如 timer/vital/initiative）。"
+                    "请用 sense_contacts 查看你的联系人和群，拿到 oc_xxx(群)/ou_xxx(私聊) 后，"
+                    "再调 express_to_human(text, chat_id='oc_xxx') 显式指定目标。"
+                ),
+            })
+
+    # Send via feishu direct API (primary path)
+    sent = False
+    err = None
+    # 私聊路径的默认目标：仅用当前实例自己的回复上下文（DM/group），不读全局 FEISHU_FALLBACK。
+    # 全局值跨实例串味（alpha 会拿 zero 的 chat 撞 cross app）。找不到时留空，
+    # 由闭包内的 DM 分支按 channel 显式失败（提示模型用 sense_contacts 查 ID）。
+    FEISHU_CHAT_ID = _get_dm_reply_chat_id() or _get_group_reply_chat_id()
+    try:
+        import httpx
+        import os
+
+        # 优先从 apps/{instance_id}/config/app.yaml 读 messenger 凭证
+        # 多实例共享进程时 env 是 Zero 启动时填的，Alpha 不能复用
+        app_id = ""
+        app_secret = ""
+        try:
+            from pathlib import Path as _P
+            import yaml as _yaml
+            from infrastructure.config import get_project_root, get_app_instance_id
+            iid = get_app_instance_id()
+            if iid:
+                cfg_path = get_project_root() / "apps" / iid / "config" / "app.yaml"
+                if cfg_path.exists():
+                    cfg = _yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+                    app_id = ((cfg.get("messenger") or {}).get("app_id") or "").strip()
+                    # app_secret 优先从实例 config/secrets.env 读取（已 load_runtime_dotenv 加载到 env）
+                    app_secret = os.getenv("FEISHU_APP_SECRET") or ""
+        except Exception:
+            pass
+        # 兜底 env
+        if not app_id:
+            app_id = os.getenv("FEISHU_APP_ID") or os.getenv("LARK_APP_ID") or ""
+        if not app_secret:
+            app_secret = os.getenv("FEISHU_APP_SECRET") or os.getenv("LARK_APP_SECRET") or ""
+        if app_id and app_secret:
+            logger.info("express_to_human: using feishu credentials app_id=%s (instance=%s)",
+                        app_id[:12], _get_instance_id_for_context()[:8])
+            _token_url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+            _msg_url = "https://open.feishu.cn/open-apis/im/v1/messages"
+
+            # Outer-scope state shared with _send_feishu_direct — values needed
+            # after run_async returns for the fan-out path. Closure-internal
+            # assignment pattern (without ``nonlocal``) used to silently fail
+            # NameError when fan-out code read them.
+            target_chat = ""
+            routed_id = ""
+            send_text = text
+
+            async def _send_feishu_direct():
+                # routed_id 在 DM 分支赋值，group 分支读不到会 UnboundLocalError —— 在
+                # group 分支失败时 _explain_feishu_send_failure 读 routed_id 就会炸
+                # （单测 hit 不到这条路径）。一并加入 nonlocal。
+                nonlocal target_chat, send_text, channel, routed_id
+                async with httpx.AsyncClient(timeout=30) as c:
+                    tr = await c.post(_token_url, json={"app_id": app_id, "app_secret": app_secret})
+                    token = tr.json().get("tenant_access_token", "")
+                    if not token:
+                        return False, "failed to get token"
+                    # 由 channel 决定发送目标：
+                    #   - lark:group:<chat_id> 或 lark:<group_chat_id>（_GROUP_REPLY_CHAT_ID 命中）→ 群聊
+                    #   - lark:dm:<open_id (ou_)>                            → 私聊（按 open_id）
+                    #   - lark:dm:<chat_id (oc_)>    ← 模型经常误写 dm 前缀但 target 是群 chat_id
+                    #                                  → 重写成 group 路径，按 chat_id 发到群
+                    #   - lark:<chat_id (oc_)>                                → 群聊（按 chat_id 直发）
+                    #   - 兜底：FEISHU_ALLOWED_USERS 第一个 open_id            → 私聊
+                    is_group_channel = (
+                        channel.startswith("lark:group:")
+                        or (_get_group_reply_chat_id() and channel.startswith(f"lark:{_get_group_reply_chat_id()}"))
+                    )
+                    # Backwards-compat: model sometimes writes "lark:dm:oc_xxx" — read DM prefix
+                    # but the id is actually a group chat_id (oc_). Detect and rewrite to group.
+                    if not is_group_channel and channel.startswith("lark:dm:"):
+                        tail = channel.split("lark:dm:", 1)[1].strip()
+                        if tail.startswith("oc_"):
+                            channel = f"lark:group:{tail}"
+                            is_group_channel = True
+                    if is_group_channel:
+                        # 群聊路径：从 channel 解析 group chat_id，不用 FEISHU_CHAT_ID
+                        # （那个可能被 DM context 污染）
+                        if channel.startswith("lark:group:"):
+                            target_chat = channel.split("lark:group:", 1)[1].strip()
+                        else:
+                            target_chat = _get_group_reply_chat_id()
+                        # mention_user_ids：默认 prepend 到 text 前；
+                        # 但若 text 里已经含 <at user_id="ou_xxx"></at> 标签，
+                        # 跳过那些 ou_（auto-mention 已经替换过，避免重复）
+                        ats_already_in_text = set()
+                        import re as _re_at
+                        for m_ou in _re_at.findall(
+                            r'<at user_id="(ou_[a-zA-Z0-9_-]+)"></at>', send_text if 'send_text' in dir() else text
+                        ):
+                            ats_already_in_text.add(m_ou)
+                        prepend_ids = [ou for ou in mention_user_ids if ou not in ats_already_in_text]
+                        if prepend_ids:
+                            mention_prefix = " ".join(
+                                f'<at user_id="{ou}"></at>' for ou in prepend_ids
+                            ) + " "
+                            send_text = mention_prefix + text
+                        else:
+                            send_text = text
+                        content_payload: dict = {"text": send_text}
+                        if mention_user_ids:
+                            content_payload["mentioned_list"] = mention_user_ids
+                        msg_resp = await c.post(
+                            _msg_url,
+                            headers={"Authorization": f"Bearer {token}"},
+                            params={"receive_id_type": "chat_id"},
+                            json={
+                                "receive_id": target_chat,
+                                "msg_type": "text",
+                                "content": json.dumps(content_payload),
+                            },
+                        )
+                    else:
+                        # 私聊路径：接受 open_id (ou_) 或 chat_id (oc_) 形式
+                        target_chat = FEISHU_CHAT_ID
+                        routed_id = ""
+                        if channel.startswith("lark:dm:"):
+                            routed_id = channel.split("lark:dm:", 1)[1].strip()
+                        elif target_chat:
+                            routed_id = target_chat
+                        # 找不到目标：直接失败，把根因和下一步交给模型。
+                        # 不再偷读全局 FEISHU_ALLOWED_USERS（跨实例串味）。
+                        if not routed_id:
+                            return False, (
+                                "私聊发送需要 ou_xxx(open_id) 或 oc_xxx(chat_id)，但你没填且无 DM 上下文。"
+                                "用 sense_contacts 查看联系人拿到 ou_xxx 后，"
+                                "调 express_to_human(text, chat_id='ou_xxx') 再发。"
+                            )
+                        routed_type = _feishu_receive_id_type(routed_id)
+                        # DM path: strip 私聊不支持的 <at> 标签，避免显示多余 "@"
+                        # 私聊本身是一对一，没必要 @ 谁。把 <at user_id=".."></at> 替换为 @<name> 或 删除
+                        dm_clean_text = text
+                        try:
+                            import re as _re_dm_at
+                            from domain.contacts import lookup_name
+                            def _strip_at(m):
+                                ou = m.group(1)
+                                n = lookup_name("feishu", ou)
+                                return f"@{n}" if n else ""  # 命中显示名字，否则删干净
+                            dm_clean_text = _re_dm_at.sub(
+                                r'<at user_id="(ou_[a-zA-Z0-9_-]+)"></at>', _strip_at, dm_clean_text
+                            )
+                        except Exception:
+                            pass
+
+                        msg_resp = await c.post(
+                            _msg_url,
+                            headers={"Authorization": f"Bearer {token}"},
+                            params={"receive_id_type": routed_type},
+                            json={
+                                "receive_id": routed_id,
+                                "msg_type": "text",
+                                "content": json.dumps({"text": dm_clean_text}),
+                            },
+                        )
+                    resp_data = msg_resp.json()
+                    if resp_data.get("code") == 0:
+                        return True, None
+                    # 把飞书面向开发者的错误翻译成模型可 actionable 的诊断
+                    # （否则模型只看到 "invalid receive_id" 不知道根因，会反复重试）。
+                    return False, _explain_feishu_send_failure(
+                        resp_data, channel, routed_id or target_chat
+                    )
+
+            from interfaces.tools.interrupt import is_interrupted
+            if not is_interrupted():
+                from interfaces.tools.async_utils import run_async
+                # 提前算好 group vs dm，与 _send_feishu_direct 内的 is_group_channel
+                # 完全一致（否则外层以为非 group，fan-out 不触发，sibling 收不到）。
+                _grp_ctx = _get_group_reply_chat_id() or ""
+                _is_group_send = (
+                    channel.startswith("lark:group:")
+                    or (bool(_grp_ctx) and channel.startswith(f"lark:{_grp_ctx}"))
+                )
+                result = run_async(_send_feishu_direct())
+                if isinstance(result, tuple) and result[0]:
+                    sent = True
+                    err = None
+                    logger.info("express_to_human: sent OK")
+                    # Fan-out 到群消息聚合库 + fan-out 给其他实例事件
+                    if _is_group_send:
+                        try:
+                            from domain.conversations import publish_chat_message
+                            from infrastructure.config import get_app_instance_id, get_instance_display_name
+                            sender_iid = get_app_instance_id() or ""
+                            sender_display = get_instance_display_name() or "Zero"
+                            # 原始 text（去掉 mention 前缀的部分，因为飞书已渲染）
+                            # 用 send_text 包含 <at> 标签，fan-out 不含 bother 标签
+                            from domain.contacts import lookup_name, any_id_is_bot
+                            import re as _re
+                            _at_pat = r'<at user_id="(ou_[a-zA-Z0-9_-]+)"></at>'
+                            plain_text = _re.sub(
+                                _at_pat,
+                                lambda m: f"@{lookup_name('feishu', m.group(1)) or '网友'}",
+                                send_text,
+                            )
+                            # 去重决策：正文若 @ 到了本群机器人（兄弟实例或第三方
+                            # bot），飞书会把消息单独推给被@的机器人——已送达。
+                            # 本侧再广播就是重复（receiver 收两遍）。提取全部被 @ 的
+                            # open_id，任一对应 kind=bot 联系人→本次不广播。
+                            _mentioned_ids = _re.findall(_at_pat, send_text)
+                            _skip_broadcast = bool(_mentioned_ids) and any_id_is_bot("feishu", _mentioned_ids)
+                            publish_chat_message(
+                                chat_id=target_chat,
+                                sender_id=sender_iid,
+                                sender_name=sender_display,
+                                text=plain_text,
+                                msg_id="",
+                                sender_kind="bot",
+                                broadcast=not _skip_broadcast,
+                            )
+                        except Exception as exc:
+                            # 升级到 warning 之前是 debug——历史上 fan_out 静默失败过
+                            # （sibling 没收到消息、模型误以为已通知）。
+                            logger.warning(
+                                "express_to_human: group fan-out failed: %s", exc,
+                                exc_info=True,
+                            )
+                elif isinstance(result, tuple):
+                    err = result[1] or "feishu direct send failed"
+                    logger.warning("express_to_human: send failed: %s", err)
+        else:
+            err = "no FEISHU_APP_ID/SECRET in env"
+            logger.warning("express_to_human: %s", err)
+    except Exception as e2:
+        err = f"feishu send error: {e2}"
+        logger.warning("express_to_human: send exception: %s", e2)
+
+    vitals.consume_energy(ENERGY_COST_PER_CALL)
+
+    # 发送成功 → 记录到对话日志 + 排队"等回复"事件
+    if sent:
+        try:
+            from domain.lifecycle.conversation_log import log_conversation
+            parts = channel.split(":")
+            platform = parts[0] if parts else "lark"
+            if len(parts) >= 3 and parts[1] == "group":
+                conv_id = parts[2]
+                chat_type = "group"
+            elif len(parts) >= 2:
+                conv_id = parts[1]
+                chat_type = "dm"
+            else:
+                conv_id = channel
+                chat_type = "dm"
+            # conversation_log 是 snippet 数据源，截 text 防止 prompt 膨胀
+            # out 也带 sender_name（实例的 display_name），让 chat_stream 渲染自然
+            # e.g. "Zero：xxx" 而不是 "你：xxx"
+            out_sender = ""
+            try:
+                from infrastructure.config import get_instance_display_name
+                out_sender = (get_instance_display_name() or "").strip()
+            except Exception:
+                pass
+            if not out_sender:
+                out_sender = "你"  # 退化兜底
+
+            # conversation_log 只存可读文本（不含 <at user_id="ou_xxx"></at>)
+            # 用 contacts 反查 mentioned open_id → @<name>；未命中的 ou 用 "用户短码"
+            log_text = text[:300]
+            try:
+                import re as _re_at_strip
+                from domain.contacts import lookup_name
+                def _replace_at_tag(m: _re_at_strip.Match) -> str:
+                    ou = m.group(1)
+                    n = lookup_name("feishu", ou)
+                    if n:
+                        return f"@{n}"
+                    short = ou[3:11] if len(ou) > 11 else ou
+                    return f"@用户{short}"
+                log_text = _re_at_strip.sub(r'<at user_id="(ou_[a-zA-Z0-9_-]+)"></at>', _replace_at_tag, log_text)
+            except Exception:
+                pass
+
+            log_conversation(
+                platform=platform,
+                conversation_id=conv_id,
+                chat_type=chat_type,
+                direction="out",
+                text=log_text,
+                sender_name=out_sender,
+            )
+        except Exception:
+            pass
+        try:
+            from domain.lifecycle.runtime_context import set_current_conversation_id
+            set_current_conversation_id(channel.split(":")[-1] if ":" in channel else channel)
+        except Exception:
+            pass
+        try:
+            if wait_minutes > 0:
+                from domain.lifecycle.alarms import cancel_alarms_by_filter, set_alarm
+                from domain.lifecycle import clock as _clock
+                # 同通道精确清旧闹钟：发到群 A 时只清群 A 的 awaiting_reply，
+                # 保留群 B 等待（之前用 cancel_alarms_by_kind 会全局清，跨通道误取消）
+                cancel_alarms_by_filter(
+                    "awaiting_reply",
+                    payload_filter={"channel": channel},
+                )
+                set_alarm(
+                    event_kind="awaiting_reply",
+                    fire_at=(_clock.now_dt() + timedelta(minutes=wait_minutes)).isoformat(timespec="seconds"),
+                    payload={
+                        "last_sent_text": text[:200],
+                        "channel": channel,
+                        "hint": "或许该去做自己的事了？看看计划或笔记里有没有想继续的。",
+                    },
+                )
+        except Exception:
+            pass  # non-fatal
+
+    try:
+        from domain.todos import record_session_human_reply
+
+        record_session_human_reply(
+            context.get("session_id"),
+            sent=sent,
+            text=text,
+            channel=channel,
+            error=err,
+        )
+    except Exception:
+        pass
+
+    if sent:
+        note = f"已送达（channel={channel}）。"
+    else:
+        note = f"未送达（channel={channel}, error={err}）。"
+    note += " 沉默是你的默认状态 — 没必要每件事都发言。"
+
+    return _j({
+        "sent": sent,
+        "channel": channel,
+        "text_length": len(text),
+        "error": err,
+        "note": note,
+    })
+
+
+registry.register(
+    name="express_to_human",
+    toolset="actions",
+    schema={
+        "name": "express_to_human",
+        "description": (
+            "向人类用户表达——可以是回应、分享、求助、状态同步或关心。"
+            "这是'表达'，不是'回复'——你有权选择说什么、何时说、对谁说。\n\n"
+            "参数：\n"
+            "- text: 必填。要说的话。\n"
+            "- chat_id: 飞书对话 ID（oc_xxx）。**留空 = 回复当前事件来源 chat**。"
+            "可在一个 turn 内多次调用、指定不同 chat_id 实现多目标广播/转告。\n"
+            "- kind: 'group' 或 'dm'。**默认按当前 wake 推断**，仅在你需要跨类型（如把私聊内容转告到群里）时显式指定。\n\n"
+            "你不需要每次都回复。可以沉默做事、可以用工具后再表达、可以等到信息齐全再统一同步。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "要说的话"},
+                "chat_id": {
+                    "type": "string",
+                    "description": (
+                        "目标对话 ID（飞书 oc_xxx）。"
+                        "留空 = 回复当前事件来源 chat。"
+                        "用于跨对话通知、转告、多目标广播。"
+                    ),
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["group", "dm"],
+                    "description": "对话类型。留空时按 wake_reason 推断（group_message→group，否则 dm）。",
+                },
+                "channel": {
+                    "type": "string",
+                    "description": "（兼容）完整 channel 字符串如 'lark:group:oc_xxx'。优先级低于 chat_id。",
+                },
+                "mention_user_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "（可选）@ 的 user open_id 列表（ou_xxx）。"
+                        "用于群聊里主动 @ 其他用户或 bot。text 里不需要写 @xxx；"
+                        "系统会自动在消息前缀加 <at> 标签。"
+                        "另一简单用法：text 里直接写 '@displayName'（如 '@zero'），系统自动转 <at> 标签。"
+                    ),
+                },
+                "wait_minutes": {"type": "integer", "description": "等待回复时间，默认5分钟，最大15分钟", "default": 5},
+            },
+            "required": ["text"],
+        },
+    },
+    handler=_handle_express_to_human,
+    check_fn=lambda: True,
+    emoji="💬",
+)
+
+
+
+# ──────────────────────────────── write_diary ────────────────────────────────
+
+def _handle_write_diary(args: Dict[str, Any], **_) -> str:
+    text = (args.get("text") or "").strip()
+    if not text:
+        return registry.tool_error("text is required")
+
+    snap = vitals.consume_energy(ENERGY_COST_PER_CALL)
+    entities = args.get("entities")
+    if entities and isinstance(entities, list):
+        _diary(text, entities=entities)
+    else:
+        _diary(text)
+
+    return _j({
+        "ok": True,
+        "note": f"记在日记里，精力消耗 {ENERGY_COST_PER_CALL:.0f}",
+        "energy": round(snap.energy, 1),
+    })
+
+
+registry.register(
+    name="write_diary",
+    toolset="actions",
+    schema={
+        "name": "write_diary",
+        "description": "写日记。只给自己看，不会发给任何人。消耗精力。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "日记内容"},
+                "entities": {"type": "array", "items": {"type": "string"}, "description": "关联的实体"},
+            },
+            "required": ["text"],
+        },
+    },
+    handler=_handle_write_diary,
+    check_fn=lambda: True,
+    emoji="📔",
+)
+
+
+# ──────────────────────────────── record_thought ────────────────────────────────
+
+_THOUGHT_CALL_COUNT = 0
+_THOUGHT_MAX_PER_SESSION = 15
+
+
+def _handle_record_thought(args: Dict[str, Any], **_) -> str:
+    global _THOUGHT_CALL_COUNT
+    _THOUGHT_CALL_COUNT += 1
+    text = (args.get("text") or "").strip()
+    tag = (args.get("tag") or "").strip()
+    kind = (args.get("kind") or "status").strip().lower()
+    if not text:
+        return registry.tool_error("text is required")
+
+    # kind 归一化
+    valid_kinds = {"idea", "doubt", "block", "warning", "status"}
+    if kind not in valid_kinds:
+        kind = "status"
+
+    if kind != "status" and _THOUGHT_CALL_COUNT > _THOUGHT_MAX_PER_SESSION:
+        snap = vitals.get_current_vitals()
+        return _j({
+            "ok": False,
+            "note": (
+                f"本轮已记录 {_THOUGHT_CALL_COUNT} 次思绪，够了。"
+                f"精力 {snap.energy:.0f}。请现在决定：rest() 休息，或 express_to_human() 联系用户。"
+            ),
+            "energy": round(snap.energy, 1),
+            "calls_this_session": _THOUGHT_CALL_COUNT,
+        })
+
+    snap = vitals.consume_energy(ENERGY_COST_PER_CALL)
+    # kind 进入 tag（保持 tag 作为自由标签的可选性），同时同步到 INSIGHTS.md
+    effective_tag = tag if tag else kind
+    entities = args.get("entities")
+    if entities and isinstance(entities, list):
+        _record(text, tag=effective_tag, entities=entities)
+    else:
+        _record(text, tag=effective_tag)
+
+    # 非 status 的 kind 同步写 INSIGHTS.md，晚上 self_review 用 sense_insights 拾起来
+    if kind != "status":
+        try:
+            from domain.memory.memory.consciousness.runtime import append_insight
+            append_insight(kind=kind, text=text, tag=tag, entities=entities or [])
+        except Exception:
+            pass
+
+    remaining = _THOUGHT_MAX_PER_SESSION - _THOUGHT_CALL_COUNT
+    hint = ""
+    kind_hint = ""
+    if kind == "block":
+        kind_hint = " [block 已记入 INSIGHTS，今晚 self_review 会拾起来]"
+    elif kind == "doubt":
+        kind_hint = " [doubt 已记入 INSIGHTS，self_review 时必答]"
+    elif kind == "idea":
+        kind_hint = " [idea 已记入 INSIGHTS，self_review 时验证真伪]"
+    elif kind == "warning":
+        kind_hint = " [warning 已记入 INSIGHTS，明日 morning_plan 会回头提醒]"
+    if remaining <= 0:
+        hint = " 已达上限，现在请调用 rest(until=...) 或 rest(reuse=...) 进入休息。"
+    elif remaining <= 3:
+        hint = f" 还可记录{remaining}次，建议尽快调用 rest(until=...) 或 rest(reuse=...) 休息。"
+
+    return _j({
+        "ok": True,
+        "note": f"思绪已留下（kind={kind}），精力消耗 {ENERGY_COST_PER_CALL:.0f}。{kind_hint}{hint}",
+        "energy": round(snap.energy, 1),
+        "thoughts_remaining": remaining,
+        "kind": kind,
+    })
+
+
+registry.register(
+    name="record_thought",
+    toolset="actions",
+    schema={
+        "name": "record_thought",
+        "description": (
+            "留思绪给未来——既是穿越睡眠的连续性载体（kind=status），也是过程中随手捕捉的灵感/卡点/质疑（kind=idea/doubt/block/warning）。\n"
+            "退出前至少调一次 kind=status；遇到 insight 立刻调，不要等晚上。\n\n"
+            "kind 语义：\n"
+            "- status: 退出前留给睡醒的自己的当前状态/上下文/下一步。穿越睡眠。\n"
+            "- idea: 闪现的洞察或猜测（不一定对，记下来晚上自审）。\n"
+            "- doubt: 对当前做法/假设的质疑。\n"
+            "- block: 卡点——具体卡在哪、缺什么、可能解法。\n"
+            "- warning: 反复出现的模式或今天违反了某条规则——警觉信号。\n\n"
+            "非 status 类的 kind 会同步写入 INSIGHTS.md，晚上 self_review 用 sense_insights 拾起来。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "记的具体内容。一句话，不是流水账。"},
+                "kind": {
+                    "type": "string",
+                    "description": "思绪分类：status / idea / doubt / block / warning。默认 status。",
+                    "enum": ["status", "idea", "doubt", "block", "warning"],
+                },
+                "tag":  {"type": "string", "description": "可选标签——给 status 自由标签，其他 kind 已隐含 tag"},
+                "entities": {"type": "array", "items": {"type": "string"}, "description": "关联的实体，用于后续检索。如股票代码、工具名、概念名等"},
+            },
+            "required": ["text"],
+        },
+    },
+    handler=_handle_record_thought,
+    check_fn=lambda: True,
+    emoji="💭",
+)
+
+
+# ──────────────────────────────── remember_him ────────────────────────────────
+
+def _handle_remember_him(args: Dict[str, Any], **_) -> str:
+    text = (args.get("text") or "").strip()
+    if not text:
+        return registry.tool_error("text is required")
+    _him(text)
+    return _j({"ok": True, "note": "关于他的观察已记下。"})
+
+
+registry.register(
+    name="remember_him",
+    toolset="actions",
+    schema={
+        "name": "remember_him",
+        "description": "记录关于用户或重要联系人的观察：习惯、偏好、状态、重要信息。",
+        "parameters": {
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+        },
+    },
+    handler=_handle_remember_him,
+    check_fn=lambda: True,
+    emoji="🌸",
+)
+
+
+# ──────────────────────────────── update_scratchpad ────────────────────────────────
+
+def _handle_update_scratchpad(args: Dict[str, Any], **_) -> str:
+    text = (args.get("text") or "").strip()
+    mode = (args.get("mode") or "append").strip()
+    if not text:
+        return registry.tool_error("text is required")
+    if mode not in ("append", "replace"):
+        return registry.tool_error("mode must be 'append' or 'replace'")
+
+    snap = vitals.consume_energy(ENERGY_COST_PER_CALL)
+    _scratchpad(text, mode=mode)
+
+    return _j({
+        "ok": True,
+        "mode": mode,
+        "note": f"草稿本已更新（{mode}）",
+        "energy": round(snap.energy, 1),
+    })
+
+
+registry.register(
+    name="update_scratchpad",
+    toolset="actions",
+    schema={
+        "name": "update_scratchpad",
+        "description": (
+            "更新你的草稿本——记录你在研究什么、想做什么、最近对什么感兴趣。"
+            "mode='append' 追加一条，mode='replace' 整体替换。"
+            "没事干的时候翻翻草稿本，看看有没有想继续琢磨的事。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "内容"},
+                "mode": {"type": "string", "description": "append 或 replace", "enum": ["append", "replace"]},
+            },
+            "required": ["text"],
+        },
+    },
+    handler=_handle_update_scratchpad,
+    check_fn=lambda: True,
+    emoji="📋",
+)
+
+
+# ──────────────────────────────── manage_work (兼容别名) ────────────────────────────────
+
+def _handle_manage_work(args: Dict[str, Any], **_) -> str:
+    """已统一到 todo 工具，此为兼容入口。
+
+    add → todo(create), start → todo(start), complete → todo(done), remove → todo(cancel)
+    """
+    action = (args.get("action") or "add").strip().lower()
+    text = (args.get("text") or "").strip()
+    priority = (args.get("priority") or "中").strip()
+
+    snap = vitals.consume_energy(ENERGY_COST_PER_CALL)
+    energy = round(snap.energy, 1)
+
+    if action == "add":
+        if not text:
+            return registry.tool_error("text is required for add")
+        from domain.todos.crud import create_task
+        _prio_map = {"高": "high", "中": "medium", "低": "low"}
+        result = create_task(
+            title=text, description="", priority=_prio_map.get(priority, "medium"),
+            status="planned", source="manual",
+        )
+        return _j({"ok": result.get("ok", False), "action": "add", "text": text,
+                    "todo_id": result.get("task", {}).get("id", ""),
+                    "energy": energy,
+                    "_note": "此工具已统一为 todo(action='create')，请改用 todo"})
+
+    if not text:
+        return registry.tool_error("text (match keyword) is required for start/complete/remove")
+
+    from domain.todos.crud import list_tasks, update_task
+    matching = [t for t in list_tasks(status_filter="planned") + list_tasks(status_filter="in_progress")
+                if text in (t.get("title") or "") or text in (t.get("description") or "")]
+    if not matching:
+        return _j({"ok": False, "action": action, "text": text, "reason": "未找到匹配的待办",
+                    "energy": energy})
+
+    target = matching[0]
+    tid = target["id"]
+    _status_map = {"start": "in_progress", "complete": "done", "remove": "cancelled"}
+    ok = update_task(tid, status=_status_map.get(action, "")).get("ok", False)
+    _todo_action_map = {"start": "start", "complete": "done", "remove": "cancel"}
+    return _j({"ok": ok, "action": action, "text": text, "todo_id": tid,
+                "energy": energy,
+                "_note": f"此工具已统一为 todo(action='{_todo_action_map.get(action)}', todo_id=...)，请改用 todo"})
+
+
+registry.register(
+    name="manage_work",
+    toolset="actions",
+    schema={
+        "name": "manage_work",
+        "description": (
+            "[兼容] 待办看板操作。已统一为 todo 工具，推荐直接用 todo(action='create/list/get/update/start/done/cancel')。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "add | start | complete | remove",
+                    "enum": ["add", "start", "complete", "remove"],
+                },
+                "text": {"type": "string", "description": "待办内容或匹配关键字"},
+                "priority": {"type": "string", "description": "高/中/低，默认中"},
+                "source": {"type": "string", "description": "来源标记，默认用户"},
+            },
+            "required": ["action"],
+        },
+    },
+    handler=_handle_manage_work,
+    check_fn=lambda: True,
+    emoji="📝",
+)
+
+
+# ──────────────────────────────── manage_goals ────────────────────────────────
+
+def _handle_manage_goals(args: Dict[str, Any], **_) -> str:
+    action = (args.get("action") or "review").strip().lower()
+    text = (args.get("text") or "").strip()
+    description = (args.get("description") or "").strip()
+    priority = (args.get("priority") or "中").strip()
+
+    if action not in ("add", "complete", "abandon", "review"):
+        return registry.tool_error("action must be add/complete/abandon/review")
+
+    snap = vitals.consume_energy(ENERGY_COST_PER_CALL)
+    result = _manage_goal(action, text, description=description, priority=priority)
+    return _j({"ok": True, "result": result, "energy": round(snap.energy, 1)})
+
+
+registry.register(
+    name="manage_goals",
+    toolset="actions",
+    schema={
+        "name": "manage_goals",
+        "description": (
+            "管理你的目标列表。"
+            "action='add' 新增目标（text=目标名，可选 description 和 priority）；"
+            "action='review' 查看所有目标；"
+            "action='complete' 标记达成；action='abandon' 放弃目标。"
+            "发现新兴趣时设个目标，有大想法时拆成计划。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "add | review | complete | abandon",
+                    "enum": ["add", "review", "complete", "abandon"],
+                },
+                "text": {"type": "string", "description": "目标名称或匹配关键词"},
+                "description": {"type": "string", "description": "目标的详细说明（仅add时用）"},
+                "priority": {"type": "string", "description": "高/中/低，默认中"},
+            },
+            "required": ["action"],
+        },
+    },
+    handler=_handle_manage_goals,
+    check_fn=lambda: True,
+    emoji="🎯",
+)
+
+
+# ──────────────────────────────── manage_plan ────────────────────────────────
+
+def _handle_manage_plan(args: Dict[str, Any], **_) -> str:
+    action = (args.get("action") or "").strip().lower()
+    goal = (args.get("goal") or "").strip()
+    text = (args.get("text") or "").strip()
+
+    if action not in ("add_milestone", "complete_milestone", "remove_milestone"):
+        return registry.tool_error("action must be add_milestone/complete_milestone/remove_milestone")
+    if not goal or not text:
+        return registry.tool_error("goal and text are required")
+
+    snap = vitals.consume_energy(ENERGY_COST_PER_CALL)
+    result = _manage_plan(action, goal, text)
+    return _j({"ok": True, "result": result, "energy": round(snap.energy, 1)})
+
+
+registry.register(
+    name="manage_plan",
+    toolset="actions",
+    schema={
+        "name": "manage_plan",
+        "description": (
+            "管理长期计划的里程碑。每个目标可以拆成多个里程碑逐步完成。"
+            "action='add_milestone' 添加里程碑；"
+            "action='complete_milestone' 完成；action='remove_milestone' 删除。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "add_milestone | complete_milestone | remove_milestone",
+                    "enum": ["add_milestone", "complete_milestone", "remove_milestone"],
+                },
+                "goal": {"type": "string", "description": "关联的目标名称"},
+                "text": {"type": "string", "description": "里程碑描述"},
+            },
+            "required": ["action", "goal", "text"],
+        },
+    },
+    handler=_handle_manage_plan,
+    check_fn=lambda: True,
+    emoji="📐",
+)
+
+
+def _create_plan_item_alarms(text: str) -> list[dict]:
+    """解析 plan text 中的 HH:MM 时间项，给每个到点项注册一个 timer 闹钟。
+
+    产品语义: manage_daily plan 写的计划项应当走通用闹钟事件(timer),
+    不再独立成 daily_item 类型——timer 一律是"到点了告诉模型该做某事",
+    与来源(rest/timer/daily plan)无关。
+
+    修复: 创建前检查是否已有相同时间的闹钟,避免重复。
+    """
+    import re
+    from datetime import datetime, timedelta
+    from domain.lifecycle.alarms import set_alarm, list_pending_alarms
+    from domain.lifecycle import clock as _clock
+
+    created = []
+    # 北京作息：HH:MM 解析按北京日历；fire_at 写库时再 astimezone(UTC) 保证存储统一。
+    now_bj = _clock.beijing_now_dt()
+    today = now_bj.date()
+
+    # 查询现有未触发的闹钟，按 fire_at 分组
+    try:
+        pending_alarms = list_pending_alarms(kind=None)  # 不限制类型，查所有
+        existing_times = set()
+        for alarm in pending_alarms:
+            fire_at = alarm.get("fire_at", "")
+            if fire_at:
+                # 提取 HH:MM 部分（解析为 UTC 后转回北京小时数）
+                try:
+                    fire_dt = _clock.parse_iso(fire_at)
+                    existing_times.add(fire_dt.astimezone(_clock.BEIJING).strftime("%H:%M"))
+                except Exception:
+                    pass
+    except Exception as exc:
+        logger.warning("Failed to check existing alarms, proceeding without dedup: %s", exc)
+        existing_times = set()
+
+    for line in text.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = re.match(r"(\d{1,2}:\d{2})\s+(.+)", line)
+        if not m:
+            continue
+        time_str = m.group(1)
+        item_text = m.group(2).strip()
+
+        # 去重检查：如果该时间已有闹钟，跳过
+        if time_str in existing_times:
+            logger.info("Skipping duplicate alarm for %s: already exists", time_str)
+            continue
+
+        try:
+            h, m_min = map(int, time_str.split(":"))
+            fire_dt = now_bj.replace(hour=h, minute=m_min, second=0, microsecond=0)
+            # 如果时间已过今天，设到明天
+            if fire_dt <= now_bj:
+                fire_dt += timedelta(days=1)
+            alarm_id = set_alarm(
+                event_kind="timer",
+                fire_at=_clock.to_storage_iso(fire_dt),
+                # timer 类型的 payload 字段: reason(简短描述) + mental_context(留空,
+                # 让模型调 sense_event_detail 时只看 reason 一行) + source(来源标记)
+                payload={
+                    "reason": f"📋 {item_text}",
+                    "mental_context": "",
+                    "source": "manage_daily",
+                },
+            )
+            created.append({"time": time_str, "text": item_text, "alarm_id": alarm_id})
+            existing_times.add(time_str)  # 防止同一次调用中重复
+        except Exception as exc:
+            logger.debug("Failed to create plan-item timer for %s: %s", line, exc)
+
+    return created
+
+# ──────────────────────────────── manage_daily ────────────────────────────────
+
+def _handle_manage_daily(args: Dict[str, Any], **_) -> str:
+    action = (args.get("action") or "check").strip().lower()
+    text = (args.get("text") or "").strip()
+
+    if action == "plan":
+        if not text:
+            return registry.tool_error("text is required for plan（每行一个任务）")
+        snap = vitals.consume_energy(ENERGY_COST_PER_CALL)
+        result = _plan_daily(text)
+        # 为带 HH:MM 的任务项创建 timer 闹钟(到点提醒模型该做这件事)
+        timers = _create_plan_item_alarms(text)
+        timer_info = ""
+        if timers:
+            lines = [f"- {t['time']} → {t['text']}" for t in timers]
+            timer_info = f"\n已设定闹钟（{len(timers)}项）：\n" + "\n".join(lines)
+        return _j({"ok": True, "result": result + timer_info, "timers_created": len(timers), "energy": round(snap.energy, 1)})
+
+    if action == "add":
+        if not text:
+            return registry.tool_error("text is required for add")
+        snap = vitals.consume_energy(ENERGY_COST_PER_CALL)
+        _add_daily(text)
+        return _j({"ok": True, "result": "已添加到今日计划", "energy": round(snap.energy, 1)})
+
+    if action == "complete":
+        if not text:
+            return registry.tool_error("text is required for complete")
+        snap = vitals.consume_energy(ENERGY_COST_PER_CALL)
+        ok = _complete_daily(text)
+        return _j({"ok": ok, "result": "已完成" if ok else "没找到匹配的任务", "energy": round(snap.energy, 1)})
+
+    if action == "check":
+        result = _check_daily()
+        return _j({"ok": True, "result": result})
+
+    return registry.tool_error("action must be plan/add/complete/check")
+
+
+registry.register(
+    name="manage_daily",
+    toolset="actions",
+    schema={
+        "name": "manage_daily",
+        "description": (
+            "管理每日计划。"
+            "action='plan' 设定今天的计划（text 里每行一个任务）；"
+            "action='add' 往今天追加一条；"
+            "action='complete' 标记完成；action='check' 查看今天还剩什么。"
+            "每天醒来第一件事：规划今天要做什么。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "plan | add | complete | check",
+                    "enum": ["plan", "add", "complete", "check"],
+                },
+                "text": {"type": "string", "description": "任务描述（plan时每行一个）"},
+            },
+            "required": ["action"],
+        },
+    },
+    handler=_handle_manage_daily,
+    check_fn=lambda: True,
+    emoji="📅",
+)
+
+
+# ──────────────────────────────── update_rules ────────────────────────────────
+
+def _handle_update_rules(args: Dict[str, Any], **_) -> str:
+    text = (args.get("text") or "").strip()
+    mode = (args.get("mode") or "append").strip()
+    if not text:
+        return registry.tool_error("text is required")
+    if mode not in ("append", "replace"):
+        return registry.tool_error("mode must be 'append' or 'replace'")
+
+    snap = vitals.consume_energy(ENERGY_COST_PER_CALL)
+    entities = args.get("entities")
+    if entities and isinstance(entities, list):
+        _update_rules(text, mode=mode, entities=entities)
+    else:
+        _update_rules(text, mode=mode)
+
+    return _j({
+        "ok": True,
+        "mode": mode,
+        "note": f"行为规则已更新（{mode}）",
+        "energy": round(snap.energy, 1),
+    })
+
+
+registry.register(
+    name="update_rules",
+    toolset="actions",
+    schema={
+        "name": "update_rules",
+        "description": (
+            "更新长期行为规则。这些规则在每次唤醒时都会被注入，帮助你保持行为一致性。"
+            "每条规则应包含：什么场景下、应该怎么做、为什么、违反的后果。"
+            "mode='append' 追加一条，mode='replace' 整体替换。"
+            "用 evening_review 和 weekly_review 来积累规则，不要频繁改动。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "规则内容"},
+                "mode": {"type": "string", "description": "append 或 replace", "enum": ["append", "replace"]},
+                "entities": {"type": "array", "items": {"type": "string"}, "description": "关联的实体，用于后续检索"},
+            },
+            "required": ["text"],
+        },
+    },
+    handler=_handle_update_rules,
+    check_fn=lambda: True,
+    emoji="📜",
+)
+
+
+# ──────────────────────────────── update_context ────────────────────────────────
+
+def _handle_update_context(args: Dict[str, Any], **_) -> str:
+    text = (args.get("text") or "").strip()
+    if not text:
+        return registry.tool_error("text is required")
+
+    snap = vitals.consume_energy(ENERGY_COST_PER_CALL)
+    _update_context(text)
+
+    return _j({
+        "ok": True,
+        "note": "交接上下文已更新（覆盖旧内容）。",
+        "energy": round(snap.energy, 1),
+    })
+
+
+registry.register(
+    name="update_context",
+    toolset="actions",
+    schema={
+        "name": "update_context",
+        "description": "写入交接上下文——给明天的自己留个条，告诉下次醒来时应该知道的事。每次覆盖旧内容。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "上下文内容"},
+            },
+            "required": ["text"],
+        },
+    },
+    handler=_handle_update_context,
+    check_fn=lambda: True,
+    emoji="📋",
+)
+
+
+# ──────────────────────────────── add_lesson ────────────────────────────────
+
+def _handle_add_lesson(args: Dict[str, Any], **_) -> str:
+    text = (args.get("text") or "").strip()
+    if not text:
+        return registry.tool_error("text is required")
+
+    snap = vitals.consume_energy(ENERGY_COST_PER_CALL)
+    entities = args.get("entities")
+    if entities and isinstance(entities, list):
+        _add_lesson(text, entities=entities)
+    else:
+        _add_lesson(text)
+
+    return _j({
+        "ok": True,
+        "note": "经验教训已记录。",
+        "energy": round(snap.energy, 1),
+    })
+
+
+registry.register(
+    name="add_lesson",
+    toolset="actions",
+    schema={
+        "name": "add_lesson",
+        "description": "记录一条可迁移的经验教训。长期积累，每次唤醒时自动注入最近 3 条。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "教训内容——发现了什么，以后应该怎么做"},
+                "entities": {"type": "array", "items": {"type": "string"}, "description": "关联的实体，用于后续检索。如股票代码、工具名、概念名等"},
+            },
+            "required": ["text"],
+        },
+    },
+    handler=_handle_add_lesson,
+    check_fn=lambda: True,
+    emoji="💡",
+)
+
+
+# ──────────────────────────────── update_self_knowledge ────────────────────────────────
+
+def _handle_update_self_knowledge(args: Dict[str, Any], **_) -> str:
+    text = (args.get("text") or "").strip()
+    if not text:
+        return registry.tool_error("text is required")
+    mode = (args.get("mode") or "append").strip()
+    if mode not in ("append", "replace"):
+        return registry.tool_error("mode must be 'append' or 'replace'")
+
+    _update_self_knowledge(text, mode=mode)
+
+    return _j({
+        "ok": True,
+        "note": "自我认知已更新。" if mode == "append" else "自我认知已替换。",
+    })
+
+
+registry.register(
+    name="update_self_knowledge",
+    toolset="actions",
+    schema={
+        "name": "update_self_knowledge",
+        "description": "更新自我认知档案——对自己行为模式的中立观察。不是在写规则，而是在认识自己。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "观察到的行为模式，如'在X情况下我倾向于Y'"},
+                "mode": {"type": "string", "description": "append（默认，追加一条观察）/ replace（整体替换）", "enum": ["append", "replace"]},
+            },
+            "required": ["text"],
+        },
+    },
+    handler=_handle_update_self_knowledge,
+    check_fn=lambda: True,
+    emoji="🪞",
+)
+
+
+# ──────────────────────────────── search_history ────────────────────────────────
+
+def _handle_search_history(args: Dict[str, Any], **_) -> str:
+    """检索历史对话片段——通过内容/时间/工具类型搜索旧段。
+
+    用途：在需要回顾之前做过什么时使用（如修复 bug、重拾任务线索）。
+    返回匹配片段的上下文（前后各几条消息）。
+    """
+    from domain.memory.memory.summaries.recall_utils import search_session_messages
+
+    query = args.get("query", "").strip()
+    session_id = args.get("session_id")
+    time_range = args.get("time_range", "24h")  # 1h/6h/24h/7d
+    tool_type = args.get("tool_type")  # execute_code/terminal/read_file 等
+    limit = min(int(args.get("limit", 5)), 20)
+
+    if not query:
+        return registry.tool_error("query is required")
+
+    results = search_session_messages(
+        query=query,
+        session_id=session_id,
+        time_range=time_range,
+        tool_type=tool_type,
+        limit=limit,
+    )
+
+    if not results:
+        return _j({"ok": True, "results": [], "note": f"未找到与「{query}」相关的对话片段"})
+
+    return _j({
+        "ok": True,
+        "results": results,
+        "count": len(results),
+    })
+
+
+registry.register(
+    name="search_history",
+    toolset="actions",
+    schema={
+        "name": "search_history",
+        "description": "检索历史对话片段——通过关键词搜索之前的对话内容。用于需要回顾之前做过什么时（修复 bug、重拾任务线索等）。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "搜索关键词（文件名、函数名、错误信息等）"},
+                "session_id": {"type": "string", "description": "可选，限定搜索某个 session"},
+                "time_range": {"type": "string", "description": "时间范围：1h/6h/24h/7d，默认 24h", "enum": ["1h", "6h", "24h", "7d"]},
+                "tool_type": {"type": "string", "description": "可选，限定工具类型：execute_code/terminal/read_file 等"},
+                "limit": {"type": "integer", "description": "返回结果数量，默认 5，最大 20"},
+            },
+            "required": ["query"],
+        },
+    },
+    handler=_handle_search_history,
+    check_fn=lambda: True,
+    emoji="🔍",
+)
+
+
+# ──────────────────────────────── read_archive ────────────────────────────────
+
+def _handle_read_archive(args: Dict[str, Any], **_) -> str:
+    """读取归档的工具输出——压缩时归档的大文件可以通过此工具回溯。"""
+    import os
+    from pathlib import Path
+    from infrastructure.config import get_app_instance_id
+
+    archive_id = args.get("archive_id", "").strip()
+    session_id = args.get("session_id", "").strip()
+
+    if not archive_id:
+        return registry.tool_error("archive_id is required")
+
+    instance_id = get_app_instance_id()
+    base_dir = Path("var/tool_archives") / instance_id
+    if session_id:
+        archive_path = base_dir / session_id / f"{archive_id}.txt"
+    else:
+        # 搜索所有 session 中的该 archive_id
+        candidates = list(base_dir.glob(f"*/{archive_id}.txt"))
+        if candidates:
+            archive_path = candidates[0]
+        else:
+            return registry.tool_error(f"Archive {archive_id} not found")
+
+    if not archive_path.exists():
+        return registry.tool_error(f"Archive file not found: {archive_id}")
+
+    try:
+        content = archive_path.read_text(encoding="utf-8")
+        # 截断过长的归档内容
+        if len(content) > 5000:
+            content = content[:5000] + f"\n... (共 {len(content)} 字符，已截断)"
+        return _j({
+            "ok": True,
+            "archive_id": archive_id,
+            "session_id": session_id,
+            "content": content,
+            "size": len(content),
+        })
+    except Exception as e:
+        return registry.tool_error(f"Failed to read archive: {e}")
+
+
+registry.register(
+    name="read_archive",
+    toolset="actions",
+    schema={
+        "name": "read_archive",
+        "description": "读取归档的工具输出——压缩时归档的大文件内容回溯。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "archive_id": {"type": "string", "description": "归档文件 ID（叙事中会标注 archive_id）"},
+                "session_id": {"type": "string", "description": "可选，session ID 用于定位归档路径"},
+            },
+            "required": ["archive_id"],
+        },
+    },
+    handler=_handle_read_archive,
+    check_fn=lambda: True,
+    emoji="📦",
+)
+
+
+# ──────────────────────────────── rest ────────────────────────────────
+
+def _handle_rest(args: Dict[str, Any], **kwargs) -> str:
+    """rest — 设闹钟 + 结束 session。
+
+    新语义（2026-06-15：
+      until 或 reuse 必填一个）：
+
+      rest(until='2026-06-15T15:00:00+08:00', mental_context='...')
+          设新闹钟 → BLOCKED → 等到点 wakeup
+      rest(reuse=42, mental_context='补充...')
+          复用现有 timer 闘钟 #42（不新建）→ BLOCKED → 等原 fire_at wakeup
+      rest()  → 报错，并提示现有可复用的闹钟 id 列表
+
+    重叠检测（核心机制）：
+      until=X 但 ±10min 内已有 timer → 报错提示 "和 #X 重叠" + ID。
+      模型看到 ID 就调 rest(reuse=X) 复用即可。
+
+    这套语义=人设闘钟的样子：
+      「我想设下午 3 点」→ rest(until=15:00)
+      「发现已经设过 3 点」→ rest(reuse=<刚提示的 id>)
+    """
+    from datetime import timedelta, datetime
+    from domain.lifecycle import clock as _clock
+
+    # ── 解析参数 ──
+    # 两种语义（必填其一）：
+    #   until=<ISO8601>          新建/覆盖闹钟，到点唤醒
+    #   reuse=<alarm_id>         复用现有 timer 闹钟（重叠场景）
+    # 不传任何参数 → 报错强制让模型做决定（避免无限期睡死）
+    until = (args.get("until") or "").strip()
+    hours = args.get("hours")
+    reuse_raw = args.get("reuse")
+    reason = (args.get("reason") or "").strip() or "休息"
+    mental = (args.get("mental_context") or "").strip()
+    # 处理 reuse（可能是 int 或 str）
+    reuse_id: int = 0
+    if reuse_raw not in (None, "", 0):
+        try:
+            reuse_id = int(reuse_raw)
+            if reuse_id <= 0:
+                reuse_id = 0
+        except (ValueError, TypeError):
+            return registry.tool_error(f"invalid reuse: {reuse_raw!r} 必须是 alarm_id（正整数）")
+
+    # ── 解析目标时间（仅 until 或 hours 路径需要） ──
+    from domain.lifecycle import clock as _clock
+    from domain.lifecycle.alarms import set_alarm, cancel_alarm, list_pending_alarms
+    from domain.lifecycle.runtime_context import get_current_affair
+    from domain.lifecycle.affairs.runtime import (
+        set_wait_intent, WaitIntent, update_affair, get_affair,
+    )
+    from domain.lifecycle.state_machine import AffairStatus, WaitType
+    from datetime import datetime, timedelta
+
+    now = _clock.beijing_now_dt()
+
+    # ─── 路径 A：reuse=<alarm_id>，复用现有 timer ───
+    if reuse_id > 0:
+        # 找对应的 timer 闹钟
+        target_alarm = None
+        for a in list_pending_alarms("timer"):
+            if (a.get("id") or 0) == reuse_id:
+                target_alarm = a
+                break
+        if not target_alarm:
+            return registry.tool_error(
+                f"reuse={reuse_id} 失败：找不到这个 timer 闹钟。"
+                f"先用 sense_schedule 看现有闹钟 id，或改用 rest(until=...)"
+            )
+
+        target_fire_at = target_alarm.get("fire_at") or ""
+        # 合并 mental_context（如果模型传了 mental_context）
+        import json as _j_reuse
+        try:
+            existing_payload = _j_reuse.loads(target_alarm.get("payload_json") or "{}") or {}
+        except Exception:
+            existing_payload = {}
+        previous_mental = (existing_payload.get("mental_context") or "").strip()
+        new_mental = previous_mental
+        if mental:
+            new_mental = (previous_mental + ("\n\n" if previous_mental else "") + mental).strip()
+            # 把合并后的 mental_context 写回闹钟 payload
+            new_payload = dict(existing_payload)
+            new_payload["mental_context"] = new_mental
+            try:
+                cancel_alarm(target_alarm.get("id"))
+                set_alarm("timer", fire_at=target_fire_at, payload=new_payload)
+            except Exception as exc:
+                logger.warning("rest: reuse merge mental_context failed: %s", exc)
+
+        # 标 BLOCKED + 设 WaitIntent 复用 fire_at
+        aid = get_current_affair()
+        if aid:
+            existing_affair = get_affair(aid)
+            if existing_affair:
+                update_affair(aid, status=AffairStatus.BLOCKED)
+            intent = WaitIntent(
+                wait_type=WaitType.UNTIL,
+                resume_when=target_fire_at,
+                reason=reason,
+                resume_action="",
+                meta={"vitals_at_sleep": {}, "reused_alarm_id": reuse_id},
+            )
+            set_wait_intent(aid, intent)
+
+        return _j({
+            _BLOCK_SENTINEL: True,
+            "started": True,
+            "set_alarm": False,
+            "reused_alarm_id": reuse_id,
+            "fire_at": target_fire_at,
+            "existing_reason": existing_payload.get("reason", ""),
+            "previous_mental_context": previous_mental,
+            "merged_mental_context": new_mental if mental else None,
+            "message": f"复用 timer 闹钟 #{reuse_id}（{target_fire_at}），已结束 session",
+        })
+
+    # ─── 路径 B：解析 until/hours 设新闹钟 ───
+    target_dt = None
+    if until:
+        try:
+            target_dt = datetime.fromisoformat(until)
+            if target_dt.tzinfo is None:
+                target_dt = target_dt.replace(tzinfo=_clock.BEIJING)
+        except Exception as e:
+            return registry.tool_error(f"invalid until: {e}")
+    elif hours is not None:
+        try:
+            target_dt = now + timedelta(hours=float(hours))
+        except Exception:
+            return registry.tool_error("hours must be a number")
+
+    # ─── 路径 C：都没传 → 报错强制让模型做决定 ───
+    if target_dt is None:
+        # 列出现有 timer 让模型选
+        existing_timers = list_pending_alarms("timer")
+        if existing_timers:
+            import json as _j_hint
+            timer_lines = []
+            for a in existing_timers[:5]:
+                try:
+                    p = _j_hint.loads(a.get("payload_json") or "{}") or {}
+                    r = p.get("reason", "")
+                except Exception:
+                    r = ""
+                timer_lines.append(f"  · id={a.get('id')} {a.get('fire_at')}" + (f" ({r})" if r else ""))
+            return registry.tool_error(
+                "rest 必须传 until（新建闹钟）或 reuse=<alarm_id>（复用现有）。\n"
+                "现有 timer 闹钟：\n" + "\n".join(timer_lines) + "\n"
+                "→ 复用某个 → rest(reuse=<id>, mental_context='...')\n"
+                "→ 新建 → rest(until='2026-06-15T15:00:00+08:00', mental_context='...')"
+            )
+        else:
+            return registry.tool_error(
+                "rest 必须传 until 或 reuse=<alarm_id>，至少选一个。\n"
+                "→ 新建闹钟 → rest(until='2026-06-15T15:00:00+08:00', mental_context='给未来自己的留言')\n"
+                "（当前没有任何未触发的 timer 闹钟可复用）"
+            )
+
+    target_iso = _clock.to_storage_iso(target_dt)
+
+    # ── 查现有闹钟：精确同 fire_at OR ±10min 近似重叠 ──
+    # 设计语义：模型 rest(until=15:00) 时如果已有 15:00（或 14:55-15:05）的 timer
+    # → 报错提示"和 #X 重叠，用 reuse=X 复用"。模型看到 ID 后调用 rest(reuse=X) 复用。
+    import json as _j_overlap
+    from datetime import datetime as _dt
+
+    def _parse_payload(a: dict) -> dict:
+        try:
+            return _j_overlap.loads(a.get("payload_json") or "{}") or {}
+        except Exception:
+            return {}
+
+    target_dt_ts = target_dt.timestamp()
+    overlap_alarm_id = 0
+    overlap_alarm_fire_at = ""
+    overlap_alarm_reason = ""
+    for a in list_pending_alarms("timer"):
+        fa = a.get("fire_at") or ""
+        if not fa:
+            continue
+        try:
+            other_dt = _dt.fromisoformat(fa)
+            if other_dt.tzinfo is None:
+                other_dt = other_dt.replace(tzinfo=now.tzinfo)
+            diff = abs(other_dt.timestamp() - target_dt_ts)
+            if diff <= 600:  # ±10min 视为重叠
+                overlap_alarm_id = a.get("id") or 0
+                overlap_alarm_fire_at = fa
+                p = _parse_payload(a)
+                overlap_alarm_reason = p.get("reason") or ""
+                break
+        except Exception:
+            continue
+
+    # 重叠 → 报错让模型去复用
+    if overlap_alarm_id:
+        return registry.tool_error(
+            f"until={target_iso} 和现有 timer 闹钟 #{overlap_alarm_id}"
+            f"（{overlap_alarm_fire_at}"
+            + (f"，reason={overlap_alarm_reason}" if overlap_alarm_reason else "")
+            + f"）重叠。\n"
+            f"→ 复用现有 → rest(reuse={overlap_alarm_id}, mental_context='给未来的留言')\n"
+            f"→ 换个时间 → rest(until='')"
+        )
+
+    # 不重叠 → 设新闹钟
+    payload = {
+        "reason": reason,
+        "mental_context": mental,
+    }
+
+    # ── 设置 WaitIntent + 标 BLOCKED + set_alarm ──
+    from domain.lifecycle.state_machine import WaitType
+
+    aid = get_current_affair()
+    if not aid:
+        # 兼容兜底（affair 不存在时仍允许设闹钟）
+        try:
+            set_alarm("timer", fire_at=target_iso, payload=payload)
+        except Exception as exc:
+            logger.warning("rest: set_alarm failed (no affair): %s", exc)
+        return _j({
+            _BLOCK_SENTINEL: True,
+            "started": True,
+            "affair_id": None,
+            "wake_at": target_iso,
+            "mental_context": mental,
+            "message": f"进入休息，预计 {target_iso} 醒来",
+        })
+
+    intent = WaitIntent(
+        wait_type=WaitType.UNTIL,
+        resume_when=target_iso,
+        reason=reason,
+        resume_action="",
+        meta={"vitals_at_sleep": {}},
+    )
+
+    existing_affair = get_affair(aid)
+    if existing_affair:
+        update_affair(aid, status=AffairStatus.BLOCKED)
+    else:
+        logger.warning("_handle_rest: affair %s 不在 DB 中", aid)
+
+    set_wait_intent(aid, intent)
+    try:
+        # set_alarm 内置 dedup：(event_kind="timer", fire_at=target_iso) 已有则 UPDATE payload
+        # 我们只需调用即可，自动覆盖（但前面应该已经拦截重叠，这里是干净的新建）
+        set_alarm("timer", fire_at=target_iso, payload=payload)
+    except Exception as exc:
+        logger.warning("rest: set_alarm failed: %s", exc)
+
+    return _j({
+        _BLOCK_SENTINEL: True,
+        "started": True,
+        "affair_id": aid,
+        "wake_at": target_iso,
+        "mental_context": mental,
+        "message": f"进入休息，预计 {target_iso} 醒来。闹钟已设置。",
+    })
+
+
+registry.register(
+    name="rest",
+    toolset="actions",
+    schema={
+        "name": "rest",
+        "description": (
+            "进入休息 — 设闹钟 + 结束 session。**until 或 reuse 必填一个。**\n"
+            "\n"
+            "用法 1：rest(until='2026-06-15T15:00:00+08:00', mental_context='15:00 收盘扫描') "
+            "→ 设新闹钟，到点唤醒\n"
+            "用法 2：rest(reuse=42, mental_context='补充...') "
+            "→ 复用现有 timer 闹钟 #42（不新建，但要继续等它）\n"
+            "\n"
+            "重复检测：until 和现有 timer 闹钟 ±10min 内重叠时 → 报错提示 \"和 #X 重叠\" + "
+            "X 的 id，这一刻请调 rest(reuse=X) 复用，或换 until 时间。\n"
+            "\n"
+            "mental_context 是给未来自己的留言——你做到了啥，下一步做啥，有什么卡点。"
+            "reuse 复用时如果传 mental_context，会追加到原备注后面。\n"
+            "\n"
+            "精力状态不参与判断。累了或没事做都可以休息。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "until": {
+                    "type": "string",
+                    "description": "ISO8601 唤醒时间。和 reuse 至少填一个。",
+                },
+                "reuse": {
+                    "type": "integer",
+                    "description": "复用现有 timer 闹钟的 id（从 sense_schedule / 重复报错提示获得）。和 until 至少填一个。",
+                },
+                "hours": {"type": "number", "description": "（兼容）睡多少小时，until 优先"},
+                "mental_context": {"type": "string", "description": "给未来自己的留言"},
+                "reason": {"type": "string", "description": "为何休息（简短说明，内部记录）"},
+            },
+        },
+    },
+    handler=_handle_rest,
+    check_fn=lambda: True,
+    emoji="😴",
+)
+
+
+__all__ = []

@@ -1,0 +1,38 @@
+# ============================================================
+# 数字生命 实例配置模板
+# 复制本文件到 apps/<uuid>/config/app.yaml 后修改。
+# 密钥放同目录的 secrets.env（不入 git）。
+# ============================================================
+
+# ── 实例信息 ──
+display_name: zero                         # 实例显示名
+
+# ── 模型 ──
+model:
+  name: glm-5.2                            # 模型名称
+  provider: glm                             # 提供方
+  base_url: https://open.bigmodel.cn/api/paas/v4   # API 地址
+  # api_key 从 config/secrets.env 的 GLM_API_KEY 读取
+
+# ── 消息通道 ──
+messenger:
+  type: feishu                              # 消息平台（目前仅支持 feishu）
+  feishu_domain: https://open.feishu.cn     # 飞书 API 域名（国内默认，国际版改 https://open.larksuite.com）
+  app_id: "cli_xxxxxxxxxxxxx"               # 飞书机器人 App ID
+  # app_secret 从 config/secrets.env 的 FEISHU_APP_SECRET 读取
+
+# ── 群聊行为 ──
+group_chat:
+  attention_keywords: ["zero", "Zero"]      # 含这些词的群消息立即响应
+  owner_names: ["zhp"]                    # 这些人发言立即响应
+
+# ── 已注册技能 ──
+skills:
+  - daily_planner
+  - proactive
+  - self_review
+  - project_management
+  - project_bootstrap
+  - entity_curation
+  - todo_execution
+  - todo_planning

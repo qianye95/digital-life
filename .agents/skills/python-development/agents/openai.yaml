@@ -1,0 +1,4 @@
+interface:
+  display_name: "Python Development"
+  short_description: "Implement and refactor project Python safely"
+  default_prompt: "Implement this Python change using the repository Python standards and risk-based tests."

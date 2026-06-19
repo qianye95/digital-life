@@ -1,0 +1,4 @@
+interface:
+  display_name: "Python Review"
+  short_description: "Review project Python changes by risk"
+  default_prompt: "Review the current Python changes against repository standards and report findings first."

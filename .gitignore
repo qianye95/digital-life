@@ -1,0 +1,144 @@
+# === 敏感文件 ===
+.env
+auth.json
+config.yaml
+config/secrets.env
+config/local.yaml
+config/*.bak*
+*.bak
+*.bak.*
+
+# === 实例 ===
+# apps/<UUID>/ 是各实例的私有目录（含飞书凭据、人设、运行时数据）。
+# 实例由 scripts/init_instance.py 从 config/templates/ 复制模板生成。
+apps/*/
+!apps/.gitkeep
+
+# === 运行时数据 ===
+*.db
+*.db-shm
+*.db-wal
+sessions/
+logs/
+audio_cache/
+cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# === L4 运行时 ===
+runtime/
+var/
+data/
+backups/
+# 实例级密钥
+apps/*/config/secrets.env
+# 实例私有目录（含飞书凭据、人设、运行时数据）
+apps/*/
+!apps/.gitkeep
+# 项目目录是运行时由实例/用户创建的，不入 git
+projects/*/
+!projects/.gitkeep
+# 共享空间同理——实例运行时生成
+shared/skills/*/
+!shared/skills/.gitkeep
+shared/tools/*/
+!shared/tools/.gitkeep
+shared/capabilities/*/
+!shared/capabilities/.gitkeep
+# docs 只保留设计主文档 + showcase 实录，其余过程文档不入 git
+docs/*
+!docs/.gitkeep
+!docs/design/
+docs/design/*
+!docs/design/.gitkeep
+!docs/design/digital-life-system-design.md
+!docs/showcase/
+!docs/showcase/.gitkeep
+!docs/showcase/multi-instance-trading-2026-06.md
+!docs/showcase/how-to-play.zh.md
+# scripts/ 与 tests/ 不入版本控制（运行前/测试均为本地工作目录）
+scripts/
+tests/
+config/local.yaml
+config/secrets.env
+configs/local.yaml
+configs/secrets.env
+backups/
+
+# === 交易运行时数据（代码保留，数据忽略） ===
+invest/account.json
+invest/trade_log.md
+invest/decision_log.json
+invest/investment_journal.json
+invest/diary.md
+invest/morning_report.md
+invest/journal.md
+
+# === 状态文件 ===
+zero_state.json
+gateway_state.json
+gateway.pid
+auth.lock
+.clean_shutdown
+
+# === 其他运行时 ===
+pairing/
+/vitals/
+cron/
+/tasks/
+reports/
+models_dev_cache.json
+channel_directory.json
+feishu_seen_message_ids.json
+hermes_state.db
+
+# === 工具链 ===
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/speckit-*/
+!.agents/skills/speckit-*/**
+!.agents/skills/python-development/
+!.agents/skills/python-development/**
+!.agents/skills/python-review/
+!.agents/skills/python-review/**
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/speckit-*/
+!.claude/skills/speckit-*/**
+!.claude/skills/python-development/
+!.claude/skills/python-development/**
+!.claude/skills/python-review/
+!.claude/skills/python-review/**
+!.claude/rules/
+.claude/rules/*
+!.claude/rules/python.md
+.gemini/*
+!.gemini/commands/
+.gemini/commands/*
+!.gemini/commands/speckit.*.toml
+!.gemini/commands/python.development.toml
+!.gemini/commands/python.review.toml
+.specify/feature.json
+.specify/workflow-runs/
+.idea/
+node_modules/
+web/zero/node_modules/
+.venv/
+venv/
+.local-tools/
+/dist/
+/build/
+# 前端构建产物（每个组件自己的 dist/ 都不入 git）
+interfaces/web/employee-console/dist/
+interfaces/**/dist/
+*.log
+*.tmp
+*.swp
+.vscode/
+
+# === OS ===
+.DS_Store
+Thumbs.db

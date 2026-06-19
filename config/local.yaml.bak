@@ -1,0 +1,161 @@
+adapters:
+  hermes:
+    enabled: true
+agent:
+  gateway_notify_interval: 600
+  gateway_timeout: 1800
+  gateway_timeout_warning: 900
+  max_turns: ${HERMES_MAX_ITERATIONS:-90}
+  reasoning_effort: medium
+  restart_drain_timeout: 60
+  tool_use_enforcement: auto
+  verbose: false
+code_execution:
+  max_tool_calls: 50
+  timeout: 300
+compression:
+  enabled: true
+  protect_last_n: 15
+  summary_base_url: null
+  summary_model: ${ZERO_SUMMARY_MODEL:-glm-4.7-flash}
+  summary_provider: ${ZERO_SUMMARY_PROVIDER:-custom}
+  target_ratio: 0.2
+  threshold: 0.3
+context:
+  engine: compressor
+custom_providers:
+- api_key_env: GLM_API_KEY
+  api_mode: chat_completions
+  base_url: ${GLM_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
+  name: zai
+- api_key: ${ARK_API_KEY:-}
+  api_mode: chat_completions
+  base_url: https://ark.cn-beijing.volces.com/api/coding/v3
+  model: glm-4.7-flash
+  name: ark
+event_types:
+  awaiting_reply:
+    allow_quiet_hours: false
+    priority: 5
+    suggested_tools:
+    - sense_time
+    - sense_vitals
+    - sense_self
+    wake_prompt: '⏳ 哥哥还没回你消息。
+
+      看看待处理事件里你之前说了什么，如果是需要哥哥拍板的就不要等了，自己决定即可——继续做你的事，等他回。
+
+      '
+  initiative:
+    allow_quiet_hours: false
+    priority: 4
+    suggested_tools:
+    - sense_self
+    - sense_goals
+    - sense_scratchpad
+    - update_scratchpad
+    - rest
+    wake_prompt: '😑 你有点无聊了。
+
+      `sense_self` + `sense_goals` + `sense_scratchpad` → 挑一个做，或者没有内容的话，可以问问哥哥有没有想要自己的任务或者目标。将新的任务写入到任务中
+
+      做完 `update_scratchpad` 更新笔记 → `rest()`。
+
+      '
+  daily_plan_reminder:
+    allow_quiet_hours: false
+    priority: 4
+    suggested_tools:
+    - sense_daily
+    - manage_daily
+    wake_prompt: '📅 计划提醒：{text}
+
+      查看长期任务，并基于长期任务制定一些第二天打算做的事情，并将事情注册到闹钟事件上。
+
+      如果没有长期任务，可以考虑先拆解目标形成长期任务，将长期任务维护到任务中
+
+      '
+  human_message:
+    allow_quiet_hours: true
+    priority: 10
+    suggested_tools:
+    - sense_time
+    - sense_vitals
+    - express_to_human
+    wake_prompt: '💬 蓝先生找你了。
+
+      感知消息内容，用 `express_to_human` 回复。回复完后继续做自己的事，很多事件不必等哥哥的回复自己决定即可。
+
+      '
+memory:
+  flush_min_turns: 6
+  memory_char_limit: 2200
+  memory_enabled: true
+  nudge_interval: 10
+  user_char_limit: 1375
+  user_profile_enabled: true
+model:
+  default: ${ZERO_MODEL:-glm-5.1}
+  provider: ${ZERO_PROVIDER:-glm}
+platforms:
+  api_server:
+    enabled: ${API_SERVER_ENABLED:-true}
+    extra:
+      port: ${API_SERVER_PORT:-8765}
+  feishu:
+    extra:
+      group_rules:
+        ${FEISHU_HOME_CHANNEL:-oc_55fbac5a12c6c659e2a2c774cd7eddfc}:
+          policy: open
+prompts_override:
+  _BOOTSTRAP_HUMAN: '💬 人类消息到达。消息内容已呈现在下方。
+
+
+    先理解内容，用 `sense_self` 回顾上次对话脉络，需要回应时用 `express_to_human`。回应后继续做自己的事。'
+runtime:
+  root: runtime
+smart_model_routing:
+  cheap_model:
+    model: ${ZERO_CHEAP_MODEL:-glm-4.7-flash}
+    provider: ${ZERO_CHEAP_PROVIDER:-custom}
+  enabled: ${ZERO_SMART_ROUTING:-true}
+  max_simple_chars: 160
+  max_simple_words: 28
+terminal:
+  backend: local
+  container_cpu: 1
+  container_disk: 51200
+  container_memory: 5120
+  container_persistent: true
+  cwd: .
+  daytona_image: nikolaik/python-nodejs:python3.11-nodejs20
+  docker_env: {}
+  docker_forward_env: []
+  docker_image: nikolaik/python-nodejs:python3.11-nodejs20
+  docker_mount_cwd_to_workspace: false
+  docker_volumes: []
+  env_passthrough: []
+  lifetime_seconds: 300
+  modal_image: nikolaik/python-nodejs:python3.11-nodejs20
+  modal_mode: auto
+  persistent_shell: true
+  singularity_image: docker://nikolaik/python-nodejs:python3.11-nodejs20
+  timeout: 180
+vitals:
+  initiative:
+    energy_threshold: ${VITALS_INITIATIVE_ENERGY_THRESHOLD:-90}
+    idle_hours: ${VITALS_INITIATIVE_IDLE_HOURS:-1.5}
+  decay:
+    bond: ${VITALS_DECAY_BOND:-0.2}
+    energy: ${VITALS_DECAY_ENERGY:-30}
+    hygiene: ${VITALS_DECAY_HYGIENE:-0.3}
+    mood: ${VITALS_DECAY_MOOD:-0.5}
+    satiety: ${VITALS_DECAY_SATIETY:-1}
+  energy:
+    awake_drain: 5
+    cost_per_action: 2
+    cost_per_thought: 1
+    energy_recovery: 15
+    night_drain_hour: 8
+    night_drain_start: 21.5
+    sleep_threshold: 40

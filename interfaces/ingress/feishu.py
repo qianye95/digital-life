@@ -1,0 +1,454 @@
+"""Feishu (Lark) message platform adapter.
+
+Consolidates what was previously scattered across:
+- infrastructure/gateway/server.py (WS + HTTP client)
+- infrastructure/feishu/life_consumer.py (message processing)
+- backend/ingress_interactions/feishu/ (normalization)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import threading
+from typing import Any
+from uuid import uuid4
+
+import lark_oapi as lark
+from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
+from lark_oapi.ws import Client as WSClient
+
+from interfaces.ingress.base import IngressAdapter, MessageHandler, NormalizedMessage
+
+logger = logging.getLogger(__name__)
+
+# 飞书域名：优先从实例 app.yaml 的 messenger.feishu_domain 读，
+# fallback 从 env FEISHU_DOMAIN 读，最终默认国内地址。
+def _read_feishu_domain() -> str:
+    try:
+        from infrastructure.config import get_app_instance_id, get_project_root
+        iid = get_app_instance_id() or ""
+        if iid:
+            import yaml as _yaml
+            cfg_path = get_project_root() / "apps" / iid / "config" / "app.yaml"
+            if cfg_path.exists():
+                cfg = _yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+                d = ((cfg.get("messenger") or {}).get("feishu_domain") or "").strip()
+                if d:
+                    return d
+    except Exception:
+        pass
+    return os.getenv("FEISHU_DOMAIN", "https://open.feishu.cn")
+
+FEISHU_DOMAIN = _read_feishu_domain()
+if FEISHU_DOMAIN and not FEISHU_DOMAIN.startswith(("https://", "http://")):
+    FEISHU_DOMAIN = "https://" + FEISHU_DOMAIN
+
+
+# Patch lark_oapi.ws.client so that each adapter thread gets its own event
+# loop.  The library uses a module-level ``loop`` variable that is shared
+# across all WSClient instances; with multiple bot credentials we need
+# per-thread isolation.
+import lark_oapi.ws.client as _ws_client
+
+_per_thread_loops: dict[int, asyncio.AbstractEventLoop] = {}
+
+class _ThreadLocalLoopProxy:
+    """Delegates all asyncio-loop calls to the current thread's loop."""
+    def _loop(self):
+        return _per_thread_loops[threading.get_ident()]
+
+    def run_until_complete(self, *args, **kwargs):
+        return self._loop().run_until_complete(*args, **kwargs)
+
+    def create_task(self, *args, **kwargs):
+        return self._loop().create_task(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._loop(), name)
+
+_ws_client.loop = _ThreadLocalLoopProxy()
+
+
+class FeishuAdapter(IngressAdapter):
+    """Feishu / Lark message platform adapter."""
+
+    platform = "feishu"
+
+    @property
+    def app_identity(self) -> str:
+        # 飞书 adapter 的稳定身份 = app_id (cli_xxx)。给 unified_contact 体系用：
+        # 区分同一个 ou_/cli_ 是哪个 app 视角看到的。
+        return self._app_id
+
+    def __init__(
+        self,
+        app_id: str = "",
+        app_secret: str = "",
+        *,
+        domain: str = "",
+    ) -> None:
+        self._app_id = app_id or os.getenv("FEISHU_APP_ID", "")
+        self._app_secret = app_secret or os.getenv("FEISHU_APP_SECRET", "")
+        if not self._app_id:
+            raise ValueError("FeishuAdapter requires app_id (or FEISHU_APP_ID env var)")
+        self._domain = domain or FEISHU_DOMAIN
+        self._ws: WSClient | None = None
+        self._http: lark.Client | None = None
+        self._handlers: list[MessageHandler] = []
+        self._bot_name: str = ""
+
+    # -- IngressAdapter impl -------------------------------------------------
+
+    async def start(self) -> None:
+        self._http = self._build_http_client()
+        self._ws = self._build_ws_client()
+
+        def _run_ws() -> None:
+            _per_thread_loops[threading.get_ident()] = asyncio.new_event_loop()
+            asyncio.set_event_loop(_per_thread_loops[threading.get_ident()])
+            self._ws.start()
+
+        ws_thread = threading.Thread(
+            name=f"feishu-ws-{self._app_id[:8]}",
+            target=_run_ws,
+            daemon=True,
+        )
+        ws_thread.start()
+        self._bot_name = self._fetch_bot_name()
+        logger.info("FeishuAdapter started (app_id=%s bot_name=%s)", self._app_id[:12], self._bot_name)
+
+        # 群名 cache：chat_id → (name, fetch_ts)；5min TTL
+        self._chat_name_cache: dict[str, tuple[str, float]] = {}
+        self._chat_name_cache_ttl = 300.0
+
+    async def stop(self) -> None:
+        logger.info("FeishuAdapter stopping...")
+
+    def _fetch_bot_name(self) -> str:
+        try:
+            import httpx
+            with httpx.Client(timeout=5) as c:
+                tr = c.post(
+                    "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+                    json={"app_id": self._app_id, "app_secret": self._app_secret},
+                )
+                token = tr.json().get("tenant_access_token", "")
+            if not token:
+                return ""
+            with httpx.Client(timeout=5) as c:
+                r = c.get(
+                    "https://open.feishu.cn/open-apis/bot/v3/info",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                bot = (r.json().get("bot") or {})
+                return (bot.get("app_name") or "").strip()
+        except Exception:
+            return ""
+
+    def _fetch_chat_name(self, chat_id: str) -> str:
+        """同步拉群名，5min cache。失败返回空字符串。"""
+        if not chat_id:
+            return ""
+        import time
+        now = time.time()
+        cached = self._chat_name_cache.get(chat_id)
+        if cached and (now - cached[1] < self._chat_name_cache_ttl):
+            return cached[0]
+        name = ""
+        try:
+            import httpx
+            # token 与 send 路径一致 —— 同步阻塞拉（5s 超时）
+            with httpx.Client(timeout=5.0) as c:
+                tr = c.post(
+                    "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+                    json={"app_id": self._app_id, "app_secret": self._app_secret},
+                )
+                token = tr.json().get("tenant_access_token", "")
+                if token:
+                    cr = c.get(
+                        f"https://open.feishu.cn/open-apis/im/v1/chats/{chat_id}",
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                    data = cr.json() or {}
+                    if data.get("code") == 0:
+                        info = data.get("data") or {}
+                        name = (info.get("name") or "").strip()
+        except Exception as exc:
+            logger.debug("fetch chat_name failed: %s", exc)
+            name = ""
+        self._chat_name_cache[chat_id] = (name, now)
+        # Phase 4:不再登记到 chat_groups 缓存表——广播 endpoint 直接带 display_name,
+        # 接收方写 messages.db 时存 sender_name,不需要任何共享群名表(去中心化消息
+        # 总线设计决策 3)。handler 调 _fetch_chat_name 时也只想拿到本地缓存给
+        # wake_prompt 用,不跨进程共享。
+        return name
+        return name
+
+    async def send(self, chat_id: str, content: str, reply_to: str = "") -> bool:
+        if not self._http:
+            return False
+        try:
+            if reply_to:
+                req = (
+                    lark.im.v1.message.ReplyMessageRequest.builder()
+                    .message_id(reply_to)
+                    .data(
+                        lark.im.v1.message.ReplyMessageRequestBody(
+                            msg_type="text",
+                            content=content,
+                        )
+                    )
+                )
+            else:
+                import json as _json
+
+                body = {"text": content}
+                req = (
+                    lark.im.v1.message.CreateMessageRequest.builder()
+                    .receive_id_type("chat_id")
+                    .receive_id(chat_id)
+                    .msg_type("text")
+                    .content(_json.dumps(body, ensure_ascii=False))
+                )
+
+            def _do_send():
+                try:
+                    resp = self._http.im.v1.message.create(req)
+                    return resp.code == 0
+                except Exception as exc:
+                    logger.warning("Feishu send failed: %s", exc)
+                    return False
+
+            return await asyncio.to_thread(_do_send)
+        except Exception as exc:
+            logger.warning("Feishu send error: %s", exc)
+            return False
+
+    def on_message(self, handler: MessageHandler) -> None:
+        self._handlers.append(handler)
+
+    # -- Internals -----------------------------------------------------------
+
+    def _build_http_client(self) -> lark.Client:
+        return (
+            lark.Client.builder()
+            .app_id(self._app_id)
+            .app_secret(self._app_secret)
+            .domain(self._domain)
+            .build()
+        )
+
+    def _build_ws_client(self) -> WSClient:
+        def _on_message(
+            event: lark.api.im.v1.model.p2_im_message_receive_v1.P2ImMessageReceiveV1,
+        ) -> None:
+            try:
+                msg = getattr(event.event, "message", None)
+                mentions = getattr(msg, "mentions", None) or []
+                # 调试日志：dump mentions 的 raw 数据（field/值）
+                if mentions:
+                    debug_lines = []
+                    for m in mentions:
+                        try:
+                            debug_lines.append(
+                                "id={!r} id_type={!r} name={!r} key={!r}".format(
+                                    getattr(m, "id", None),
+                                    getattr(m, "id_type", None),
+                                    getattr(m, "name", None),
+                                    getattr(m, "key", None),
+                                )
+                            )
+                        except Exception:
+                            debug_lines.append(f"<unreadable mention: {m!r}>")
+                    logger.info("Mention raw dump: %s", " | ".join(debug_lines))
+                logger.info(
+                    "Feishu WS: chat=%s msg_id=%s mentions=%d bot=%s",
+                    getattr(msg, "chat_id", "") or "",
+                    getattr(msg, "message_id", "") or "",
+                    len(mentions),
+                    self._app_id[:12],
+                )
+                normalized = self._normalize(event)
+                for handler in self._handlers:
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.call_soon(lambda h=handler, n=normalized: asyncio.create_task(h(n)))
+                    except RuntimeError:
+                        asyncio.run(handler(normalized))
+            except Exception as exc:
+                logger.exception("Feishu _on_message error: %s", exc)
+
+        handler_builder = (
+            EventDispatcherHandler.builder("", "")
+            .register_p2_im_message_receive_v1(_on_message)
+            .build()
+        )
+
+        return WSClient(
+            app_id=self._app_id,
+            app_secret=self._app_secret,
+            log_level=lark.LogLevel.DEBUG if logger.isEnabledFor(logging.DEBUG) else lark.LogLevel.INFO,
+            event_handler=handler_builder,
+            domain=self._domain,
+            auto_reconnect=True,
+        )
+
+    def _normalize(self, event: Any) -> NormalizedMessage:
+        """Convert a Lark P2ImMessageReceiveV1 event to NormalizedMessage."""
+        msg = event.event.message
+        sender = event.event.sender
+
+        chat_id = getattr(msg, "chat_id", "") or ""
+        chat_type = getattr(msg, "chat_type", "p2p") or "p2p"
+        message_id = getattr(msg, "message_id", "") or f"in_{uuid4().hex}"
+
+        raw_content = getattr(msg, "content", "") or ""
+        text = raw_content
+        if raw_content.startswith("{"):
+            try:
+                text = json.loads(raw_content).get("text", raw_content)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        sender_open_id = ""
+        sender_obj = getattr(sender, "sender_id", None)
+        if sender_obj:
+            sender_open_id = getattr(sender_obj, "open_id", "") or ""
+            if not sender_open_id:
+                sender_open_id = getattr(sender_obj, "user_id", "") or ""
+            if not sender_open_id:
+                sender_open_id = getattr(sender_obj, "app_id", "") or ""
+
+        # 发送者是不是机器人：飞书 SDK 的 sender.sender_type 为 "app" 表示 app/机器人发的
+        # （"user" 为真人）。用于把 sibling/其它机器人标记为 kind='bot' 联系人，
+        # 以及发送侧判断"@ 到了机器人→飞书会送达它→本侧不再广播"。
+        _sender_type = (getattr(sender, "sender_type", "") or "").strip().lower()
+        sender_is_bot = _sender_type == "app"
+
+        # 解析 @ 列表（仅群聊）
+        # Lark Mention 字段：key(可能是占位符 '@_user_1')、id(UserId|str)、id_type、name
+        # text 中的 '@_user_N' 是飞书脱敏占位符，无法可靠恢复，
+        # 所以保留原文 + 在 mention_mentions 字段提供 "key → name" 映射让下游 prompt 解释
+        mentioned_ids: list[str] = []
+        mentioned_names: list[str] = []
+        mention_map: list[str] = []       # ["@_user_1 → alpha", "@_user_2 → 张三"]
+        is_group = chat_type == "group"
+        if is_group:
+            mentions = getattr(msg, "mentions", None) or []
+            for m in mentions:
+                try:
+                    mname = (getattr(m, "name", "") or "").strip()
+                    mkey = (getattr(m, "key", "") or "").strip()
+                    mid_obj = getattr(m, "id", None)
+                    mid_str = ""
+                    if isinstance(mid_obj, str):
+                        mid_str = mid_obj.strip()
+                    elif mid_obj is not None:
+                        for attr in ("open_id", "union_id", "user_id", "app_id"):
+                            v = getattr(mid_obj, attr, None)
+                            if v:
+                                mid_str = str(v).strip()
+                                break
+                    if mname:
+                        mentioned_names.append(mname)
+                    if mid_str:
+                        mentioned_ids.append(mid_str)
+                    elif mname:
+                        mentioned_ids.append(f"name:{mname}")
+                    if mkey and mname:
+                        mention_map.append(f"{mkey}→{mname}")
+                except Exception:
+                    pass
+
+        # 把 text 中的 @_user_N 占位符替换为实际名字，让模型直接看可读文本
+        # mention.name 是飞书给的可读名（用户名/bot 应用名），不可伪造
+        if is_group and mention_map:
+            for entry in mention_map:
+                if "→" not in entry:
+                    continue
+                key, name = entry.split("→", 1)
+                key = key.strip()
+                name = name.strip()
+                if key and name and key in text:
+                    text = text.replace(key, f"@{name}")
+
+        # 判断当前 adapter 的 bot 是否被 @：
+        #   - mention.id 直接是 app_id（少见）
+        #   - mention.name == bot 的应用名（legacy_name / display_name）
+        #   - mention.name == bot 应用后台的中文名（如 "数字生命 alpha"）
+        bot_names_match = False
+        if self._bot_name:
+            bn_lower = self._bot_name.lower().strip()
+            for mname in mentioned_names:
+                mn = (mname or "").lower().strip()
+                if mn and (mn == bn_lower or mn in bn_lower or bn_lower in mn):
+                    bot_names_match = True
+                    break
+        if not bot_names_match:
+            try:
+                from infrastructure.config import _load_registry
+                registry = _load_registry() or {}
+                from pathlib import Path as _P
+                import yaml as _yaml
+                from infrastructure.config import get_project_root
+                for iid, meta in registry.items():
+                    cfg_path = get_project_root() / "apps" / iid / "config" / "app.yaml"
+                    if not cfg_path.exists():
+                        continue
+                    try:
+                        cfg = _yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+                    except Exception:
+                        continue
+                    if ((cfg.get("messenger") or {}).get("app_id") or "").strip() != self._app_id:
+                        continue
+                    legacy = (meta.get("legacy_name") or "").lower()
+                    display = (meta.get("display_name") or "").lower()
+                    for mname in mentioned_names:
+                        mn = (mname or "").lower().strip()
+                        if not mn:
+                            continue
+                        if mn == legacy or mn == display or mn in legacy or mn in display:
+                            bot_names_match = True
+                            break
+                    break
+            except Exception:
+                pass
+        mentions_bot_self = (self._app_id in mentioned_ids) or bot_names_match
+
+        # 查 contacts 表补 sender_name（platform+platform_id → name 映射）
+        # 未命中时显示友好短码（ou_xxx 前 12 位），避免 prompt 显示完整 open_id 太丑
+        sender_name_resolved = ""
+        if sender_open_id:
+            try:
+                from domain.contacts import lookup_name
+                sender_name_resolved = lookup_name("feishu", sender_open_id)
+            except Exception:
+                sender_name_resolved = ""
+            if not sender_name_resolved:
+                # 短码 fallback：ou_eb5083eb... → "用户 eb5083eb"
+                short = sender_open_id[3:11] if len(sender_open_id) > 11 else sender_open_id
+                sender_name_resolved = f"用户{short}" if short else sender_open_id
+
+        # chat_name 飞书不在事件 payload 里，调 im/v1/chats/{chat_id} 拉取
+        # 带 5min cache 避免 API 调用过密；失败时为空，模板渲染显示 chat_id 不丑
+        chat_name_resolved = self._fetch_chat_name(chat_id) if is_group and chat_id else ""
+
+        return NormalizedMessage(
+            platform="feishu",
+            chat_id=chat_id,
+            message_id=message_id,
+            sender_id=sender_open_id,
+            content=text,
+            sender_name=sender_name_resolved,
+            chat_name=chat_name_resolved,
+            is_group=is_group,
+            mentions_bot=mentions_bot_self,
+            mentioned_bot_app_ids=mentioned_ids,
+            mention_names=mentioned_names,
+            mention_map=mention_map,
+            sender_is_bot=sender_is_bot,
+            raw=event,
+        )

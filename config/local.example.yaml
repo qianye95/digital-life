@@ -1,0 +1,21 @@
+# Copy to local.yaml for machine-specific settings.
+#
+# 敏感信息（API Key、Secret 等）统一在 config/secrets.env 中管理，此处不存放。
+# 支持在值中使用 ${ENV_VAR:-default} 语法引用环境变量。
+#
+# 配置优先级：config/secrets.env 环境变量 > config/local.yaml > 代码默认值
+
+runtime:
+  root: runtime
+
+adapters:
+  hermes:
+    enabled: true
+
+model:
+  default: ${DIGITAL_LIFE_MODEL:-glm-5.1}
+  provider: ${DIGITAL_LIFE_PROVIDER:-glm}
+
+agent:
+  max_turns: 90
+  reasoning_effort: medium

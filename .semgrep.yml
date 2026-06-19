@@ -1,0 +1,39 @@
+rules:
+  - id: digital-life.subprocess-shell-true
+    message: Avoid shell=True for tool/runtime subprocesses; pass argv lists or explicitly validate shell input.
+    severity: ERROR
+    languages: [python]
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.run(..., shell=True, ...)
+          - pattern: subprocess.Popen(..., shell=True, ...)
+          - pattern: subprocess.call(..., shell=True, ...)
+          - pattern: subprocess.check_call(..., shell=True, ...)
+          - pattern: subprocess.check_output(..., shell=True, ...)
+
+  - id: digital-life.unsafe-yaml-load
+    message: Use yaml.safe_load for untrusted or project configuration input.
+    severity: ERROR
+    languages: [python]
+    patterns:
+      - pattern: yaml.load(...)
+      - pattern-not: yaml.load(..., Loader=yaml.SafeLoader, ...)
+      - pattern-not: yaml.load(..., Loader=SafeLoader, ...)
+
+  - id: digital-life.eval-or-exec
+    message: Avoid eval/exec in runtime code; use explicit parsers or dispatch tables.
+    severity: ERROR
+    languages: [python]
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: exec(...)
+
+  - id: digital-life.dynamic-sql-execute
+    message: Avoid dynamic SQL execution unless identifiers are validated against a fixed allowlist.
+    severity: ERROR
+    languages: [python]
+    pattern-either:
+      - pattern: $DB.execute(f"UPDATE ... SET {...} ...", ...)
+      - pattern: $DB.execute(f"ALTER TABLE ... COLUMN {...}", ...)
+      - pattern: $CUR.execute(f"UPDATE ... SET {...} ...", ...)
+      - pattern: $CUR.execute(f"ALTER TABLE ... COLUMN {...}", ...)
