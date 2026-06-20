@@ -76,6 +76,16 @@ class FeishuAdapter(IngressAdapter):
     """Feishu / Lark message platform adapter."""
 
     platform = "feishu"
+    # 飞书全能力：群聊/私聊/主动推送/媒体/@ 全支持
+    from interfaces.ingress.base import ChannelCapabilities as _Caps
+    capabilities = _Caps(
+        supports_group=True,
+        supports_dm=True,
+        supports_proactive=True,
+        supports_media=True,
+        supports_mention=True,
+        max_text_length=4000,
+    )
 
     @property
     def app_identity(self) -> str:
