@@ -101,6 +101,9 @@
             <span v-if="qrok" class="brand-sub" style="color: var(--neon-cyan);">
               ✓ {{ qrok }}
             </span>
+            <span v-if="qrUrl && !qrok" class="brand-sub" style="color: var(--text-muted);">
+              {{ qrStatus }}
+            </span>
           </div>
           <!-- 飞书专属：未连接时提示去 Config 配 app_id/secret -->
           <div v-else-if="ch.status !== 'connected'" class="ch-actions">
@@ -184,6 +187,19 @@
         </div>
       </div>
     </div>
+    <!-- 微信扫码 Dialog（内嵌，避免 popup blocker + 安全） -->
+    <el-dialog v-model="qrDialogVisible" title="微信扫码登录" width="360px" :close-on-click-modal="false">
+      <div style="text-align: center; padding: 20px;">
+        <img v-if="qrUrl"
+             :src="`/api/system/instances/${iid}/wechat-login/qr-page?qrcode_url=${encodeURIComponent(qrUrl)}`"
+             alt="微信二维码"
+             style="width: 240px; height: 240px; border-radius: var(--radius); margin-bottom: 16px; background: white;" />
+        <div v-else style="width: 240px; height: 240px; display: flex; align-items: center; justify-content: center; margin: 0 auto 16px; background: var(--bg-deep); border-radius: var(--radius);">
+          <span class="brand-sub" style="color: var(--text-muted);">加载中…</span>
+        </div>
+        <p style="color: var(--text-secondary); font-size: 14px;">{{ qrStatus }}</p>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -215,6 +231,9 @@ const channels = ref([])
 const qrloading = ref(false)
 const qrerror = ref('')
 const qrok = ref('')
+const qrUrl = ref('')   // 后端 qrcode_url（图片 src 用）
+const qrStatus = ref('')  // 给用户看的提示文字
+const qrDialogVisible = ref(false)
 let poller = null
 
 const instanceName = computed(() => {
@@ -317,11 +336,14 @@ async function loadMeta() {
   } catch {}
 }
 
-// 微信扫码登录：触发 qrcode → 弹窗显示 → 前端轮询 status
+// 微信扫码登录：内嵌 dialog 显示二维码（避免 popup blocker），后端 poll 完成自动关
 async function startWechatLogin() {
   qrerror.value = ''
   qrok.value = ''
+  qrUrl.value = ''
+  qrStatus.value = '获取二维码…'
   qrloading.value = true
+  qrDialogVisible.value = true
   try {
     const d = await systemApi.wechatQrcode(iid.value)
     if (d.error) {
@@ -335,25 +357,28 @@ async function startWechatLogin() {
       return
     }
     // 后端 /qr-page?qrcode_url=xxx 用 Python qrcode 把 ClawBot 链接渲染成 PNG
-    // （微信原页 JS 渲染 + X-Frame-Options: DENY，无法 iframe）
-    const pageUrl = `/api/system/instances/${iid.value}/wechat-login/qr-page?qrcode_url=${encodeURIComponent(d.qrcode_url)}`
-    window.open(pageUrl, '_blank', 'width=420,height=520')
-    // 前端轻量轮询是否完成（最多 100s）
+    qrUrl.value = d.qrcode_url
+    qrStatus.value = '请用手机微信扫码'
+    // 前端轮询扫码状态（3s 间隔，最多 100s）
     const deadline = Date.now() + 100000
     const iv = setInterval(async () => {
       if (Date.now() > deadline) {
         clearInterval(iv)
         qrloading.value = false
-        qrerror.value = '扫码超时，请重试'
+        qrerror.value = '扫码超时，请重新点击'
+        qrUrl.value = ''
         return
       }
       try {
         const s = await systemApi.wechatLoginStatus(iid.value)
-        if (s && s.status === 'ok') {
+        // 后端 status 端点返 'ok' 或 'confirmed'，两种都算成功
+        if (s && (s.status === 'ok' || s.status === 'confirmed')) {
           clearInterval(iv)
           qrloading.value = false
-          qrok.value = '微信连接成功'
-          await loadMeta()  // 刷新通道徽章
+          qrDialogVisible.value = false
+          qrok.value = `微信连接成功（bot_id=${s.bot_id ? s.bot_id.slice(0, 16) : '—'}…）`
+          qrUrl.value = ''
+          await loadMeta()
         }
       } catch {}
     }, 3000)
