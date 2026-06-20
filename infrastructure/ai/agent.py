@@ -272,8 +272,15 @@ class AIAgent:
             "messages": self._maybe_compress_messages(messages, system_prompt=None, ref_context=None),
             "tools": registry.get_definitions(set(self._enabled_tool_names()), quiet=True),
         }
-        if self.reasoning_config:
-            payload["reasoning_effort"] = self.reasoning_config.get("effort")
+        # provider 是模型知识的唯一家园 —— reasoning_effort / tools 格式
+        # / extra_body 这些"按家族差异"的字段全部由 provider.customize_payload 决定，
+        # agent.py 不识别"现在是 GLM 还是 o1 还是 Claude"。
+        # 之前硬编码 `payload["reasoning_effort"] = effort` 被 cargo 推进来——对
+        # o1 会 400 Bad Request，对 Claude/DSt 不识别但被静默忽略。
+        payload = self._provider.customize_payload(
+            payload,
+            reasoning_config=self.reasoning_config,
+        )
         if not payload["tools"]:
             payload.pop("tools")
         # timeout 拆分 — 历史 BUG: scalar timeout=300 在所有生命周期(connect/read/pool)
