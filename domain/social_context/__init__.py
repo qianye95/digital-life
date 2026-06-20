@@ -21,7 +21,11 @@ logger = logging.getLogger(__name__)
 
 
 def render_social_context(instance_id: str) -> str:
-    """渲染给 LLM 看的社交关系文本。空时返回空字符串。"""
+    """渲染给 LLM 看的社交关系文本。空时返回空字符串。
+
+    多通道设计：每个联系人显示**所有平台**的可达 ID + 发送提示。
+    模型据此决定「用什么 channel 发给谁」。
+    """
     lines: list[str] = ["## ── 我的社交关系 ──"]
 
     # ─── 联系人（contacts） ───
@@ -32,32 +36,43 @@ def render_social_context(instance_id: str) -> str:
         bots = [c for c in cs if c.get("kind") == "bot" and (c.get("name") or "").strip()]
         unnamed = [c for c in cs if not (c.get("name") or "").strip()]
 
-        def _short_pid(c: dict) -> str:
-            """提取联系人的飞书短码：ou_xxxx...（截断 12 位），私聊发消息时填入。
-            缺失返回空串。"""
+        def _channel_ids(c: dict) -> list[str]:
+            """提取联系人**所有平台**的可达 ID（带通道前缀提示）。
+
+            返回例：["lark:ou_eb5083eb…", "wechat:zhp@im.wechat…"]
+            模型据此知道「这个人飞书能 lark:dm:ou_xxx 发，微信能 wechat:dm:xxx 发」。
+            """
+            out = []
             for p in (c.get("platform_ids") or []):
-                if p.get("platform") == "feishu":
-                    pid = (p.get("platform_id") or "").strip()
-                    # ou_ 是 open_id，私聊用；oc_ 是单聊 chat_id，也能用
-                    if pid.startswith(("ou_", "oc_")):
-                        return pid[:12] + "…" if len(pid) > 12 else pid
-            return ""
+                pf = (p.get("platform") or "").strip()
+                pid = (p.get("platform_id") or "").strip()
+                if not pid:
+                    continue
+                short = pid[:16] + "…" if len(pid) > 16 else pid
+                if pf == "feishu":
+                    out.append(f"lark:{short}")
+                elif pf == "wechat":
+                    out.append(f"wechat:{short}")
+                else:
+                    out.append(f"{pf}:{short}")
+            return out
 
         if humans:
-            lines.append("\n联系人（人类），私聊请把 ou_xxx 填入 chat_id：")
-            for c in humans[:20]:  # 仅前 20，避免过长
-                short = _short_pid(c)
-                id_part = f"（{short}）" if short else ""
+            lines.append("\n联系人（人类），回复时按平台填 channel：")
+            lines.append("  格式：lark:dm:<ou_xxx>（飞书私聊）/ lark:group:<oc_xxx>（飞书群）/ wechat:dm:<xxx@im.wechat>（微信）")
+            for c in humans[:20]:
+                ids = _channel_ids(c)
+                id_part = f" [{', '.join(ids)}]" if ids else ""
                 note = (c.get("notes") or "").strip()
                 lines.append(f"  · {c['name']}{id_part}" + (f" / 备注: {note[:60]}" if note else ""))
         if bots:
-            lines.append("\n联系人（机器人，可用 @<name> 召唤）：")
+            lines.append("\n联系人（机器人，群内可用 @<name> 召唤）：")
             for c in bots:
-                short = _short_pid(c)
-                id_part = f"（{short}）" if short else ""
+                ids = _channel_ids(c)
+                id_part = f" [{', '.join(ids)}]" if ids else ""
                 note = (c.get("notes") or "").strip()
                 lines.append(
-                    f"  · {c['name']}{id_part}（与另一个实例对话请用 @{c['name']}）"
+                    f"  · {c['name']}{id_part}"
                     + (f" / 备注: {note[:60]}" if note else "")
                 )
         if unnamed:
@@ -69,11 +84,18 @@ def render_social_context(instance_id: str) -> str:
     try:
         chats = _collect_known_chats(instance_id)
         if chats:
-            lines.append("\n参与的群：")
+            lines.append("\n参与的群，回复时按平台填 channel：")
+            lines.append("  格式：lark:group:<oc_xxx>（飞书群）/ wechat:group:<group_id>（微信群，ClawBot 暂不支持群）")
             for cid, name in chats.items():
                 short = cid[:12] + "…" if len(cid) > 12 else cid
                 name_display = name or "(未命名群)"
-                lines.append(f"  · {name_display}（{short}）")
+                # 标注平台（飞书 oc_ / 微信 @im）
+                if cid.startswith("oc_"):
+                    lines.append(f"  · {name_display}（lark:{short}）")
+                elif "@im" in cid:
+                    lines.append(f"  · {name_display}（wechat:{short}）")
+                else:
+                    lines.append(f"  · {name_display}（{short}）")
     except Exception as exc:
         logger.debug("social_context chats failed: %s", exc)
 
@@ -95,13 +117,14 @@ def _collect_known_chats(instance_id: str) -> dict[str, str]:
     3. conversation_log 里历史出现过的 chat_id（统计 in 事件，最常用的）
     """
     out: dict[str, str] = {}
-    # 1. app.yaml messenger.chat_ids
+    # 1. app.yaml: messenger.chat_ids + channels.*.chat_ids
     try:
         import yaml
         from infrastructure.config import get_project_root
         app_yaml = get_project_root() / "apps" / instance_id / "config" / "app.yaml"
         if app_yaml.exists():
             cfg = yaml.safe_load(app_yaml.read_text(encoding="utf-8")) or {}
+            # 旧格式
             messenger = cfg.get("messenger") or {}
             for c in (messenger.get("chat_ids") or []):
                 if isinstance(c, dict):
@@ -113,6 +136,19 @@ def _collect_known_chats(instance_id: str) -> dict[str, str]:
                     cid = c.strip()
                     if cid and cid not in out:
                         out[cid] = ""
+            # 新格式 channels
+            channels = cfg.get("channels") or {}
+            if isinstance(channels, dict):
+                for ch_cfg in channels.values():
+                    if isinstance(ch_cfg, dict):
+                        for c in (ch_cfg.get("chat_ids") or []):
+                            if isinstance(c, str) and c.strip() and c.strip() not in out:
+                                out[c.strip()] = ""
+                            elif isinstance(c, dict):
+                                cid = str(c.get("chat_id") or c.get("id") or "").strip()
+                                name = str(c.get("name") or "").strip()
+                                if cid and cid not in out:
+                                    out[cid] = name
     except Exception as exc:
         logger.debug("_collect_known_chats app.yaml failed: %s", exc)
 
@@ -137,7 +173,7 @@ def _collect_known_chats(instance_id: str) -> dict[str, str]:
                 rows = conn.execute(
                     "SELECT conversation_id, COUNT(*) c "
                     "FROM conversation_log "
-                    "WHERE conversation_id LIKE 'oc_%' "
+                    "WHERE conversation_id IS NOT NULL AND conversation_id != '' "
                     "GROUP BY conversation_id "
                     "ORDER BY c DESC LIMIT 5"
                 ).fetchall()
