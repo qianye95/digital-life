@@ -1,24 +1,30 @@
 """LLM provider adapter — 模型知识的唯一家园，agent.py 不识别具体模型。
 
-每个模型家族出站 reasoning 的字段名不同、入站把 reasoning 拼回去的方式也不同：
-  GLM-4.5/4.6/5/5.2  出站 message.reasoning_content
-                     入站：GLM-5.2 实测会读取 reasoning_content 字段并投入
-                     reasoning context（2026-06 "789 数字"实验：含 reasoning_content
-                     的历史 assistant message 入站后，模型能正确回忆）。
-                     GLM-5 时代（旧）静默忽略 → 用 markdown 引证块 hack；
-                     5.2 已解除限制，用原生 reasoning_content 字段。
+每个家族仅声明 `thinking_keep_mode` 决定跨轮 reasoning 拼回策略：
+  reuse   把 reasoning_content 字段拼回历史 assistant message，模型继续读。
+          适合官方文档明确支持「入站 reasoning_content 字段」的家族：
+            GLM-4.5/4.6/5/5.2（本仓 789 实测）、Kimi（thinking.keep=on）、Qwen3。
+  drop    完全不拼历史 reasoning，只回传 content。
+          适合官方明确要求多轮不接 reasoning_content 的家族：
+            DeepSeek-Reasoner（带 reasoning_content 入站会被服务端 400）。
+          OpenAI o1/o3/o4 也走 drop —— 官方建议不拼历史 reasoning。
+          其它"未经实测"的家族默认走 drop，安全为先。
 
-  DeepSeek-R1     出站 message.reasoning_content；入站用 <think></think> 是行业标准
-  OpenAI o1/o3    出站 message.reasoning.summary；reasoning 不应入站
-  Claude thinking 出站 thinking block；可作为 thinking block 传回
+出站 reasoning 抽取（extract_reasoning）：
+  GLM / DeepSeek / Kimi / Qwen 四家 OpenAI 兼容 API 在 message.reasoning_content
+  字段上天然同名（各家官方文档明确），一份抽取逻辑覆盖。
+  OpenAI o 系列走 message.reasoning.summary，专属子类处理。
 
-抽象三端口：
-  extract_reasoning(message_dict) -> str         出站：从响应 message 拿 reasoning 文本
-  inject_into_messages(messages, reasonings)     入站：把上 N 轮 reasoning 注入到
-                                                  对应 assistant message
-  customize_payload(payload, reasoning_config)   请求：按家族选填 / 跳过 /
-                                                  重映射 GLM 特有的 reasoning_effort
-                                                  等字段。
+思考强度（customize_payload / reasoning_effort）：
+  GLM 原生 5 档；OpenAI o 系列自动收敛到 low/medium/high；其它家族不识别该字段，
+  payload 不带，避免某些严格模式（OpenAI o1）报 400。
+
+Claude：
+  原生 api.anthropic.com 走 /v1/messages 而非 OpenAI /chat/completions，
+  tools schema 与 thinking block 结构与本仓 agent.py 的 OpenAI 工具调用协议不兼容。
+  目前只能经 LiteLLM 等 OpenAI 兼容代理转译跑（对话+工具可用，但思考逐轮牺牲，
+  因 OpenAI 协议层无 thinking_blocks.signature 字段，stateless 多轮会 400）。
+  原生 Claude thinking 闭环需要独立 adapter（不在本版本范围）。
 """
 from __future__ import annotations
 
@@ -26,61 +32,49 @@ from typing import Any, Mapping, Protocol
 
 
 class LLMProvider(Protocol):
-    """模型家族适配接口。每个家族一个常量实现，agent.py 只调接口。"""
+    """模型家族适配接口。agent.py 只调接口，不识别当前是哪一家。
+
+    子类只需声明两件事：
+      1. name              — 家族标识
+      2. thinking_keep_mode — "reuse" | "drop"，决定历史 reasoning 怎么拼回
+
+    reasoning 抽取/注入/思考强度三件套的默认实现见 `_BaseProvider`；
+    仅当某家族有真差异化需求（如 OpenAI o1 出站字段不同）时再覆盖个别方法。
+    """
 
     name: str
+    thinking_keep_mode: str
 
-    def extract_reasoning(self, message: Mapping[str, Any]) -> str:
-        """从 LLM 响应的 message dict 里提取 reasoning 文本，没有返回 ''。"""
-        ...
-
+    def extract_reasoning(self, message: Mapping[str, Any]) -> str: ...
     def inject_into_messages(
         self,
         messages: list[dict[str, Any]],
         reasonings: list[str],
         *,
         max_rounds: int = 10,
-    ) -> list[dict[str, Any]]:
-        """把最近 N 轮 reasoning 就地拼回到对应 assistant message。"""
-        ...
-
+    ) -> list[dict[str, Any]]: ...
     def customize_payload(
         self,
         payload: dict[str, Any],
         *,
         reasoning_config: Mapping[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """按本家族规范修改 chat/completions 请求的 payload。
-
-        例子：
-          GLMProvider：把 reasoning_config["effort"] 写入 payload["reasoning_effort"]
-          GenericOpenAIProvider（gpt-4o 等）：丢弃 reasoning_config（不透传无效字段）
-          OpenAIReasoningProvider：把 GLM 的 minimal/xhigh 重映射到 low/high
-          ClaudeProvider（未来）：需要改 tools 格式 + thinking budget
-
-        返回新 payload 副本，不修改入参。
-        """
-        ...
+    ) -> dict[str, Any]: ...
 
 
-class GLMProvider:
-    """智谱 GLM（GLM-4.5/4.6/5）家族。
+class _BaseProvider:
+    """默认实现：基于 thinking_keep_mode 复用一套 inject 逻辑。
 
-    出站：message.reasoning_content
-    入站：GLM-5.2 实测确认 reasoning_content 字段会被读取并投入 reasoning context
-          （"我心里想的数字是 789"实验：模型正确回忆 789）。GLM-5 时代静默忽略
-          已被 5.2 修复。
-    改成原生 reasoning_content 字段拼接，不再用"上一轮思考" markdown hack——
-    避免长 context 中模型 reasoning 卡在早期 phase、循环重复旧 thinking。
-
-    历史：GLM-5 时代 content 注入引用块 "上一轮思考"  是因为入站 reasoning_content
-    被静默忽略——那时只能塞 content。GLM-5.2 时代这个限制已解除。
+    家庭类只需继承并声明 name + thinking_keep_mode，不再各写注入代码。
     """
 
-    name = "glm"
+    name: str = "base"
+    thinking_keep_mode: str = "drop"
 
     def extract_reasoning(self, message: Mapping[str, Any]) -> str:
-        """出站：从 LLM 响应的 message dict 拿 reasoning_content。"""
+        """国内主流模型（GLM/DeepSeek/Qwen/Kimi）出站 reasoning_content 字段同名。
+
+        这是 4 家官方文档逐字确认过的兼容点；本仓 GLM 789 数字实验佐证。
+        """
         rc = message.get("reasoning_content")
         if isinstance(rc, str) and rc.strip():
             return rc.strip()
@@ -96,27 +90,16 @@ class GLMProvider:
         *,
         max_rounds: int = 10,
     ) -> list[dict[str, Any]]:
-        """把最近 N 轮 reasoning 注入到对应 assistant message 的 `reasoning_content` 字段。
+        """按 family 声明的 thinking_keep_mode 决定是否拼回历史 reasoning。
 
-        GLM-5.2（2026-06 实测）：
-          - 出站 assistant message 带 reasoning_content 字段（模型自己生成的思考）
-          - 入站（多轮传回）reasoning_content 字段会被模型读取并投入下一轮的
-            reasoning context —— GLM-5 时代静默忽略已解除。
+        reuse：把 reasoning_content 写回对应 assistant message（GLM/Kimi/Qwen）。
+        drop ：直接 return（DeepSeek-Reasoner 服务端要求；OpenAI o 系列官方建议）。
 
-        实验证据：含 reasoning_content 字段的 assistant 历史消息入站后，
-        模型能在多轮里精确回忆 "789"（之前提示要求记住的数字）。
-
-        实现要点：
-          1. 只 patch 真实历史 assistant（跳过 `_is_fake=True` 注入占位）
-          2. 保留 assistant 原始 content 不动
-          3. 把推理文本写到 `reasoning_content` 字段
-          4. trimmed 长度限制：单轮保留 600 chars（300 头 + 300 尾），
-             避免无限堆叠
+        单轮 reasoning 截到 600 chars（300 头 + 300 尾），避免无限堆叠。
         """
-        if not reasonings:
+        if self.thinking_keep_mode != "reuse" or not reasonings:
             return messages
         recent = reasonings[-max_rounds:]
-        # 守卫同上：只 patch 真实历史 assistant，跳过注入占位（fake-assistant）
         assistant_idx = [
             i for i, m in enumerate(messages)
             if m.get("role") == "assistant"
@@ -130,7 +113,6 @@ class GLMProvider:
         new_messages = list(messages)
         for assistant_index, think in zip(to_patch_assistants, to_patch_thinks):
             m = dict(new_messages[assistant_index])
-            # 修剪长 reasoning：保留头尾以保证可读性
             if len(think) <= 600:
                 trimmed_think = think
             else:
@@ -147,67 +129,25 @@ class GLMProvider:
         *,
         reasoning_config: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """GLM：reasoning_effort 字段原生支持（minimal/low/medium/high/xhigh）。"""
-        out = dict(payload)
-        if reasoning_config and reasoning_config.get("effort"):
-            out["reasoning_effort"] = reasoning_config["effort"]
-        return out
+        """默认：不修改 payload。带 reasoning_effort 字段的家族自行覆盖。"""
+        return dict(payload)
 
 
-class GenericOpenAIProvider:
-    """通用 OpenAI 兼容家族（gpt-4o / deepseek-chat / qwen / kimi / 本地）
+class GLMProvider(_BaseProvider):
+    """智谱 GLM（GLM-4.5/4.6/5/5.2）家族 —— 当前唯一在生产中验证过的家族。
 
-    不认 reasoning_effort 字段——某些严格模式（OpenAI o1）会 400。
-    安全做法：丢弃 reasoning_config，让模型按自己默认行为思考。
-    DeepSeek-R1 / Qwen-QwQ 内部自带 reasoning（不靠 external effort 控制）。
+    出站：message.reasoning_content（4 家国内 OpenAI 兼容 API 同名）
+    入站：GLM-5.2 实测读取 reasoning_content 字段并投入下一轮 reasoning context
+          （2026-06 "789 数字"实验：含 reasoning_content 的历史 assistant message
+          入站后，模型能在多轮里精确回忆）。
+
+    GLM-5 时代入站被静默忽略 → 用 markdown "上一轮思考" 引证块 hack；
+    GLM-5.2 已解除限制，用原生 reasoning_content 字段。改回原生是为避免长 context
+    中模型 reasoning 卡在早期 phase、循环重复旧 thinking。
     """
 
-    name = "generic_openai"
-
-    def extract_reasoning(self, message: Mapping[str, Any]) -> str:
-        """大部分 OpenAI 兼容 API 不在 response 里显式带 reasoning；
-        DeepSeek-R1 走 reasoning_content 兼容（跟 GLM 一致），尝试取一次。"""
-        rc = message.get("reasoning_content")
-        if isinstance(rc, str) and rc.strip():
-            return rc.strip()
-        rc2 = message.get("reasoning")
-        if isinstance(rc2, str) and rc2.strip():
-            return rc2.strip()
-        return ""
-
-    def inject_into_messages(
-        self,
-        messages: list[dict[str, Any]],
-        reasonings: list[str],
-        *,
-        max_rounds: int = 10,
-    ) -> list[dict[str, Any]]:
-        """DeepSeek-R1 用 <think></think> 入站（行业标准）。
-        其余 gpt-4o 等：reasoning 直接丢（不影响主路径，仅跨轮系延续性差一些）。"""
-        if not reasonings:
-            return messages
-        recent = reasonings[-max_rounds:]
-        assistant_idx = [
-            i for i, m in enumerate(messages)
-            if m.get("role") == "assistant"
-            and not m.get("_is_fake")
-        ]
-        if not assistant_idx:
-            return messages
-        pair_count = min(len(recent), len(assistant_idx))
-        to_patch_assistants = assistant_idx[-pair_count:]
-        to_patch_thinks = recent[-pair_count:]
-        new_messages = list(messages)
-        for ai, think in zip(to_patch_assistants, to_patch_thinks):
-            m = dict(new_messages[ai])
-            if len(think) <= 600:
-                trimmed = think
-            else:
-                trimmed = think[:300] + "…（中段省略）…" + think[-300:]
-            # DeepSeek 兼容 reasoning_content（主流中国模型采用同一字段）
-            m["reasoning_content"] = trimmed
-            new_messages[ai] = m
-        return new_messages
+    name = "glm"
+    thinking_keep_mode = "reuse"
 
     def customize_payload(
         self,
@@ -215,11 +155,31 @@ class GenericOpenAIProvider:
         *,
         reasoning_config: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """gpt-4o / deepseek / qwen / kimi 等不认 reasoning_effort：丢弃。"""
-        return dict(payload)
+        """GLM：reasoning_effort 字段原生支持（minimal/low/medium/high/xhigh）。"""
+        out = dict(payload)
+        if reasoning_config and reasoning_config.get("effort"):
+            out["reasoning_effort"] = reasoning_config["effort"]
+        return out
 
 
-class OpenAIReasoningProvider(GenericOpenAIProvider):
+class GenericOpenAIProvider(_BaseProvider):
+    """通用 OpenAI 兼容家族 —— DeepSeek / Qwen / Kimi / Moonshot / GPT-4o 等。
+
+    出站抽取默认推理字段（4 家国内模型同名 reasoning_content；GPT 系列多数无 reasoning 字段）。
+    入站 drop：默认不拼历史 reasoning —— 这是安全默认。
+      ⚠️ DeepSeek-Reasoner 服务端明确要求多轮 messages 不带 reasoning_content，
+         否则返回 400（官方文档原文），旧版 inject 全量拼回是 latent bug。
+      ⚠️ GLM/Kimi/Qwen 这三家**可以**拼回去（思考链跨轮延续），但本仓仅实测过 GLM；
+         想为这 3 家启用跨轮 thinking，把对应家族独立成 Provider 类并设
+         thinking_keep_mode="reuse"，不要改本类默认。
+    请求参数：丢弃 reasoning_config（不透传无效字段，避免 OpenAI o1 严格模式 400）。
+    """
+
+    name = "generic_openai"
+    thinking_keep_mode = "drop"
+
+
+class OpenAIReasoningProvider(_BaseProvider):
     """OpenAI o1 / o3 / o4 推理模型家族。
 
     特点：
@@ -229,6 +189,7 @@ class OpenAIReasoningProvider(GenericOpenAIProvider):
     """
 
     name = "openai_reasoning"
+    thinking_keep_mode = "drop"
 
     def extract_reasoning(self, message: Mapping[str, Any]) -> str:
         """OpenAI o1: 拿 message.reasoning.summary（字符串）。"""
@@ -241,12 +202,8 @@ class OpenAIReasoningProvider(GenericOpenAIProvider):
             summary = ""
         if isinstance(summary, str) and summary.strip():
             return summary.strip()
-        # fallback 走父类
+        # fallback 走 base 的 reasoning_content（应对 OpenAI 兼容代理转译）
         return super().extract_reasoning(message)
-
-    def inject_into_messages(self, messages, reasonings, *, max_rounds=10):
-        """OpenAI o1: 不要把 reasoning 注入历史 —— 官方建议省略。"""
-        return messages
 
     def customize_payload(
         self,
@@ -254,7 +211,7 @@ class OpenAIReasoningProvider(GenericOpenAIProvider):
         *,
         reasoning_config: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """OpenAI o1: reasoning_effort 重映射 GLM 值域 → OpenAI 值域。"""
+        """OpenAI o1: reasoning_effort 重映射 GLM 5 档 → OpenAI 3 档。"""
         out = dict(payload)
         if reasoning_config and reasoning_config.get("effort"):
             effort = reasoning_config["effort"]
@@ -269,21 +226,24 @@ class OpenAIReasoningProvider(GenericOpenAIProvider):
         return out
 
 
-# 简易工厂：按 model name 推断家族。未来接 deepseek/claude 在此加分支。
+# 简易工厂：按 model name 推断家族。
+# 接新家族（含给 DeepSeek/Kimi/Qwen 显式启用 thinking_keep="reuse"）在此加分支。
 def resolve_provider(model: str) -> LLMProvider:
-    """按 model 名选 provider。未识别时回落 GLM（当前唯一接的家族）。"""
+    """按 model 名选 provider。未识别回落 GenericOpenAIProvider（保守 drop）。
+
+    顺序：先识别需要专属类（o1/o3/o4 → OpenAIReasoningProvider），
+    再识别 GLM 家族（GLMProvider，已实测 thinking 闭环），
+    其余一律 GenericOpenAIProvider（默认 drop，避免 DeepSeek 等家族 400 风险）。
+    """
     m = (model or "").lower()
     if "o1" in m or "o3" in m or "o4" in m:
         return OpenAIReasoningProvider()
-    if "deepseek" in m or "qwen" in m or "kimi" in m or "moonshot" in m:
-        return GenericOpenAIProvider()
-    if "claude" in m or "anthropic" in m:
-        # TODO: Claude 需要单独 provider（tools 格式 + thinking block + 不同 API endpoint）
-        return GenericOpenAIProvider()
-    if "gpt-" in m or "openai" in m:
-        return GenericOpenAIProvider()
-    # glm-* / glm5 / 默认走 GLM
-    return GLMProvider()
+    if "glm" in m:
+        return GLMProvider()
+    # deepseek / qwen / kimi / moonshot / gpt-* / claude / 其他 OpenAI 兼容
+    # 默认走 GenericOpenAIProvider（thinking_keep_mode=drop），不拼历史 reasoning。
+    # Claude 经 LiteLLM 代理时也走这条，但无法维持 thinking 闭环（见 file docstring）。
+    return GenericOpenAIProvider()
 
 
 __all__ = [
@@ -293,4 +253,3 @@ __all__ = [
     "OpenAIReasoningProvider",
     "resolve_provider",
 ]
-
