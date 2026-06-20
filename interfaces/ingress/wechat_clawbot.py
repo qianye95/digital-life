@@ -118,18 +118,35 @@ class WeChatClawBotAdapter:
         while self._running:
             try:
                 messages = await self._get_updates()
+                if messages:
+                    logger.info("ClawBot received %d message(s)", len(messages))
                 for raw_msg in messages:
+                    # 提取 context_token（用 client_id 字段，ClawBot 2.4.4 实测）
+                    context_token = str(raw_msg.get("context_token") or raw_msg.get("client_id") or "")
                     normalized = self._normalize(raw_msg)
                     if normalized:
+                        if context_token:
+                            normalized.context_token = context_token
                         # 更新 bot_id（从第一条消息推断）
                         if not self._bot_id and raw_msg.get("to_user_id"):
                             self._bot_id = raw_msg["to_user_id"]
+                        logger.info(
+                            "ClawBot message normalized: platform=%s sender=%s content=%s",
+                            normalized.platform,
+                            normalized.sender_id[:20],
+                            normalized.content[:50],
+                        )
                         for handler in self._handlers:
-                            asyncio.ensure_future(handler(normalized))
+                            try:
+                                await handler(normalized)
+                            except Exception as exc:
+                                logger.error("ClawBot handler error: %s", exc)
+                    else:
+                        logger.debug("ClawBot message skipped (no text content)")
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                logger.warning("ClawBot poll error: %s, retrying in 5s", exc)
+                logger.warning("ClawBot poll error: %s", exc)
                 await asyncio.sleep(5)
 
     async def _get_updates(self) -> list[dict[str, Any]]:
