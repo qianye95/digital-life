@@ -529,6 +529,32 @@ def _inject_msg_to_running_session(
         logger.info(
             "L4 direct: injected %s event %d to running session", kind, event_id
         )
+        # 如果 session 正在 rest/sleep（emit_wait 后变 BLOCKED），
+        # mid-session 注入可能赶不上最后一轮。确保事件不会被丢：
+        # session 结束后 BLOCKED 时，cron 下次 tick 会消费 unconsumed events。
+        # 但为了即时性，这里也触发一次 wake_if_pending（不等 60s cron tick）。
+        try:
+            import threading as _th
+            def _delayed_wake_check():
+                import time as _time
+                _time.sleep(3)  # 等 session 把 rest 处理完
+                try:
+                    from domain.lifecycle.affairs.runtime import get_affair
+                    aff = get_affair(affair_id)
+                    if aff and aff.status.value in ("BLOCKED", "PENDING"):
+                        logger.info("mid-session inject: affair %s now BLOCKED, triggering wake for event %d",
+                                    affair_id[:8], event_id)
+                        from domain.lifecycle.scheduler import wake_digital_life
+                        wake_digital_life(
+                            instance_id=instance_id,
+                            trigger_reason=f"message:delayed_after_inject",
+                            affair_id=affair_id,
+                        )
+                except Exception as exc:
+                    logger.debug("delayed wake check failed: %s", exc)
+            _th.Thread(target=_delayed_wake_check, daemon=True).start()
+        except Exception:
+            pass
     except Exception as exc:
         logger.debug("L4 direct: inject to running session failed: %s", exc)
 
