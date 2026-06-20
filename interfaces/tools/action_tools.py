@@ -417,6 +417,26 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
     global _GROUP_REPLY_CHAT_ID
     group_chat_id = _get_group_reply_chat_id() or _get_recent_group_chat_id()
 
+    # 从 contacts 表找 group 联系人作为 fallback（initiative / timer 触发时无 reply context）
+    if not group_chat_id:
+        try:
+            from domain.contacts import list_contacts
+            for c in list_contacts() or []:
+                if c.get("kind") != "group":
+                    continue
+                for p in (c.get("platform_ids") or []):
+                    if p.get("platform") == "feishu":
+                        pid = (p.get("platform_id") or "").strip()
+                        if pid.startswith("oc_"):
+                            group_chat_id = pid
+                            logger.info("express_to_human: group fallback from contacts: %s (%s)",
+                                        c.get("name", ""), pid[:16] + "...")
+                            break
+                if group_chat_id:
+                    break
+        except Exception:
+            pass
+
     # 注意：移除了"is_group_wake force channel"自动覆盖逻辑。
     # 现在 channel/chat_id 已在前面解析完成，模型自主决策回复目标。
     # 仅当 channel 仍是默认值时（initiative / 模型未指定）才用 group context 兜底。

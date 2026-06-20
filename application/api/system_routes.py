@@ -695,6 +695,45 @@ async def _handle_create_instance(request: web.Request) -> web.Response:
     # 读回 registry 给完整 instance 字段
     registry = _load_registry() or {}
     meta = registry.get(iid, {})
+
+    # 自动加入 last_active.json + 直接 spawn 子进程（不需要重启 gateway）
+    spawn_ok = False
+    spawn_error = ""
+    try:
+        from gateway.instance_supervisor import write_last_active, InstanceSupervisor
+        # 把新实例追加到 last_active.json
+        import json as _json
+        path = get_project_root() / "var" / "run" / "last_active.json"
+        existing = []
+        if path.exists():
+            try:
+                existing = list(_json.loads(path.read_text(encoding="utf-8")).get("instances") or [])
+            except Exception:
+                existing = []
+        if iid not in existing:
+            existing.append(iid)
+        write_last_active(existing)
+
+        # 直接 spawn（如果 supervisor 存在的话）
+        sup = request.app.get("supervisor")
+        if sup and isinstance(sup, InstanceSupervisor):
+            import asyncio as _aio
+            await sup._spawn(iid)
+            spawn_ok = True
+        else:
+            spawn_ok = False
+            spawn_error = "supervisor not available in app context"
+    except Exception as exc:
+        spawn_error = str(exc)
+        logger.warning("auto-spawn new instance %s failed: %s", iid, exc)
+
+    result_hint = (
+        f"新实例「{display_name}」已初始化"
+        + (f"并自动启动（PID 已 spawn）。" if spawn_ok else
+           f"。自动 spawn 失败（{spawn_error}），请重启网关 `digital-life restart`。")
+        + " 首次唤醒前请确保 secrets.env 的 GLM_API_KEY 与 FEISHU_APP_SECRET 正确。"
+    )
+
     return web.json_response({
         "ok": True,
         "instance": {
@@ -704,8 +743,8 @@ async def _handle_create_instance(request: web.Request) -> web.Response:
             "accent_color": meta.get("accent_color", ""),
             "avatar": meta.get("avatar", ""),
             "active": is_instance_active(iid),
-            "needs_restart": True,
-            "hint": "新实例已初始化。重启网关 (`digital-life restart`) 实例会被自动 spawn；不重启时实例能在配置中心看到；首次唤醒前请确保 secrets.env 的 GLM_API_KEY 与 FEISHU_APP_SECRET 正确。",
+            "spawned": spawn_ok,
+            "hint": result_hint,
         },
     })
 
@@ -1013,10 +1052,45 @@ async def _handle_toggle_instance_active(request: web.Request) -> web.Response:
         logger.exception("set_instance_active failed")
         return web.json_response({"error": str(exc)}, status=500)
 
-    # 如果从 active → inactive，且当前实例子进程还跑着，让 supervisor 下次 tick
-    # 自然回收（supervisor 通过 last_active.json 决定 spawn，active=false 后下次 tick
-    # 不再 spawn 这个 instance；如果已经在跑，会在 crash 时停止重启）。
-    # 立即停正在跑的子进程需要 supervisor 加 terminate API，目前靠自然回收即可。
+    # 同步 last_active.json + spawn / stop 子进程
+    spawn_action = ""
+    try:
+        import json as _json
+        from gateway.instance_supervisor import write_last_active
+        path = get_project_root() / "var" / "run" / "last_active.json"
+        existing = []
+        if path.exists():
+            try:
+                existing = list(_json.loads(path.read_text(encoding="utf-8")).get("instances") or [])
+            except Exception:
+                existing = []
+
+        if target_active and iid not in existing:
+            # active=true → 加入列表 → 即时 spawn
+            existing.append(iid)
+            write_last_active(existing)
+            sup = request.app.get("supervisor")
+            if sup:
+                import asyncio as _aio
+                await sup._spawn(iid)
+                spawn_action = f"实例已 spawn（pid 已启动）。"
+            else:
+                spawn_action = "已加入 last_active，下次重启后 spawn。"
+        elif not target_active and iid in existing:
+            # active=false → 从列表移除 → 立即停子进程
+            existing.remove(iid)
+            write_last_active(existing)
+            sup = request.app.get("supervisor")
+            if sup and hasattr(sup, "stop"):
+                try:
+                    await sup.stop(iid)
+                    spawn_action = "实例子进程已停止。"
+                except Exception:
+                    spawn_action = "已从 last_active 移除，进程自然回收。"
+            else:
+                spawn_action = "已从 last_active 移除，进程自然回收。"
+    except Exception as exc:
+        spawn_action = f"last_active 同步失败（{exc}）；重启网关后生效。"
 
     return web.json_response({
         "ok": True,
@@ -1025,8 +1099,7 @@ async def _handle_toggle_instance_active(request: web.Request) -> web.Response:
         "active": target_active,
         "reason": reason,
         "hint": (
-            f"app.yaml.active 已改为 {target_active}。"
-            + ("下次 master tick / gateway restart 后该实例子进程停止 spawn；已跑的会在自然生命周期结束。" if not target_active else "下次 master tick / master restart 会自动 spawn 该实例子进程。")
+            f"app.yaml.active 已改为 {target_active}。{spawn_action}"
         ),
     })
 

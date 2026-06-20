@@ -49,11 +49,15 @@ def _last_active_path() -> Path:
 
 
 def read_last_active() -> list[str]:
-    """Read last-active instance list. Empty list = first-time, return all active.
+    """读活跃实例列表 —— "之前谁跑，现在还谁跑"。
 
-    Always filter by is_instance_active() — even if last_active.json contains
-    an instance, respect the active flag in apps/<id>/data/config.yaml.
-    Also cross-check against instances.yaml registry to prune stale IDs.
+    从 last_active.json 读取上次运行的实例列表；文件不存在 / 首次启动时
+    fallback 到 discover_active_instances()（扫 apps/*/config/app.yaml
+    里 active=true 的实例）。
+
+    新建实例 → _handle_create_instance 会 write_last_active + 直接 spawn，
+    不需要重启 gateway。
+    toggle active → _handle_toggle_instance_active 会 write_last_active。
     """
     from infrastructure.config import is_instance_active, discover_instances
     from infrastructure.config import discover_active_instances
