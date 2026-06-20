@@ -73,6 +73,43 @@ def _j(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, default=str)
 
 
+def _list_contact_candidates() -> list[dict]:
+    """列出可用联系人/群的 channel 候选——express_to_human 报错时返回给模型。"""
+    out = []
+    try:
+        from domain.contacts import list_contacts as _lc
+        for c in (_lc() or []):
+            for p in (c.get("platform_ids") or []):
+                pf = (p.get("platform") or "").strip()
+                pid = (p.get("platform_id") or "").strip()
+                if not pid:
+                    continue
+                if pf == "feishu":
+                    prefix = "lark"
+                elif pf == "wechat":
+                    prefix = "wechat"
+                else:
+                    prefix = pf
+                is_group = pid.startswith("oc_")
+                kind = "group" if is_group else "dm"
+                name = (c.get("name") or "").strip() or "(未命名)"
+                out.append({"name": name, "channel": f"{prefix}:{kind}:{pid}"})
+    except Exception:
+        pass
+    try:
+        # 也加群聊候选
+        from domain.social_context import _collect_known_chats
+        from infrastructure.config import get_app_instance_id as _get_iid
+        iid = _get_iid() or ""
+        if iid:
+            for cid, cname in (_collect_known_chats(iid) or {}).items():
+                prefix = "lark" if cid.startswith("oc_") else ("wechat" if "@im" in cid else "lark")
+                out.append({"name": cname or "群", "channel": f"{prefix}:group:{cid}"})
+    except Exception:
+        pass
+    return out[:15]  # cap
+
+
 def _get_runtime_channel_prefix() -> str:
     """返回当前事件来源的平台前缀（feishu→lark / wechat→wechat）。
 
@@ -498,15 +535,17 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
         elif _grp:
             channel = f"{_pf}:{_grp}"
         else:
+            # 报错时列出可用联系人/群候选
+            _candidates = _list_contact_candidates()
             return _j({
                 "sent": False,
                 "channel": f"{_pf}:default",
                 "text": text,
                 "error": (
-                    "你没有指定发给谁（chat_id 必填），且这次唤醒也没有回复上下文（比如 timer/vital/initiative）。"
-                    "请用 sense_contacts 查看你的联系人和群，拿到 oc_xxx(群)/ou_xxx(私聊) 后，"
-                    "再调 express_to_human(text, chat_id='oc_xxx') 显式指定目标。"
+                    "你没有指定发给谁（chat_id 必填），且这次唤醒也没有回复上下文。"
+                    "请填写 channel 或 chat_id 后重试。"
                 ),
+                "candidates": _candidates,
             })
 
     # ── WeChat (ClawBot) 发送路径 —— 按 channel 前缀分发 ──

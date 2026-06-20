@@ -32,9 +32,8 @@ def render_social_context(instance_id: str) -> str:
     try:
         from domain.contacts import list_contacts
         cs = list_contacts() or []
-        humans = [c for c in cs if c.get("kind") == "human" and (c.get("name") or "").strip()]
-        bots = [c for c in cs if c.get("kind") == "bot" and (c.get("name") or "").strip()]
-        unnamed = [c for c in cs if not (c.get("name") or "").strip()]
+        humans = [c for c in cs if c.get("kind") == "human"]
+        bots = [c for c in cs if c.get("kind") == "bot"]
 
         def _channel_ids(c: dict) -> list[str]:
             """提取联系人**所有平台**的可达 ID（带通道前缀提示）。
@@ -62,21 +61,25 @@ def render_social_context(instance_id: str) -> str:
             lines.append("  格式：lark:dm:<ou_xxx>（飞书私聊）/ lark:group:<oc_xxx>（飞书群）/ wechat:dm:<xxx@im.wechat>（微信）")
             for c in humans[:20]:
                 ids = _channel_ids(c)
+                name = (c.get("name") or "").strip()
+                label = name if name else "(未命名)"
                 id_part = f" [{', '.join(ids)}]" if ids else ""
                 note = (c.get("notes") or "").strip()
-                lines.append(f"  · {c['name']}{id_part}" + (f" / 备注: {note[:60]}" if note else ""))
+                lines.append(f"  · {label}{id_part}" + (f" / 备注: {note[:60]}" if note else ""))
         if bots:
             lines.append("\n联系人（机器人，群内可用 @<name> 召唤）：")
             for c in bots:
                 ids = _channel_ids(c)
+                name = (c.get("name") or "").strip()
+                label = name if name else "(未命名 bot)"
                 id_part = f" [{', '.join(ids)}]" if ids else ""
                 note = (c.get("notes") or "").strip()
-                lines.append(
-                    f"  · {c['name']}{id_part}"
-                    + (f" / 备注: {note[:60]}" if note else "")
-                )
-        if unnamed:
-            lines.append(f"\n（还有 {len(unnamed)} 个未命名的 stub 联系人）")
+                lines.append(f"  · {label}{id_part}" + (f" / 备注: {note[:60]}" if note else ""))
+
+        # 统计未命名 stub（信息提示，不隐藏）
+        unnamed_count = sum(1 for c in cs if not (c.get("name") or "").strip())
+        if unnamed_count > 0 and unnamed_count > len(humans) + len(bots):
+            lines.append(f"\n（其中 {unnamed_count - len(humans) - len(bots)} 个 stub 未在上方列出）")
     except Exception as exc:
         logger.debug("social_context contacts failed: %s", exc)
 
