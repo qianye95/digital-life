@@ -184,6 +184,8 @@ def _instances_summary() -> list[dict[str, Any]]:
                 "process_state": process_state,    # 物理进程（offline/online）
                 "health_state": health_state,      # 健康度（ok/error）—— 事件驱动
                 "health_reason": health_reason,    # 失败原因 / 恢复提示
+                # 通道状态：每个通道是否已连接（凭证齐全=connected，否则=unconfigured）
+                "channels": _read_channel_status(iid),
                 # 复合视觉态（前端 status 灯直接用这个）
                 "status": visual_state,
             }
@@ -391,6 +393,59 @@ def _status_label(visual: str) -> str:
         "working": "工作中",
         "idle": "待命",
     }.get(str(visual or "idle"), str(visual or "—"))
+
+
+def _read_channel_status(iid: str) -> list[dict[str, str]]:
+    """读实例各通道的连接状态——有凭证=connected，无凭证=unconfigured。"""
+    import yaml as _yaml
+    import os as _os
+
+    root = get_project_root()
+    cfg_path = root / "apps" / iid / "config" / "app.yaml"
+    secrets_path = root / "apps" / iid / "config" / "secrets.env"
+    if not cfg_path.exists():
+        return []
+    try:
+        cfg = _yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return []
+
+    # 读 secrets.env
+    secrets: dict[str, str] = {}
+    if secrets_path.exists():
+        for line in secrets_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                secrets[k.strip()] = v.strip().strip('"').strip("'")
+
+    channels = []
+
+    # 飞书：messenger.app_id 或 channels.feishu.app_id
+    feishu_app_id = ""
+    messenger = cfg.get("messenger") or {}
+    ch_feishu = (cfg.get("channels") or {}).get("feishu") or {}
+    feishu_app_id = str(messenger.get("app_id") or ch_feishu.get("app_id") or "").strip()
+    feishu_secret = secrets.get("FEISHU_APP_SECRET", "").strip()
+    channels.append({
+        "platform": "feishu",
+        "label": "飞书",
+        "status": "connected" if feishu_app_id and feishu_secret else "unconfigured",
+        "identity": feishu_app_id[:16] + "…" if len(feishu_app_id) > 16 else feishu_app_id,
+    })
+
+    # 微信：WECHAT_BOT_TOKEN
+    wechat_token = secrets.get("WECHAT_BOT_TOKEN", "").strip()
+    ch_wechat = (cfg.get("channels") or {}).get("wechat") or {}
+    wechat_bot_id = str(ch_wechat.get("bot_id") or "").strip()
+    channels.append({
+        "platform": "wechat",
+        "label": "微信",
+        "status": "connected" if wechat_token else "unconfigured",
+        "identity": wechat_bot_id[:16] + "…" if len(wechat_bot_id) > 16 else wechat_bot_id,
+    })
+
+    return channels
 
 
 # ────────────────────────────────────────────────────────────────────────────
