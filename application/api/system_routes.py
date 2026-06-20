@@ -54,6 +54,11 @@ def add_system_routes(app: web.Application) -> None:
         f"{SYSTEM_API_PREFIX}/instances/{{iid}}/wechat-login/status",
         _handle_wechat_login_status,
     )
+    # 后端代理 ClawBot 二维码页面（绕过 X-Frame-Options: DENY）
+    app.router.add_get(
+        f"{SYSTEM_API_PREFIX}/instances/{{iid}}/wechat-login/qr-page",
+        _handle_wechat_qr_page,
+    )
     app.router.add_get(f"{SYSTEM_API_PREFIX}/projects", _handle_projects)
     app.router.add_post(f"{SYSTEM_API_PREFIX}/projects", _handle_create_project)
     app.router.add_delete(f"{SYSTEM_API_PREFIX}/projects/{{pid}}", _handle_delete_project)
@@ -573,6 +578,30 @@ async def _handle_wechat_login_status(request: web.Request) -> web.Response:
         return web.json_response({"status": "expired", "message": "二维码已过期，请重新获取"})
 
     return web.json_response({"status": "wait"})
+
+
+async def _handle_wechat_qr_page(request: web.Request) -> web.Response:
+    """GET /api/system/instances/{iid}/wechat-login/qr-page?qrcode_url=xxx
+
+    后端代理 ClawBot 二维码页面——去掉 X-Frame-Options 让 iframe 能嵌入。
+    """
+    qr_url = request.query.get("qrcode_url") or ""
+    if not qr_url:
+        return web.Response(text="missing qrcode_url", status=400)
+    if not qr_url.startswith("https://liteapp.weixin.qq.com"):
+        return web.Response(text="invalid url", status=400)
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(qr_url)
+            body = resp.text
+    except Exception as exc:
+        return web.Response(text=f"fetch failed: {exc}", status=502)
+    # 去掉防嵌套 header
+    headers = {
+        "Content-Type": "text/html; charset=utf-8",
+    }
+    return web.Response(text=body, headers=headers)
 
 
 def _write_env_secret(iid: str, key: str, value: str) -> None:
