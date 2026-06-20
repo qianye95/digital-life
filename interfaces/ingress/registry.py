@@ -93,19 +93,18 @@ def parse_channels(app_yaml_cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
     if not app_yaml_cfg:
         return {}
 
-    # 新格式优先
-    channels = app_yaml_cfg.get("channels")
-    if isinstance(channels, dict) and channels:
-        return channels
-
-    # 旧格式兼容：messenger → 单通道
+    channels = {}
+    # 1. 新格式 channels 段
+    raw_channels = app_yaml_cfg.get("channels")
+    if isinstance(raw_channels, dict):
+        channels.update(raw_channels)
+    # 2. 旧格式 messenger 段 → 补充为 feishu channel（不覆盖已有的 channels.feishu）
     messenger = app_yaml_cfg.get("messenger")
     if isinstance(messenger, dict) and messenger:
         msgr_type = str(messenger.get("type") or "feishu")
-        # 用 messenger 的 type 作为 channel name（通常是 feishu）
-        return {msgr_type: messenger}
-
-    return {}
+        if msgr_type not in channels:
+            channels[msgr_type] = messenger
+    return channels
 
 
 def create_adapters_from_config(
