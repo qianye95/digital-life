@@ -583,25 +583,25 @@ async def _handle_wechat_login_status(request: web.Request) -> web.Response:
 async def _handle_wechat_qr_page(request: web.Request) -> web.Response:
     """GET /api/system/instances/{iid}/wechat-login/qr-page?qrcode_url=xxx
 
-    后端代理 ClawBot 二维码页面——去掉 X-Frame-Options 让 iframe 能嵌入。
+    后端用 Python qrcode 库把 ClawBot 返回的 URL 编码成 PNG 图片。
+    微信原始页面是 JS 渲染的 + X-Frame-Options: DENY——不能直接 iframe。
     """
     qr_url = request.query.get("qrcode_url") or ""
     if not qr_url:
         return web.Response(text="missing qrcode_url", status=400)
-    if not qr_url.startswith("https://liteapp.weixin.qq.com"):
-        return web.Response(text="invalid url", status=400)
-    import httpx
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(qr_url)
-            body = resp.text
-    except Exception as exc:
-        return web.Response(text=f"fetch failed: {exc}", status=502)
-    # 去掉防嵌套 header
-    headers = {
-        "Content-Type": "text/html; charset=utf-8",
-    }
-    return web.Response(text=body, headers=headers)
+
+    import io
+    import qrcode
+
+    qr = qrcode.QRCode(version=1, box_size=8, border=2)
+    qr.add_data(qr_url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+
+    return web.Response(body=buf.getvalue(), content_type="image/png")
 
 
 def _write_env_secret(iid: str, key: str, value: str) -> None:
