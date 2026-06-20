@@ -73,6 +73,21 @@ def _j(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, default=str)
 
 
+def _get_runtime_channel_prefix() -> str:
+    """返回当前事件来源的平台前缀（feishu→lark / wechat→wechat）。
+
+    用于 express_to_human 合成默认 channel 字符串——决定走飞书还是微信发送路径。
+    """
+    try:
+        from domain.lifecycle.runtime_context import get_current_event_platform
+        pf = get_current_event_platform()
+        if pf:
+            return pf
+    except Exception:
+        pass
+    return "lark"  # 默认 lark（现网飞书）
+
+
 def _resolve_chat_id(short_or_full: str) -> str:
     """通用短码→完整 ID 补全。模型传 chat_id 时可能给的是 prompt 里的短码
     (oc_5ff7967bf5… / ou_eb5083…)，本函数负责还原成完整 ID 给飞书 API。
@@ -368,7 +383,8 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
             kind_str = "group"
         else:
             kind_str = "dm"
-        channel = f"lark:{kind_str}:{chat_id_arg}"
+        _pf = _get_runtime_channel_prefix()
+        channel = f"{_pf}:{kind_str}:{chat_id_arg}"
     elif not channel:
         # 都没给 → fallback current_event_chat_id（wake 时 set 的"当前事件来源"）
         try:
@@ -398,7 +414,8 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
                     ),
                 })
             kind_str = "group" if (curr_chat.startswith("oc_") or wr == "group_message") else "dm"
-            channel = f"lark:{kind_str}:{curr_chat}"
+            _pf = _get_runtime_channel_prefix()
+            channel = f"{_pf}:{kind_str}:{curr_chat}"
         else:
             channel = "lark:default"
     # 模型给出 channel 直接保留，比如 "lark:group:oc_xxx" 或 "lark:dm:ou_xxx" 即可
@@ -2068,20 +2085,17 @@ def _send_wechat_clawbot(
     if not bot_token:
         return json.dumps({"sent": False, "error": "WECHAT_BOT_TOKEN 未配置（在 secrets.env 中填）"}, ensure_ascii=False)
 
-    # 从 runtime context 拿 context_token（wake 时存的入站消息上下文）
+    # 从 runtime_context 拿 ClawBot context_token（handler 在入站时存的）
     context_token = ""
     try:
-        from domain.lifecycle.runtime_context import get_express_context
-        ctx = get_express_context() or {}
-        context_token = str(ctx.get("wechat_context_token") or "")
+        from domain.lifecycle.runtime_context import get_current_context_token
+        context_token = get_current_context_token() or ""
     except Exception:
         pass
-    # 也从全局上下文试取
+    # fallback：从 _REPLY_CONTEXT 取
     if not context_token:
         try:
-            from interfaces.tools.action_tools import _REPLY_CONTEXT
-            iid_key = iid
-            ctx = _REPLY_CONTEXT.get(iid_key) or {}
+            ctx = _REPLY_CONTEXT.get(iid) or {}
             context_token = str(ctx.get("wechat_context_token") or "")
         except Exception:
             pass

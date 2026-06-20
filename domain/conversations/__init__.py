@@ -37,9 +37,16 @@ def record_inbound_message(
     sender_role='human'/'other',per-app open_id 仅本库可见)。
     """
     from domain.messages import record_inbound
+    # 平台前缀: feishu → lark, 其它用平台名自身
+    from infrastructure.config import get_current_event_platform
+    try:
+        _pf = get_current_event_platform()
+    except Exception:
+        _pf = ""
+    _source = _pf or "lark"  # fallback 默认 lark（向后兼容）
     return record_inbound(
         chat_id=chat_id, sender_id=sender_id, sender_name=sender_name,
-        text=text, msg_id=msg_id, source="lark", sender_kind=sender_kind,
+        text=text, msg_id=msg_id, source=_source, sender_kind=sender_kind,
     )
 
 

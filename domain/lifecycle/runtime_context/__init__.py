@@ -69,3 +69,49 @@ def reset_current_event_chat_id(token) -> None:
         _event_chat_id.reset(token)
     except Exception:
         pass
+
+
+# ── 多通道上下文：当前事件来自哪个平台 + 通道相关的 platform token ──────────
+# feishu → 平台前缀 "lark"，wechat → "wechat"
+# express_to_human 用来决定发到哪个通道(action_tools.py channel 前缀)
+_event_platform: ContextVar[str] = ContextVar("digital_life_event_platform", default="")
+
+
+def set_current_event_platform(platform: str) -> object:
+    """设置当前事件来源平台（feishu/wechat/...）。返回 token。"""
+    _pf = "lark" if (platform or "").lower() in ("feishu", "lark") else (platform or "")
+    return _event_platform.set(_pf)
+
+
+def get_current_event_platform() -> str:
+    """返回当前事件平台前缀（lark / wechat / ''=未设置）。"""
+    return _event_platform.get()
+
+
+def reset_current_event_platform(token) -> None:
+    try:
+        _event_platform.reset(token)
+    except Exception:
+        pass
+
+
+# ClawBot context_token：微信 ClawBot 发回复必须传的对话令牌
+# express_to_human → _send_wechat_clawbot 读取它
+_context_token: ContextVar[str] = ContextVar("digital_life_context_token", default="")
+
+
+def set_current_context_token(token: str) -> object:
+    """设置当前会话的 ClawBot context_token。返回 token。"""
+    return _context_token.set(token or "")
+
+
+def get_current_context_token() -> str:
+    """返回当前会话的 context_token（ClawBot 用，飞书为空）。"""
+    return _context_token.get()
+
+
+def reset_current_context_token(token) -> None:
+    try:
+        _context_token.reset(token)
+    except Exception:
+        pass

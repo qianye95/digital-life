@@ -184,10 +184,11 @@ async def handle_message(*, adapter: IngressAdapter, msg: NormalizedMessage) -> 
                 mention_map=getattr(msg, "mention_map", []) or [],
                 msg_id=getattr(msg, "message_id", "") or "",
                 # app_identity：从 adapter 自己拿（"平台知识唯一家园" = Adapter）。
-                # 不走 os.getenv（master env 跨实例串味）、也不在 application 层硬编码
-                # 读 app.yaml 的 feishu.app_id（那等于把平台知识泄漏出 adapter）。
                 # 接第二个平台时只需该平台 adapter 实现 app_identity，这里零改动。
-                app_id=adapter.app_identity,
+                app_id=getattr(adapter, "app_identity", "") or "",
+                # 多通道：把 platform + ClawBot context_token 穿透到 express_to_human
+                platform=msg.platform,
+                ctx_token=getattr(msg, "context_token", "") or "",
             )
         finally:
             reset_current_instance_id(config_token)
@@ -223,6 +224,8 @@ def _route_to_life(
     mention_map: list = None,
     msg_id: str = "",
     app_id: str = "",
+    platform: str = "feishu",
+    ctx_token: str = "",
 ) -> None:
     """消息路由核心——发出事件并根据 affair 状态决定唤醒策略。
 
@@ -241,11 +244,12 @@ def _route_to_life(
     try:
         from domain.lifecycle.alarms import cancel_alarms_by_filter
 
-        # 1) 合成入站 channel 字符串
+        # 1) 合成入站 channel 字符串（前缀按平台）
         inbound_channel = None
         if chat_id:
             kind = "group" if is_group else "dm"
-            inbound_channel = f"lark:{kind}:{chat_id}"
+            _prefix = "lark" if platform == "feishu" else platform  # wechat → wechat, feishu → lark
+            inbound_channel = f"{_prefix}:{kind}:{chat_id}"
 
         # 2) 按通道精确取消
         #    无 chat_id 时 fallback 全局取消（兜底，理论上不该发生）
@@ -274,6 +278,7 @@ def _route_to_life(
         mention_map=mention_map,
         msg_id=msg_id,
         app_id=app_id,
+        platform=platform,
     )
 
     try:
@@ -283,6 +288,44 @@ def _route_to_life(
         )
 
         # 不论是否 mid-session injection，每条消息都要更新 reply context：
+        if chat_id:
+            if is_group:
+                set_group_reply_context(chat_id)
+                set_dm_reply_context("")
+                import interfaces.tools.action_tools as _at
+                _at._DM_REPLY_CHAT_ID = None
+            else:
+                set_dm_reply_context(chat_id)
+                set_group_reply_context("")
+                import interfaces.tools.action_tools as _at
+                _at._GROUP_REPLY_CHAT_ID = None
+
+            # 多通道：存 platform + context_token 到 runtime_context（全链路可见）
+            # 这是 ClawBot 发回复的必要条件
+            try:
+                from domain.lifecycle.runtime_context import (
+                    set_current_event_platform,
+                    set_current_context_token,
+                )
+                set_current_event_platform(platform)
+                set_current_context_token(ctx_token or "")
+            except Exception:
+                pass
+
+            # 同时存 _REPLY_CONTEXT（为 express_to_human fallback 用）
+            try:
+                import interfaces.tools.action_tools as _at2
+                from infrastructure.config import get_app_instance_id as _get_iid
+                _iid = _get_iid() or ""
+                if _iid:
+                    _ctx = _at2._REPLY_CONTEXT.get(_iid) or {}
+                    _ctx["platform"] = platform
+                    _ctx["chat_id"] = chat_id
+                    _ctx["is_group"] = is_group
+                    _ctx["wechat_context_token"] = ctx_token or ""
+                    _at2._REPLY_CONTEXT[_iid] = _ctx
+            except Exception:
+                pass
         # scheduler 的 reply-context 设置只在 BLOCKED→wake 路径触发，
         # mid-session injection 时 scheduler 不再调用，会留下上轮 wake 的 stale context。
         # 这里根据当前消息类型把 group/dm 互相清干净 + 同步 wake_reason。
@@ -654,6 +697,7 @@ def _emit_l4_human_event(
     mention_map: list = None,
     msg_id: str = "",
     app_id: str = "",
+    platform: str = "feishu",
 ) -> int:
     """发出人类消息事件——消息入口的最后一步。
     流程：
@@ -664,6 +708,9 @@ def _emit_l4_human_event(
 
     返回 event_id（-1 表示失败）。
     """
+    # 平台前缀（source/channel 用）：feishu → lark, 其它 → platform 本身
+    pf = "lark" if platform == "feishu" else platform
+
     # 身份统一层：sender_id 从 per-app open_id 转为跨实例稳定的 unified_id。
     # Phase 4:删除 resolve_unified_id 调用——平台视角的 open_id 自洽,永不跨实例
     # 输出(决策 3)。下游 всех消费者(events / messages.db / wake_prompt)看到的
@@ -683,7 +730,7 @@ def _emit_l4_human_event(
             kind=primary_kind,
             deltas=deltas,
             raw_text=text[:500],
-            source="gateway:lark",
+            source=f"gateway:{pf}",
         )
 
         if is_group:
@@ -708,20 +755,20 @@ def _emit_l4_human_event(
                     "chat_id": chat_id,
                     "mentions_bot": mentions_bot,
                     "mention_names": "、".join(mention_names or []),
-                    "source": "gateway:lark",
+                    "source": f"gateway:{pf}",
                     "nurture_kinds": kinds,
                     "deltas": deltas,
                     "at": now_iso(),
                     "gateway_handled": True,
                 },
-                channel="gateway:lark:group",
+                channel=f"gateway:{pf}:group",
             )
             logger.info("L4 group event emitted: chat_id=%s sender=%s @=%s", chat_id, sender_name, mentions_bot)
             # 记录入站消息到 conversation_log（之前在这里 return 漏写了，导致只有 out 没有 in）
             try:
                 from domain.lifecycle.conversation_log import log_conversation
                 log_conversation(
-                    platform="lark",
+                    platform=pf,
                     conversation_id=chat_id,
                     chat_type="group",
                     direction="in",
@@ -757,13 +804,13 @@ def _emit_l4_human_event(
                 "sender_id": sender_id,
                 "sender_notes_block": _sender_notes(sender_id, sender_name),
                 "chat_id": chat_id,
-                "source": "gateway:lark",
+                "source": f"gateway:{pf}",
                 "nurture_kinds": kinds,
                 "deltas": deltas,
                 "at": now_iso(),
                 "gateway_handled": True,
             },
-            channel="gateway:lark:user",
+            channel=f"gateway:{pf}:user",
         )
         logger.info("L4 human event emitted: nurture=%s", kinds)
         # 记录到对话日志 + 设置当前对话上下文
@@ -775,7 +822,7 @@ def _emit_l4_human_event(
         try:
             from domain.lifecycle.conversation_log import log_conversation
             log_conversation(
-                platform="lark",
+                platform=pf,
                 conversation_id=chat_id,
                 chat_type="group" if is_group else "dm",
                 direction="in",
