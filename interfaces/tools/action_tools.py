@@ -599,12 +599,17 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
             target_chat = ""
             routed_id = ""
             send_text = text
+            # 真实的 chat 类型（dm/group），由 _send_feishu_direct 内部 _真实_ 决定后写入。
+            # 写 conversation_log 必须用这个，不能凭 channel 字符串推断——
+            # 因为 line 626-630 会把 lark:dm:oc_xxx 重写成 lark:group:oc_xxx，
+            # 导致 conversation_log 把私聊全部误标为 group（污染 social_context）。
+            real_chat_type = "dm"
 
             async def _send_feishu_direct():
                 # routed_id 在 DM 分支赋值，group 分支读不到会 UnboundLocalError —— 在
                 # group 分支失败时 _explain_feishu_send_failure 读 routed_id 就会炸
                 # （单测 hit 不到这条路径）。一并加入 nonlocal。
-                nonlocal target_chat, send_text, channel, routed_id
+                nonlocal target_chat, send_text, channel, routed_id, real_chat_type
                 async with httpx.AsyncClient(timeout=30) as c:
                     tr = await c.post(_token_url, json={"app_id": app_id, "app_secret": app_secret})
                     token = tr.json().get("tenant_access_token", "")
@@ -635,6 +640,12 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
                             target_chat = channel.split("lark:group:", 1)[1].strip()
                         else:
                             target_chat = _get_group_reply_chat_id()
+                        # ⚠️ 真实 chat_type：只有 target_chat 等于配置的 group context 时才算群。
+                        # 否则可能是 lark:dm:oc_<私聊 conv> 被 rewrite 的——那种情形下
+                        # 上面 send 走了 chat_id 接口（API 要求），但语义仍是私聊，
+                        # 不应记 group（否则 conversation_log chat_type 自相矛盾，
+                        # social_context 会把私聊当群）。
+                        real_chat_type = "group" if target_chat == (_get_group_reply_chat_id() or "") else "dm"
                         # mention_user_ids：默认 prepend 到 text 前；
                         # 但若 text 里已经含 <at user_id="ou_xxx"></at> 标签，
                         # 跳过那些 ou_（auto-mention 已经替换过，避免重复）
@@ -789,15 +800,22 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
             from domain.lifecycle.conversation_log import log_conversation
             parts = channel.split(":")
             platform = parts[0] if parts else "lark"
-            if len(parts) >= 3 and parts[1] == "group":
+            # ⚠️ conversation_id 与 chat_type 必须从 _send_feishu_direct 闭包暴露出的
+            # real_chat_type + target_chat/routed_id 取（它们是 send 真正用的值）。
+            # 早期版本凭 channel 字符串推断 chat_type，但 line 626-630 会把 `lark:dm:oc_xxx`
+            # （真实是私聊，只是飞书 conversation_id 碰巧 oc_ 开头）rewrite 成 group，
+            # 导致 conversation_log 把私聊全误标 group → social_context 把私聊当群。
+            if target_chat:
+                conv_id = target_chat
+            elif routed_id:
+                conv_id = routed_id
+            elif len(parts) >= 3 and parts[1] in ("group", "dm"):
                 conv_id = parts[2]
-                chat_type = "group"
             elif len(parts) >= 2:
                 conv_id = parts[1]
-                chat_type = "dm"
             else:
                 conv_id = channel
-                chat_type = "dm"
+            chat_type = real_chat_type  # 真实 dm/group，由 send 路径决定
             # conversation_log 是 snippet 数据源，截 text 防止 prompt 膨胀
             # out 也带 sender_name（实例的 display_name），让 chat_stream 渲染自然
             # e.g. "Zero：xxx" 而不是 "你：xxx"
