@@ -132,13 +132,10 @@ async def run_instance_gateway(instance_id: str) -> None:
                 k, v = line.split("=", 1)
                 secrets_env[k.strip()] = v.strip().strip('"').strip("'")
 
-    # 创建所有通道 adapter
-    adapters = create_adapters_from_config(app_yaml_cfg, secrets_env)
+    # 创建所有通道 adapter（凭证不全的通道自动跳过，不报错）
+    adapters = [a for a in create_adapters_from_config(app_yaml_cfg, secrets_env) if a is not None]
     if not adapters:
-        logger.error("Instance %s has no valid channels, exiting", instance_id[:8])
-        return
-
-    logger.info("Instance %s starting with %d channel(s)", instance_id[:8], len(adapters))
+        logger.info("Instance %s has no configured channels yet (all credentials empty), skipping adapter start", instance_id[:8])
 
     # 设置进程级 ContextVar —— 这个进程只服务于这一个实例
     os.environ["DIGITAL_LIFE_INSTANCE_ID"] = instance_id

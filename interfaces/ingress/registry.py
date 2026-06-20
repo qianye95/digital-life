@@ -23,7 +23,7 @@ logger = logging.getLogger("digital_life.ingress.registry")
 
 
 def _build_feishu(cfg: dict[str, Any], secrets_env: dict[str, str]) -> Any:
-    """从 channels.feishu 配置 + secrets 构建 FeishuAdapter。"""
+    """飞书 adapter 工厂。凭证不全返回 None（跳过，不报错）。"""
     from interfaces.ingress.feishu import FeishuAdapter
 
     app_id = str(cfg.get("app_id") or "").strip()
@@ -33,13 +33,14 @@ def _build_feishu(cfg: dict[str, Any], secrets_env: dict[str, str]) -> Any:
         or ""
     ).strip()
     domain = str(cfg.get("feishu_domain") or "").strip() or None
-    if not app_id:
-        raise ValueError("feishu channel requires app_id")
+    if not app_id or not app_secret:
+        logger.info("feishu channel skipped: missing app_id or app_secret")
+        return None
     return FeishuAdapter(app_id=app_id, app_secret=app_secret, domain=domain)
 
 
 def _build_wechat_clawbot(cfg: dict[str, Any], secrets_env: dict[str, str]) -> Any:
-    """从 channels.wechat 配置 + secrets 构建 WeChatClawBotAdapter。"""
+    """微信 ClawBot adapter 工厂。凭证不全返回 None（跳过，不报错）。"""
     from interfaces.ingress.wechat_clawbot import WeChatClawBotAdapter
 
     bot_token = (
@@ -49,14 +50,9 @@ def _build_wechat_clawbot(cfg: dict[str, Any], secrets_env: dict[str, str]) -> A
     ).strip()
     domain = str(cfg.get("domain") or "").strip() or None
     bot_id = str(cfg.get("bot_id") or "").strip()
-
     if not bot_token:
-        raise ValueError(
-            "wechat_clawbot channel requires WECHAT_BOT_TOKEN in secrets.env.\n"
-            "扫码登录拿 token：python -c \"import asyncio; "
-            "from interfaces.ingress.wechat_clawbot import login_clawbot_qrcode; "
-            "asyncio.run(login_clawbot_qrcode())\""
-        )
+        logger.info("wechat channel skipped: no WECHAT_BOT_TOKEN (待扫码登录)")
+        return None
     return WeChatClawBotAdapter(bot_token=bot_token, domain=domain, bot_id=bot_id)
 
 
@@ -138,6 +134,9 @@ def create_adapters_from_config(
             continue
         try:
             adapter = builder(ch_cfg, secrets_env)
+            if adapter is None:
+                # builder 返回 None = 凭证不全，跳过（不报错）
+                continue
             adapters.append(adapter)
             logger.info(
                 "Channel '%s' (type=%s) adapter created: platform=%s identity=%s",
