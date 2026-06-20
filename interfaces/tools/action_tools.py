@@ -77,6 +77,8 @@ def _get_runtime_channel_prefix() -> str:
     """返回当前事件来源的平台前缀（feishu→lark / wechat→wechat）。
 
     用于 express_to_human 合成默认 channel 字符串——决定走飞书还是微信发送路径。
+    优先级：runtime_context ContextVar > _REPLY_CONTEXT 全局 dict > 默认 lark。
+    （_REPLY_CONTEXT 用于跨线程可见；to_thread 里 set 的 ContextVar 主线程看不到）
     """
     try:
         from domain.lifecycle.runtime_context import get_current_event_platform
@@ -85,7 +87,18 @@ def _get_runtime_channel_prefix() -> str:
             return pf
     except Exception:
         pass
-    return "lark"  # 默认 lark（现网飞书）
+    # fallback：从 _REPLY_CONTEXT 读（跨线程可见）
+    try:
+        from infrastructure.config import get_app_instance_id as _get_iid
+        _iid = _get_iid() or ""
+        if _iid:
+            ctx = _REPLY_CONTEXT.get(_iid) or {}
+            pf2 = str(ctx.get("platform") or "").strip()
+            if pf2:
+                return "lark" if pf2 in ("feishu", "lark") else pf2
+    except Exception:
+        pass
+    return "lark"
 
 
 def _resolve_chat_id(short_or_full: str) -> str:
@@ -2092,7 +2105,7 @@ def _send_wechat_clawbot(
         context_token = get_current_context_token() or ""
     except Exception:
         pass
-    # fallback：从 _REPLY_CONTEXT 取
+    # fallback：从 _REPLY_CONTEXT 取（跨线程可见）
     if not context_token:
         try:
             ctx = _REPLY_CONTEXT.get(iid) or {}
