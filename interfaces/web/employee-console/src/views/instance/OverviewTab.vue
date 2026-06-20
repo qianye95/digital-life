@@ -326,11 +326,17 @@ async function startWechatLogin() {
     const d = await systemApi.wechatQrcode(iid.value)
     if (d.error) {
       qrerror.value = d.error
+      qrloading.value = false
       return
     }
-    // 后端返回 qrcode_url；前端单独窗口打开扫码页（后端代理页）
-    // /api/system/instances/{iid}/wechat-login/page 已渲染 PNG 二维码 + 完成 poll
-    const pageUrl = `/api/system/instances/${iid.value}/wechat-login/page`
+    if (!d.qrcode_url) {
+      qrerror.value = '后端未返回 qrcode_url'
+      qrloading.value = false
+      return
+    }
+    // 后端 /qr-page?qrcode_url=xxx 用 Python qrcode 把 ClawBot 链接渲染成 PNG
+    // （微信原页 JS 渲染 + X-Frame-Options: DENY，无法 iframe）
+    const pageUrl = `/api/system/instances/${iid.value}/wechat-login/qr-page?qrcode_url=${encodeURIComponent(d.qrcode_url)}`
     window.open(pageUrl, '_blank', 'width=420,height=520')
     // 前端轻量轮询是否完成（最多 100s）
     const deadline = Date.now() + 100000
