@@ -112,8 +112,9 @@ This is Life Engineering.
 |---|---|---|
 | **Python** | 3.11+ | Main runtime (master + per-instance worker processes) |
 | Node.js + npm | 20+ | **Optional** — only when modifying the console frontend; pre-built `dist/` is shipped |
-| Feishu (Lark) self-built app | any | Message ingress |
-| GLM (Zhipu AI) API Key | any valid | Main LLM; required |
+| Feishu (Lark) self-built app | any | Primary message ingress |
+| WeChat ClawBot / iLink access | optional | Second message channel (auto-onboarded via QR scan in console) |
+| LLM API Key + URL | any valid | Defaults to Zhipu GLM; other OpenAI-compatible APIs also supported (see [Model Support](#model-support)) |
 
 ### Install
 
@@ -124,14 +125,15 @@ pip install -e .       # Registers `digital-life` CLI + installs dependencies
 
 ### Three Setup Paths (pick one)
 
-> **Where keys live**: Feishu credentials (App ID + App Secret) and GLM API Key are **per-instance**, stored in `apps/<uuid>/config/secrets.env`. On first boot, if you fill these in the global `config/secrets.env`, the system **auto-bootstraps** them into the zero instance. Alpha's credentials are configured separately via the console at `/instance/<id>/config`.
+> **Where keys live**: All model / channel credentials are **per-instance**, stored in `apps/<uuid>/config/secrets.env`. On first boot, if you fill these in the global `config/secrets.env`, the system **auto-bootstraps** them into the zero instance. Other instances are configured separately via the console at `/instance/<id>/config`. **WeChat credentials never need manual env editing**: open Overview → channel status card → scan QR, the token is hot-loaded within 30 seconds.
 
 #### Path A: CLI (fastest)
 
 ```bash
 cp config/secrets.example.env config/secrets.env
-# Edit config/secrets.env — 4 required fields (auto-assigned to zero on bootstrap):
-#   GLM_API_KEY=<your key>
+# Edit config/secrets.env — 4 required fields (auto-assigned to zero on first boot,
+# covers one model + one channel):
+#   LLM_API_KEY=<your key — defaults to GLM; also accepts DeepSeek/OpenAI etc.>
 #   FEISHU_APP_ID=cli_xxx
 #   FEISHU_APP_SECRET=<your secret>
 #   API_SERVER_KEY=<any string as console password>
@@ -141,10 +143,13 @@ digital-life start    # Auto-bootstraps zero + alpha. zero gets your credentials
 digital-life status
 digital-life logs -f
 
-# Configure alpha's Feishu credentials:
-# Open http://localhost:8642/system/instances → alpha → "Config"
-# Fill GLM_API_KEY in model section, App ID + App Secret in messenger section
-# Click "Restart" in console top bar
+# Configure other instances / onboard more channels:
+# Open http://localhost:8642/system/instances → instance → "Config"
+#   · "Model" section: fill API Key + Base URL (one key per vendor)
+#   · "Feishu" section: fill second Feishu app's App ID + App Secret
+#   · For WeChat: Overview → channel connection card → "Scan to login"
+#     (scan with phone, channel goes live within 30s)
+# Feishu credential changes require console top-bar "Restart"; WeChat QR scan hot-loads
 ```
 
 #### Path B: Interactive script
@@ -193,12 +198,12 @@ digital-life start / stop / restart / status / logs -f
 ```
 gateway/
 ├── master          HTTP server + InstanceSupervisor
-└── instance <id>   Per-instance Feishu WS + cron tick + affair state machine
+└── instance <id>   Per-instance ingress adapter + cron tick + affair state machine
 
 domain/             lifecycle (affair / RAS) / memory metabolism / execution / simulation / project
 application/        Use case orchestration + console API + event service
 infrastructure/     AI runtime / HTTP / persistence / scheduler + config + observability
-interfaces/         CLI / Feishu ingress / tools / skills / console frontend
+interfaces/         CLI / Multi-channel ingress adapters (Feishu / WeChat) / tools / skills / console frontend
 config/             Global defaults + event types + templates
 apps/{id}/          Per-instance private (app.yaml / secrets.env / persona / data/*.db / assets)
 projects/{id}/      Cross-instance shared projects (project.yaml + todos.db + docs + memory)
@@ -210,20 +215,46 @@ projects/{id}/      Cross-instance shared projects (project.yaml + todos.db + do
 
 Split by concept — all changes should be made via the console:
 
-**Global console** `/system/*`: Instance registry / Projects / Skill market / Event type registry / System config
-**Instance console** `/instance/<id>/*`: Feishu credentials / Group routing / Attention keywords / Skill subscriptions / Memory / Todos / Calendar / Sessions / Contacts / Persona
+**Global console** `/system/*`: Instance registry (channel-connection badges on each instance card) / Projects / Skill market / Event type registry / System config
+
+**Instance console** `/instance/<id>/*`:
+- Model (API Key + Base URL + model name + provider)
+- Channels (Feishu App ID + Secret / WeChat scan-login token)
+- Group behavior (attention keywords / owners)
+- Task policy (max_turns / reasoning_effort)
+- Skill subscriptions / Memory / Todos / Calendar / Sessions / Contacts / Persona
 
 Instance metadata (avatar / accent_color / tagline / display_name) stored in `apps/<id>/config/app.yaml`.
+
+### Channels are first-class instance properties
+
+Each instance can mount **multiple** message channels (Feishu + WeChat are supported today; extending to DingTalk / WeCom / Telegram only requires a new `IngressAdapter` implementation). Three properties:
+
+1. **Connection visibility**: small neon dots on each instance card (green = connected, gray = unconfigured); Overview shows per-channel status + identity snippet
+2. **Credential hot-reload**: each instance process rescans `secrets.env` every 30 seconds — new channel credentials take effect automatically without restart
+3. **WeChat QR onboarding**: Overview → channel connection card → "Scan to Login" → scan with phone → channel live within 30s (no env editing required)
+
+Channel credentials (Feishu App Secret / WeChat token) live in `secrets.env`; channel configuration (domain / app_id / bot_id) lives in `app.yaml` under the `channels:` block. Detailed field reference: [docs/operations/instances.md](docs/operations/instances.md).
+
+### Model Support
+
+Model adaptation centers on Zhipu **GLM** (4.5 / 4.6 / 5 / 5.2) — thought-chain cross-turn continuation, 5-step thinking intensity, currently the only family **validated in production**.
+
+Other domestic Chinese models — **DeepSeek, Qwen, Kimi, Moonshot** — all expose OpenAI-compatible APIs and share the same `reasoning_content` outbound field; configure base_url + key to use. **But** each family differs on whether to feed historical thinking back: DeepSeek-Reasoner forbids it in multi-turn (server returns 400); GLM / Kimi require it. The system auto-selects per family, no manual tuning. **OpenAI o1 / o3 / o4** follow a dedicated reasoning branch (thinking intensity auto-collapses to low / medium / high).
+
+**Claude native API is not yet adapted** (endpoint, tools schema, and thinking-block structure all differ from the OpenAI protocol). To wire Claude up you must route through an OpenAI-compatible proxy like LiteLLM — this gives you dialogue + tools, but thinking is degraded turn-by-turn (the OpenAI protocol lacks the `signature` field Claude needs for stateless multi-turn). Native Claude thinking closed-loop is future work.
+
+Adding a new family only needs a Provider class in `infrastructure/ai/providers.py`; `agent.py` stays unchanged.
 
 ---
 
 ## Multi-Instance Collaboration
 
-Multiple digital lives can coexist in the same group chat:
+Multiple digital lives can coexist in the same message group (Feishu groups, WeChat groups, more in the future):
 
-1. **Feishu native fan-out**: Each message is pushed to all bots in the group
-2. **Decentralized message bus**: When an instance sends a message, it broadcasts to peer instances in the same group; each writes the message to their own `messages.db` + triggers wake evaluation
-3. **Routing**: Group messages resolved by @-mention → `messenger.chat_ids` exact match → `app_id` fallback
+1. **Feishu native fan-out**: Feishu servers push each message to every bot in the group — only Feishu channels have this native property
+2. **Decentralized message bus**: when an instance sends a message, it broadcasts to peer instances in the same group; each writes to its own `messages.db` + evaluates a wake — this is the **channel-agnostic** fallback that works for every ingress adapter
+3. **Routing**: group messages resolve via @-mention of a specific bot → `channels.<name>.chat_ids` exact match → `app_id` fallback
 
 Each instance remains an independent lifecycle (its own affair / memory / energy / persona), collaborating via the message bus without sharing runtime state.
 

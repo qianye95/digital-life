@@ -127,8 +127,9 @@ zero → zhp：
 |---|---|---|
 | **Python** | 3.11+ | 主运行时（master + 每实例子进程） |
 | Node.js + npm | 20+ | **可选** — 仅当要修改控制台前端时；项目已 ship 编译产物 |
-| 飞书自建应用 | 任意 | 消息入口 |
-| GLM（智谱 AI）API Key | 任意有效 | 主 LLM；不填跑不起来 |
+| 飞书自建应用 | 任意 | 主消息入口 |
+| 微信 ClawBot / iLink 接入 | 可选 | 第二消息通道（控制台扫码自动开通） |
+| LLM API Key + URL | 任意有效 | 默认走智谱 GLM；其他 OpenAI 兼容 API 也可配（详见[模型支持](#模型支持)） |
 
 应用依赖（`pip install -e .` 自动装）：
 - **核心**：`aiohttp`（HTTP server）`lark-oapi`（飞书 WebSocket 长连接）`pyyaml` / `python-dotenv`（配置）`aio-pika`（事件总线内部 queue）
@@ -144,7 +145,7 @@ pip install -e .       # 注册 digital-life 命令 + 装应用依赖
 
 ### 三种初始化路径（任选其一）
 
-> **关于密钥存放位置**：飞书凭证（App ID + App Secret）和 GLM API Key 都是**每实例独立**的，存在 `apps/<uuid>/config/secrets.env`。首次启动时如果你在全局 `config/secrets.env` 填了这些值，系统会**自动**把它们 bootstrap 给 zero 实例。alpha 和后续实例的凭证在控制台 `/instance/<id>/config` 单独配置。
+> **关于密钥存放位置**：所有模型 / 通道凭证都**每实例独立**，存在 `apps/<uuid>/config/secrets.env`。首次启动时如果你在全局 `config/secrets.env` 填了这些值，系统会**自动**把它们 bootstrap 给 zero 实例。其他实例的凭证在控制台 `/instance/<id>/config` 单独配置；**微信通道无需手填 env**，到 Overview 的「通道连接状态」卡片扫码登录即可，30 秒内凭证热加载生效。
 
 #### 路径 A：命令行（最快）
 
@@ -152,24 +153,26 @@ pip install -e .       # 注册 digital-life 命令 + 装应用依赖
 # 1. 复制配置模板
 cp config/secrets.example.env config/secrets.env
 
-# 2. 编辑 config/secrets.env，必填 4 项（这 4 项会自动塞给首个实例 zero）：
-#    GLM_API_KEY=你的_glm_key
+# 2. 编辑 config/secrets.env，必填 4 项（首启 bootstrap 给 zero，覆盖一个模型 + 一个通道）：
+#    LLM_API_KEY=你的 LLM API Key（默认 GLM；也接受 DeepSeek/OpenAI 等 OpenAI 兼容 key）
 #    FEISHU_APP_ID=cli_xxx
 #    FEISHU_APP_SECRET=你的_app_secret
 #    API_SERVER_KEY=自定义控制台密码（任意字符串）
 
 # 3. 启动 —— 首次跑会自动 bootstrap zero + alpha 两个实例
-#    zero 带着你刚填的 GLM key + 飞书凭证；alpha 的凭证留空（控制台里再填）
+#    zero 带着你刚填的 LLM key + 飞书凭证；alpha 的凭证留空（控制台里再填）
 digital-life start
 
 # 4. 验证
 digital-life status    # 看端口 + 实例 UUID
 digital-life logs -f
 
-# 5. 配置 alpha 的飞书凭证：
-#    打开 http://localhost:8642/system/instances → 找到 alpha → 点「配置」
-#    在 model section 填 GLM_API_KEY，在 messenger section 填第二个飞书应用的 App ID + App Secret
-#    控制台顶部「重启」生效
+# 5. 配置其他实例 / 开通更多通道：
+#    打开 http://localhost:8642/system/instances → 找到实例 → 点「配置」
+#    · 在「模型」section 填 API Key + Base URL（每家厂商一份 key）
+#    · 在「飞书通道」section 填第二个飞书应用的 App ID + App Secret
+#    · 要微信：进 Overview → 通道连接状态卡片 → 点「扫码登录」用手机扫一下，30 秒内生效
+#    飞书凭证改动需控制台顶部「重启」生效；微信扫码后自动生效
 ```
 
 #### 路径 B：交互式脚本
@@ -218,12 +221,12 @@ digital-life start / stop / restart / status / logs -f
 ```
 gateway/
 ├── master          HTTP server + InstanceSupervisor
-└── instance <id>   每实例独立 Feishu WS + cron tick + affair 状态机
+└── instance <id>   每实例独立 ingress adapter + cron tick + affair 状态机
 
-domain/             lifecycle（affair RapRAS） / memory 三层代谢 / execution / 仿真 / project
+domain/             lifecycle（affair / RAS） / memory 三层代谢 / execution / 仿真 / project
 application/        用例编排 + 控制台 API + 事件服务
 infrastructure/     AI runtime / HTTP / 持久化 / 调度 + 配置 + 观测
-interfaces/         CLI / 飞书入口 / 工具 / 技能 / 控制台前端
+interfaces/         CLI / 多通道 ingress 适配器（飞书 / 微信） / 工具 / 技能 / 控制台前端
 config/             全局默认 + 事件类型 + 模板
 apps/{id}/          每实例私有（app.yaml / secrets.env / persona / data/*.db / assets）
 projects/{id}/      跨实例共享项目（project.yaml + todos.db + docs + memory）
@@ -235,20 +238,46 @@ projects/{id}/      跨实例共享项目（project.yaml + todos.db + docs + mem
 
 按概念两层切分，所有改动应在前端控制台完成：
 
-**全局台** `/system/*`：实例注册表 / 项目 / 技能市场 / 事件类型注册表 / 通用配置
-**实例台** `/instance/<id>/*`：飞书凭证 / 群路由 / 注意关键词 / 技能订阅 / 记忆 / 待办 / 日程 / 会话 / 社交关系 / 人设
+**全局台** `/system/*`：实例注册表（卡片上每个实例的通道连接状态） / 项目 / 技能市场 / 事件类型注册表 / 通用配置
+
+**实例台** `/instance/<id>/*`：
+- 模型（API Key + Base URL + 模型名 + Provider）
+- 通道（飞书 App ID + Secret / 微信扫码登录 Token）
+- 群聊行为（注意关键词 / Owner）
+- 任务策略（max_turns / reasoning_effort）
+- 技能订阅 / 记忆 / 待办 / 日程 / 会话 / 社交关系 / 人设
 
 实例元数据（avatar / accent_color / tagline / display_name）写在 `apps/<id>/config/app.yaml`。
+
+### 通道是实例的一等属性
+
+每个实例可以同时挂**多个**消息通道（飞书 + 微信已支持；扩展到钉钉 / 企微 / Telegram 只需新增 `IngressAdapter` 实现）。通道相关的三件事：
+
+1. **连接状态视觉化**：实例卡片右上角的微灯（绿 = connected，灰 = unconfigured）；进 Overview 看每个通道的连接状态 + identity 短码
+2. **凭证热加载**：实例进程每 30 秒扫一次 secrets.env；新通道凭证填好就自动起 adapter，不需要重启
+3. **微信扫码开通**：到 Overview 的「通道连接」点扫码登录按钮，弹窗里手机扫一下，30 秒内通道上线（无 env 操作）
+
+通道凭证（飞书 App Secret / 微信 Token）走 secrets.env；通道配置（域名 / 应用 ID / bot_id）走 app.yaml 的 `channels:` 段。详细字段差异见 [docs/operations/instances.md](docs/operations/instances.md)。
+
+### 模型支持
+
+模型适配以智谱 **GLM**（4.5/4.6/5/5.2）为主线，思考链跨轮延续、5 档思考强度，是当前唯一在生产中**实测验证**过的家族。
+
+国内的 **DeepSeek、通义千问、Kimi、Moonshot** 也都接 OpenAI 兼容 API —— 出站 `reasoning_content` 字段四家同名，配 base_url + key 即可用。**但**各家族对"跨轮思考是否拼回"策略不同：DeepSeek-Reasoner 多轮强制不带历史 thinking（否则服务端 400），GLM / Kimi 则反之；系统按 family 自动选择，无需手动调。**OpenAI o1/o3/o4** 走专属推理分支（思考强度自动收敛为 low/medium/high）。
+
+**Claude 原生 API 目前不适配**（endpoint、tools schema、thinking block 都与 OpenAI 协议不兼容）。要接 Claude 必须经 LiteLLM 等 OpenAI 兼容代理转译 —— 这种方式能跑对话+工具，但 thinking 因协议层缺少 `signature` 字段会在多轮逐次牺牲。原生 Claude thinking 闭环是后续工作。
+
+接入新家族只需在 `infrastructure/ai/providers.py` 加 Provider 类，不动 `agent.py`。
 
 ---
 
 ## 多实例协同
 
-多个数字生命可以在同一个飞书群内共存：
+多个数字生命可以在同一个消息群组内共存（飞书群、微信群、未来更多）：
 
-1. **飞书原生 fan-out**：每条消息推给所有 bot
-2. **去中心化消息总线**：实例主动发言时把出站消息广播给同群的其他实例（peers），各自写入对方 messages.db + 触发 wake
-3. **路由**：群消息按 @ 某个 bot / `messenger.chat_ids` 精确匹配 / `app_id` 兜底逐级定位
+1. **飞书原生 fan-out**：飞书服务端把每条消息推给群内所有 bot —— 仅飞书通道有此原生特性
+2. **去中心化消息总线**：实例主动发言时把出站消息广播给同群的其他实例（peers），各自写入对方 messages.db + 触发 wake —— 这是**通道无关**的兜底机制，对所有 ingress 都成立
+3. **路由**：群消息按 @ 某个 bot / `channels.<name>.chat_ids` 精确匹配 / `app_id` 兜底逐级定位
 
 每个实例仍是独立 lifecycle（自己的 affair / 记忆 / 精力 / 人设），通过消息总线协同，不共享运行态。这就是上面那段"零（zero）+ 阿尔法（alpha）协作"对话的底层机制。
 

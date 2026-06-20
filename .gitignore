@@ -46,7 +46,7 @@ shared/tools/*/
 !shared/tools/.gitkeep
 shared/capabilities/*/
 !shared/capabilities/.gitkeep
-# docs 只保留设计主文档 + showcase 实录，其余过程文档不入 git
+# docs 只保留设计主文档 + showcase 实录 + operations 运维手册，其余过程文档不入 git
 docs/*
 !docs/.gitkeep
 !docs/design/
@@ -57,6 +57,7 @@ docs/design/*
 !docs/showcase/.gitkeep
 !docs/showcase/multi-instance-trading-2026-06.md
 !docs/showcase/how-to-play.zh.md
+!docs/operations/
 # scripts/ 与 tests/ 不入版本控制（运行前/测试均为本地工作目录）
 scripts/
 tests/
