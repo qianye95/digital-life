@@ -44,6 +44,19 @@
               <el-tag v-else size="small" type="info">off</el-tag>
             </div>
             <div class="brand-sub" style="margin-top: 4px;">{{ inst.tagline || '—' }}</div>
+            <!-- 通道连接状态微灯（cycles 自后端 instance.channels） -->
+            <div class="channel-badges" v-if="Array.isArray(inst.channels) && inst.channels.length">
+              <span
+                v-for="ch in inst.channels"
+                :key="ch.platform"
+                class="channel-pill"
+                :class="ch.status === 'connected' ? 'on' : 'off'"
+                :title="`${ch.label}: ${ch.status === 'connected' ? '已连接' : '未配置'}${ch.identity ? ' / ' + ch.identity : ''}`"
+              >
+                {{ ch.label }}
+                <span class="dot"></span>
+              </span>
+            </div>
           </div>
         </div>
 
@@ -310,5 +323,45 @@ onMounted(load)
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--text-muted);
+}
+
+/* 通道连接徽章 */
+.channel-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+.channel-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.04em;
+  border: 1px solid;
+}
+.channel-pill .dot {
+  width: 5px; height: 5px; border-radius: 50%;
+}
+.channel-pill.on {
+  color: var(--neon-cyan);
+  border-color: color-mix(in oklab, var(--neon-cyan) 50%, transparent);
+  background: color-mix(in oklab, var(--neon-cyan) 10%, transparent);
+}
+.channel-pill.on .dot {
+  background: var(--neon-cyan);
+  box-shadow: 0 0 6px var(--neon-cyan);
+}
+.channel-pill.off {
+  color: var(--text-muted);
+  border-color: color-mix(in oklab, var(--text-muted) 35%, transparent);
+  background: color-mix(in oklab, var(--text-muted) 8%, transparent);
+}
+.channel-pill.off .dot {
+  background: var(--text-muted);
+  opacity: 0.6;
 }
 </style>

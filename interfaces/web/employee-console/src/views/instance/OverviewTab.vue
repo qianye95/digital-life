@@ -63,6 +63,61 @@
       </p>
     </div>
 
+    <!-- 通道连接状态 -->
+    <div class="neon-card" style="margin-bottom: var(--space-5);">
+      <h3 style="font-family: var(--font-display); color: var(--text-secondary); margin: 0 0 var(--space-4);">
+        通道连接状态
+      </h3>
+      <div v-if="Array.isArray(channels) && channels.length" class="channel-grid">
+        <div
+          v-for="ch in channels"
+          :key="ch.platform"
+          class="channel-card"
+          :class="ch.status === 'connected' ? 'on' : 'off'"
+        >
+          <div class="ch-head">
+            <span class="ch-label">{{ ch.label }}</span>
+            <span class="ch-status">
+              <span class="status-dot" :class="ch.status === 'connected' ? 'live' : 'idle'"></span>
+              {{ ch.status === 'connected' ? '已连接' : '未配置' }}
+            </span>
+          </div>
+          <div class="ch-identity mono" v-if="ch.identity">{{ ch.identity }}</div>
+          <div class="ch-identity brand-sub" v-else style="color: var(--text-muted);">
+            （未识别身份）
+          </div>
+          <!-- 微信专属：未连接时显示重扫按钮 -->
+          <div v-if="ch.platform === 'wechat'" class="ch-actions">
+            <el-button
+              size="small"
+              :loading="qrloading"
+              @click="startWechatLogin"
+            >
+              {{ ch.status === 'connected' ? '重新扫码' : '扫码登录' }}
+            </el-button>
+            <span v-if="qrerror" class="brand-sub" style="color: var(--neon-red);">
+              {{ qrerror }}
+            </span>
+            <span v-if="qrok" class="brand-sub" style="color: var(--neon-cyan);">
+              ✓ {{ qrok }}
+            </span>
+          </div>
+          <!-- 飞书专属：未连接时提示去 Config 配 app_id/secret -->
+          <div v-else-if="ch.status !== 'connected'" class="ch-actions">
+            <el-button
+              size="small"
+              type="info"
+              plain
+              @click="router.push(`/instance/${iid}/config`)"
+            >去配置 →</el-button>
+          </div>
+        </div>
+      </div>
+      <p v-else class="brand-sub" style="color: var(--text-muted);">
+        尚未读取到通道信息。
+      </p>
+    </div>
+
     <!-- 三栏快照 -->
     <div class="neon-grid" style="grid-template-columns: repeat(3, 1fr);">
       <div class="neon-card">
@@ -155,6 +210,11 @@ const resettingAffair = ref(false)
 const wakes = ref([])
 const todos = ref([])
 const budget = ref({})
+// 通道状态（从 meta.channels 推出）
+const channels = ref([])
+const qrloading = ref(false)
+const qrerror = ref('')
+const qrok = ref('')
 let poller = null
 
 const instanceName = computed(() => {
@@ -251,8 +311,50 @@ async function loadMeta() {
       energy.value = Number(meta.value?.energy) || 0
       status.value = String(meta.value?.status || 'idle')
       healthReason.value = String(meta.value?.health_reason || '')
+      // 同步通道状态：后端 instance.channels 是权威来源
+      channels.value = Array.isArray(meta.value?.channels) ? meta.value.channels : []
     }
   } catch {}
+}
+
+// 微信扫码登录：触发 qrcode → 弹窗显示 → 前端轮询 status
+async function startWechatLogin() {
+  qrerror.value = ''
+  qrok.value = ''
+  qrloading.value = true
+  try {
+    const d = await systemApi.wechatQrcode(iid.value)
+    if (d.error) {
+      qrerror.value = d.error
+      return
+    }
+    // 后端返回 qrcode_url；前端单独窗口打开扫码页（后端代理页）
+    // /api/system/instances/{iid}/wechat-login/page 已渲染 PNG 二维码 + 完成 poll
+    const pageUrl = `/api/system/instances/${iid.value}/wechat-login/page`
+    window.open(pageUrl, '_blank', 'width=420,height=520')
+    // 前端轻量轮询是否完成（最多 100s）
+    const deadline = Date.now() + 100000
+    const iv = setInterval(async () => {
+      if (Date.now() > deadline) {
+        clearInterval(iv)
+        qrloading.value = false
+        qrerror.value = '扫码超时，请重试'
+        return
+      }
+      try {
+        const s = await systemApi.wechatLoginStatus(iid.value)
+        if (s && s.status === 'ok') {
+          clearInterval(iv)
+          qrloading.value = false
+          qrok.value = '微信连接成功'
+          await loadMeta()  // 刷新通道徽章
+        }
+      } catch {}
+    }, 3000)
+  } catch (e) {
+    qrerror.value = String(e?.message || e)
+    qrloading.value = false
+  }
 }
 
 async function loadStatus() {
@@ -347,5 +449,59 @@ h3 { margin: 0 0 var(--space-3); font-size: 14px; }
   border-radius: var(--radius-sm);
   font-size: 12px;
   border-left: 2px solid var(--neon-red);
+}
+
+/* 通道连接面板 */
+.channel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-3);
+}
+.channel-card {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+  border: 1px solid;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.channel-card.on {
+  border-color: color-mix(in oklab, var(--neon-cyan) 50%, transparent);
+  background: color-mix(in oklab, var(--neon-cyan) 8%, var(--bg-elevated));
+  box-shadow: 0 0 16px color-mix(in oklab, var(--neon-cyan) 15%, transparent);
+}
+.channel-card.off {
+  border-color: var(--border-divider);
+  background: var(--bg-elevated);
+  opacity: 0.85;
+}
+.channel-card .ch-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.channel-card .ch-label {
+  font-family: var(--font-display);
+  font-size: 14px;
+  color: var(--text-primary);
+}
+.channel-card .ch-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.channel-card .ch-identity {
+  font-size: 11px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+.channel-card .ch-actions {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 </style>
