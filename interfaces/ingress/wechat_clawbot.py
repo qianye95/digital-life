@@ -133,7 +133,13 @@ class WeChatClawBotAdapter:
                 await asyncio.sleep(5)
 
     async def _get_updates(self) -> list[dict[str, Any]]:
-        """POST /ilink/bot/getupdates 长轮询。"""
+        """POST /ilink/bot/getupdates 长轮询。
+
+        返回格式（ClawBot 2.4.4 实测）：
+        {"msgs": [{from_user_id, to_user_id, message_id, context_token,
+                    item_list: [{type:1, content:"文本"}], ...}],
+         "get_updates_buf": "游标"}
+        """
         url = f"{self._domain}/ilink/bot/getupdates"
         headers = self._build_headers()
         payload: dict[str, Any] = {}
@@ -145,13 +151,22 @@ class WeChatClawBotAdapter:
             resp.raise_for_status()
             data = resp.json()
 
+        # 检查错误
+        if data.get("errcode"):
+            ec = data.get("errcode")
+            if ec == -14:  # session timeout
+                logger.warning("ClawBot session timeout — token may have expired")
+            return []
+
         # 推进游标
         if data.get("get_updates_buf"):
             self._poll_buf = data["get_updates_buf"]
 
-        # 消息列表
-        item_list = data.get("item_list") or data.get("updates") or []
-        return item_list if isinstance(item_list, list) else []
+        # 消息列表在 "msgs" 字段里
+        msgs = data.get("msgs") or data.get("item_list") or data.get("updates") or []
+        if not isinstance(msgs, list):
+            msgs = []
+        return msgs
 
     # ── 发送 ──────────────────────────────────────────────────────────
 
@@ -248,17 +263,22 @@ class WeChatClawBotAdapter:
     def _build_headers(self) -> dict[str, str]:
         """每次请求构建的认证 header。
 
-        ClawBot 要求：
+        ClawBot 要求（从 npm 包 api.js 源码确认）：
         - Authorization: Bearer {bot_token}
-        - X-WECHAT-UIN: 随机 uint32 → base64（防重放）
+        - AuthorizationType: ilink_bot_token  ← 这个我们之前漏了！
+        - Content-Type: application/json
+        - X-WECHAT-UIN: 随机 uint32 → decimal → base64
+        - iLink-App-Id: bot（固定值，来自 package.json ilink_appid）
+        - iLink-App-ClientVersion: 132100（uint32 编码 2.4.4）
         """
         headers = {
-            "Authorization": f"Bearer {self._bot_token}",
             "Content-Type": "application/json",
+            "AuthorizationType": "ilink_bot_token",
+            "Authorization": f"Bearer {self._bot_token}",
+            "X-WECHAT-UIN": base64.b64encode(str(random.randint(0, 0xFFFFFFFF)).encode()).decode(),
+            "iLink-App-Id": "bot",
+            "iLink-App-ClientVersion": "132100",
         }
-        # 防 replay：随机 UIN
-        random_uin = random.randint(0, 0xFFFFFFFF)
-        headers["X-WECHAT-UIN"] = base64.b64encode(str(random_uin).encode()).decode()
         return headers
 
 
