@@ -301,7 +301,7 @@ def _ensure_default_instance() -> None:
     bootstrapped_uuids: list[str] = []
     for cfg in default_instances:
         try:
-            from scripts.init_instance import init_instance
+            from infrastructure.bootstrap.instance import init_instance
             inst_dir = init_instance(
                 cfg["display_name"],
                 interactive=False,

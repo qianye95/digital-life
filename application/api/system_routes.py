@@ -790,7 +790,7 @@ async def _handle_create_instance(request: web.Request) -> web.Response:
         return web.json_response({"error": "display_name is required"}, status=400)
 
     try:
-        from scripts.init_instance import init_instance
+        from infrastructure.bootstrap.instance import init_instance
     except Exception as exc:
         logger.exception("init_instance import failed")
         return web.json_response(

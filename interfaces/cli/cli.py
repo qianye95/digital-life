@@ -346,7 +346,7 @@ def _logs(args: argparse.Namespace) -> int:
 
 def _init(args: argparse.Namespace) -> int:
     """Bootstrap a new Digital Life instance."""
-    from scripts.init_instance import init_instance
+    from infrastructure.bootstrap.instance import init_instance
     init_instance(args.display_name)
     return 0
 

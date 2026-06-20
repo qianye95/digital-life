@@ -1063,7 +1063,7 @@ class EmployeeConsoleAPIService:
         if len(display_name) > 64:
             return web.json_response({"ok": False, "reason": "实例显示名称不能超过 64 个字符"}, status=400)
         try:
-            from scripts.init_instance import init_instance
+            from infrastructure.bootstrap.instance import init_instance
             inst_dir = init_instance(display_name)
             return web.json_response({
                 "ok": True,
