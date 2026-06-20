@@ -6,10 +6,19 @@
         <p class="page-subtitle">{{ instanceTagline }}</p>
       </div>
       <div style="display: flex; gap: 16px;">
-        <div class="neon-card" style="padding: 8px 16px; min-width: 100px;">
+        <div class="neon-card" style="padding: 8px 16px; min-width: 120px;">
           <div class="brand-sub">Energy</div>
           <div style="font-family: var(--font-display); font-size: 24px; color: var(--neon-cyan);">
             {{ Math.round(Number(energy) || 0) }}%
+          </div>
+          <!-- 加鸡腿 / 投喂能量按钮：nurture_energy 事件 -->
+          <div style="display: flex; gap: 4px; margin-top: 6px;">
+            <button class="nurture-btn" :disabled="nurturing" @click="nurture(30, '加了鸡腿🍗')" title="加鸡腿 +30">🍗</button>
+            <button class="nurture-btn" :disabled="nurturing" @click="nurture(60, '投喂能量包⚡')" title="能量包 +60">⚡</button>
+            <button class="nurture-btn" :disabled="nurturing" @click="nurture(100, '满血复活💯')" title="满血 +100">💯</button>
+          </div>
+          <div v-if="nurtureHint" class="brand-sub" style="font-size: 11px; margin-top: 4px; color: var(--neon-cyan);">
+            {{ nurtureHint }}
           </div>
         </div>
         <div class="neon-card" style="padding: 8px 16px; min-width: 100px;">
@@ -207,7 +216,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { instanceApi, systemApi } from '@/api/client'
+import { instanceApi, systemApi, safeFetch } from '@/api/client'
 import { fmtTs } from '@/composables/useFormat'
 
 const route = useRoute()
@@ -216,6 +225,10 @@ const iid = computed(() => String(route.params.iid || ''))
 
 const meta = ref({})
 const energy = ref(0)
+// nurture_energy（加鸡腿）按钮状态
+const nurturing = ref(false)
+const nurtureHint = ref('')
+let nurtureHintTimer = null
 const status = ref('idle')
 const mode = ref('')
 const modeLabel = ref('')
@@ -442,8 +455,38 @@ onMounted(() => {
   loadAll()
   poller = setInterval(() => { loadStatus(); loadSummary() }, 15000)
 })
+
+// 加鸡腿 / 能量包：调 /api/employee/<iid>/nurture-energy，注入 energize 事件。
+// 后端返 {added, energy}（见 employee_console_routes.py:_handle_console_nurture_energy）
+async function nurture(amount, label) {
+  if (nurturing.value) return
+  nurturing.value = true
+  try {
+    const d = await safeFetch(`/api/employee/${iid.value}/nurture-energy`, {
+      method: 'POST',
+      body: JSON.stringify({ amount, label }),
+    })
+    if (d.error) {
+      ElMessage.error(d.error)
+      return
+    }
+    nurtureHint.value = `${label} +${d.added} → ${d.energy}%`
+    energy.value = Number(d.energy) || energy.value
+    // 4s 后清提示
+    if (nurtureHintTimer) clearTimeout(nurtureHintTimer)
+    nurtureHintTimer = setTimeout(() => { nurtureHint.value = '' }, 4000)
+    // 立即也强制 reload 一次 status，确保精力数值真同步（防止 nurture 后状态机 reset 改回去）
+    loadStatus()
+  } catch (e) {
+    ElMessage.error(String(e?.message || e))
+  } finally {
+    nurturing.value = false
+  }
+}
+
 onUnmounted(() => {
   if (poller) { clearInterval(poller); poller = null }
+  if (nurtureHintTimer) { clearTimeout(nurtureHintTimer); nurtureHintTimer = null }
 })
 watch(iid, loadAll)
 </script>
@@ -534,5 +577,25 @@ h3 { margin: 0 0 var(--space-3); font-size: 14px; }
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+/* 加鸡腿 / 能量包按钮（Energy 卡） */
+.nurture-btn {
+  background: color-mix(in oklab, var(--neon-cyan) 8%, var(--bg-elevated));
+  border: 1px solid color-mix(in oklab, var(--neon-cyan) 35%, transparent);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  font-size: 16px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.nurture-btn:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--neon-cyan) 18%, var(--bg-elevated));
+  box-shadow: 0 0 8px color-mix(in oklab, var(--neon-cyan) 30%, transparent);
+}
+.nurture-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>
