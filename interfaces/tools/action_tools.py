@@ -417,7 +417,8 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
             _pf = _get_runtime_channel_prefix()
             channel = f"{_pf}:{kind_str}:{curr_chat}"
         else:
-            channel = "lark:default"
+            _pf = _get_runtime_channel_prefix()
+            channel = f"{_pf}:default"
     # 模型给出 channel 直接保留，比如 "lark:group:oc_xxx" 或 "lark:dm:ou_xxx" 即可
 
     # 发送前上下文检查：mid-session 新消息 / 主动发言历史回顾
@@ -457,24 +458,23 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
     # 注意：移除了"is_group_wake force channel"自动覆盖逻辑。
     # 现在 channel/chat_id 已在前面解析完成，模型自主决策回复目标。
     # 仅当 channel 仍是默认值时（initiative / 模型未指定）才用 group context 兜底。
-    if group_chat_id and channel in ("lark:default", "feishu:default"):
-        channel = f"lark:group:{group_chat_id}"
+    _default_markers = ("lark:default", "feishu:default", "wechat:default")
+    if group_chat_id and channel in _default_markers:
+        channel = f"{_pf}:group:{group_chat_id}"
         logger.info("express_to_human: initiative fallback → group context, channel=%s", channel)
 
     # 没有显式目标时，退化到当前 wake 的回复上下文（DM/group），仍找不到就显式失败。
-    # 故意不再走全局 HOME_CHANNEL/FEISHU_FALLBACK 兜底——那个值跨实例串味（alpha 会用 zero 的
-    # chat 撞 cross app）。让模型自己填 chat_id，上下文负责补全；查不到就提示用 sense_contacts。
-    if channel in ("lark:default", "feishu:default"):
+    if channel in _default_markers:
         _dm = _get_dm_reply_chat_id()
         _grp = _get_group_reply_chat_id()
         if _dm:
-            channel = f"lark:{_dm}"
+            channel = f"{_pf}:{_dm}"
         elif _grp:
-            channel = f"lark:{_grp}"
+            channel = f"{_pf}:{_grp}"
         else:
             return _j({
                 "sent": False,
-                "channel": "lark:default",
+                "channel": f"{_pf}:default",
                 "text": text,
                 "error": (
                     "你没有指定发给谁（chat_id 必填），且这次唤醒也没有回复上下文（比如 timer/vital/initiative）。"
