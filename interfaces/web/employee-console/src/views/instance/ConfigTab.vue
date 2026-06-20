@@ -54,8 +54,8 @@
     <!-- 微信扫码 Dialog -->
     <el-dialog v-model="qrDialogVisible" title="微信扫码登录" width="360px" :close-on-click-modal="false">
       <div style="text-align: center; padding: 20px;">
-        <img v-if="qrCodeUrl" :src="qrCodeUrl" alt="微信二维码"
-             style="width: 240px; height: 240px; object-fit: contain; border: 1px solid var(--border-line); border-radius: var(--radius); margin-bottom: 16px;" />
+        <iframe v-if="qrCodeUrl" :src="qrCodeUrl" 
+             style="width: 280px; height: 280px; border: none; border-radius: var(--radius); margin-bottom: 16px; background: white;" />
         <div v-else style="width: 240px; height: 240px; display: flex; align-items: center; justify-content: center; margin: 0 auto 16px; background: var(--bg-deep); border-radius: var(--radius);">
           <span class="brand-sub" style="color: var(--text-muted);">加载中…</span>
         </div>
