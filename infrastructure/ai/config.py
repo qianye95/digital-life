@@ -64,7 +64,8 @@ def _get_instance_secrets_path() -> Path:
 
 # 关键环境变量强制清单：永远以配置文件为准，shell export 也覆盖不了。
 FORCED_ENV_KEYS = frozenset({
-    "GLM_API_KEY",            # LLM 凭据——轮换时必须强制覆盖
+    "GLM_API_KEY",            # LLM 凭据（旧名，向后兼容）
+    "LLM_API_KEY",            # LLM 凭据（新名，中性的 provider 无关 key 字段）
     "FEISHU_APP_SECRET",      # 飞书密钥
 })
 
@@ -153,7 +154,7 @@ def resolve_runtime_provider(requested: str | None = None, config: dict[str, Any
     # model name: 新格式 model.name → 旧格式 model.default
     model = str(model_cfg.get("name") or model_cfg.get("default") or model_cfg.get("model") or "").strip()
     # api_key: 优先从 YAML 读（model.api_key），fallback 到实例 secrets.env 加载的 env 变量
-    api_key = str(model_cfg.get("api_key") or os.getenv("GLM_API_KEY") or "").strip()
+    api_key = str(model_cfg.get("api_key") or os.getenv("LLM_API_KEY") or os.getenv("GLM_API_KEY") or "").strip()
     base_url = str(model_cfg.get("base_url") or os.getenv("GLM_BASE_URL") or "").strip()
     api_mode = str(model_cfg.get("api_mode") or "chat_completions").strip() or "chat_completions"
 

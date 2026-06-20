@@ -95,14 +95,14 @@ _MMR_LAMBDA = 0.7  # 相关性 vs 多样性的权重 (1.0=纯相关性)
 # ──────────────────── Embedding API ────────────────────
 
 def _get_api_key() -> Optional[str]:
-    key = os.environ.get("GLM_API_KEY")
+    key = os.environ.get("LLM_API_KEY") or os.environ.get("GLM_API_KEY")
     if key:
         return key
     env_path = get_runtime_env_path()
     if env_path.exists():
         for line in env_path.read_text().splitlines():
             line = line.strip()
-            if line.startswith("GLM_API_KEY="):
+            if line.startswith("LLM_API_KEY=") or line.startswith("GLM_API_KEY="):
                 return line.split("=", 1)[1].strip()
     return None
 

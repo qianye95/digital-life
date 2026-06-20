@@ -41,7 +41,7 @@ class ConfigField:
 SECTION_META: dict[str, dict[str, str]] = {
     "employee": {"label": "员工实例", "description": "数字员工身份名（display_name）。实例 ID 由 init_instance.py 生成，不可改。"},
     "messenger": {"label": "消息通道", "description": "飞书凭证（App ID / App Secret）+ 群消息路由。改动后需重启网关生效。"},
-    "model": {"label": "模型配置", "description": "主推理模型 + Provider + API Key（写入实例 app.yaml.model + secrets.env）。"},
+    "model": {"label": "模型配置", "description": "主推理模型（任意 OpenAI 兼容 API）+ Provider + API Key。写入实例 app.yaml.model + secrets.env。"},
     "runtime": {"label": "运行节律 / 精力策略", "description": "心跳间隔、token 上限、精力折算系数 —— 多实例共享的全局参数。"},
     "tasks": {"label": "任务执行策略", "description": "最大执行轮数、推理强度。"},
 }
@@ -111,7 +111,7 @@ FIELDS: tuple[ConfigField, ...] = (
         "yaml",
         path="model.name",
         default="glm-5.2",
-        description="该实例主推理模型（如 glm-5.2 / glm-4.7-flash）。",
+        description="该实例主推理模型（如 glm-5.2 / glm-5 / deepseek-v3 / gpt-4o）。任意 OpenAI 兼容模型。",
     ),
     ConfigField(
         "model.provider",
@@ -120,7 +120,7 @@ FIELDS: tuple[ConfigField, ...] = (
         "yaml",
         path="model.provider",
         default="glm",
-        description="provider identifier，决定 base_url + api_key 怎么拼。",
+        description="provider 决定 reasoning_content 解析方式。支持 glm / deepseek。其他走 glm 兼容。",
     ),
     ConfigField(
         "model.base_url",
@@ -129,15 +129,15 @@ FIELDS: tuple[ConfigField, ...] = (
         "yaml",
         path="model.base_url",
         default="https://open.bigmodel.cn/api/paas/v4",
-        description="LLM API endpoint。",
+        description="LLM API endpoint。GLM: bigmodel.cn/api/paas/v4；DeepSeek: api.deepseek.com/v1；OpenAI: api.openai.com/v1 等。",
     ),
     ConfigField(
-        "GLM_API_KEY",
+        "LLM_API_KEY",
         "API Key",
         "model",
         "env",
         secret=True,
-        description="模型 API Key（敏感，存实例 config/secrets.env）。留空保存 = 保留当前值。",
+        description="LLM API Key（敏感，存实例 config/secrets.env）。留空保存 = 保留当前值。兼容旧名 GLM_API_KEY。",
     ),
 
     # ════════════ 运行时（跨实例共享，全局通用配置）════════════
@@ -290,11 +290,19 @@ class ConfigCenterWorkflow:
         }
 
     def _field_value(self, field: ConfigField, env: dict[str, str], yaml_config: dict[str, Any]) -> tuple[Any, str]:
+        # env 字段别名映射：新名 → 旧名（向后兼容旧 secrets.env 里的字段名）
+        ENV_ALIASES = {
+            "LLM_API_KEY": ["GLM_API_KEY"],   # 新名 LLM_API_KEY 兼容旧名 GLM_API_KEY
+        }
+        env_keys_to_try = [field.key] + ENV_ALIASES.get(field.key, [])
+
         if field.source == "env":
-            if field.key in env:
-                return self._coerce_value(env[field.key], field), "secrets.env"
-            if field.key in os.environ:
-                return self._coerce_value(os.environ[field.key], field), "process.env"
+            for ek in env_keys_to_try:
+                if ek in env:
+                    return self._coerce_value(env[ek], field), "secrets.env"
+            for ek in env_keys_to_try:
+                if ek in os.environ:
+                    return self._coerce_value(os.environ[ek], field), "process.env"
             return self._coerce_value(field.default, field), "default"
         if field.source == "yaml" and field.path:
             value = self._get_nested(yaml_config, field.path)
@@ -361,21 +369,40 @@ class ConfigCenterWorkflow:
         path = get_runtime_env_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        # 反向别名：新字段写入时也保留老 key（向后兼容已有 secrets.env）。
+        # 如 LLM_API_KEY 写入时如果文件已有 GLM_API_KEY 行 → 替换它（不新增一列）。
+        ENV_WRITE_ALIASES = {
+            "LLM_API_KEY": "GLM_API_KEY",
+        }
         pending = dict(updates)
         written: list[str] = []
+        consumed_keys: set[str] = set()
         for raw in lines:
             stripped = raw.strip()
             if not stripped or stripped.startswith("#") or "=" not in stripped:
                 written.append(raw)
                 continue
             key = stripped.split("=", 1)[0].strip()
-            if key not in pending:
-                written.append(raw)
+            # 精确匹配
+            if key in pending:
+                value = pending.pop(key)
+                consumed_keys.add(key)
+                if value not in (None, ""):
+                    written.append(f"{key}={value}")
                 continue
-            value = pending.pop(key)
-            if value not in (None, ""):
-                written.append(f"{key}={value}")
+            # 别名匹配：旧 key 在文件里，新字段在 pending
+            for new_key, old_key in ENV_WRITE_ALIASES.items():
+                if key == old_key and new_key in pending:
+                    value = pending.pop(new_key)
+                    consumed_keys.add(new_key)
+                    if value not in (None, ""):
+                        written.append(f"{old_key}={value}")  # 保留旧 key 名
+                    break
+            else:
+                written.append(raw)
         for key, value in pending.items():
+            if key in consumed_keys:
+                continue
             if value not in (None, ""):
                 written.append(f"{key}={value}")
         path.write_text("\n".join(written).rstrip() + "\n", encoding="utf-8")
