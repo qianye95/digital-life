@@ -743,8 +743,11 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
                     sent = True
                     err = None
                     logger.info("express_to_human: sent OK")
-                    # Fan-out 到群消息聚合库 + fan-out 给其他实例事件
-                    if _is_group_send:
+                    # Fan-out 到群消息聚合库 + fan-out 给其他实例事件。
+                    # ⚠️ 必须用 real_chat_type=='group'（与 conversation_log 写入同源），
+                    # 不能用 _is_group_send——后者在 oc_ 私聊被 rewrite 成 lark:group:oc_xxx
+                    # 时也是 True，会把私聊误广播给兄弟实例 + 写进群聚合库（隐私泄漏）。
+                    if real_chat_type == "group":
                         try:
                             from domain.conversations import publish_chat_message
                             from infrastructure.config import get_app_instance_id, get_instance_display_name
@@ -2236,6 +2239,22 @@ def _send_wechat_clawbot(
         result = _do_send()
         if isinstance(result, dict) and (not result or result.get("ret") == 0 or result.get("errcode") == 0):
             logger.info("express_to_human wechat: sent OK (target=%s)", target_id[:20])
+            # 记录到 conversation_log（与飞书 out 路径对齐），让 sense_conversation 能读到微信史。
+            # 微信 ClawBot 仅私聊，chat_type 恒为 dm。
+            try:
+                from domain.lifecycle.conversation_log import log_conversation
+                from infrastructure.config import get_instance_display_name
+                out_sender = (get_instance_display_name() or "").strip() or "我"
+                log_conversation(
+                    platform="wechat",
+                    conversation_id=target_id,
+                    chat_type="dm",
+                    direction="out",
+                    text=send_text,
+                    sender_name=out_sender,
+                )
+            except Exception as _le:
+                logger.debug("wechat log_conversation failed: %s", _le)
             return json.dumps({
                 "sent": True,
                 "channel": channel,
