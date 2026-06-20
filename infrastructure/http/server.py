@@ -182,17 +182,65 @@ async def run_instance_gateway(instance_id: str) -> None:
             pass
 
     # 启动所有通道 adapter
+    started_adapters: list[Any] = []
     for adapter in adapters:
         adapter.on_message(
             lambda msg, a=adapter: ingress_handle_message(adapter=a, msg=msg)
         )
         await adapter.start()
+        started_adapters.append(adapter)
         logger.info(
             "Instance %s adapter started (platform=%s, identity=%s)",
             instance_id[:8],
             getattr(adapter, "platform", "?"),
             getattr(adapter, "app_identity", "?"),
         )
+
+    # 热加载通道：每 30s 检查一次 secrets.env 是否有新凭证（用户在控制台改了
+    # 飞书 secret / 微信扫码登录后不需要重启网关，自动发现新通道）
+    import yaml as _yaml_reload
+    from interfaces.ingress.registry import create_adapters_from_config as _caf
+
+    async def _hot_reload_channels():
+        from application.ingress.handler import handle_message as _hm
+        reload_interval = 30
+        while not stop_event.is_set():
+            await asyncio.sleep(reload_interval)
+            try:
+                cfg_path_r = get_project_root() / "apps" / instance_id / "config" / "app.yaml"
+                secrets_path_r = get_project_root() / "apps" / instance_id / "config" / "secrets.env"
+                if not cfg_path_r.exists():
+                    continue
+                new_cfg = _yaml_reload.safe_load(cfg_path_r.read_text(encoding="utf-8")) or {}
+                new_secrets: dict[str, str] = {}
+                if secrets_path_r.exists():
+                    for line in secrets_path_r.read_text(encoding="utf-8").splitlines():
+                        line = line.strip()
+                        if line and not line.startswith("#") and "=" in line:
+                            k, v = line.split("=", 1)
+                            new_secrets[k.strip()] = v.strip().strip('"').strip("'")
+
+                new_adapters = [a for a in _caf(new_cfg, new_secrets) if a is not None]
+                # 找出新启动的（started_adapters 里没有的）
+                existing_platforms = {getattr(a, "platform", "") for a in started_adapters}
+                for new_ad in new_adapters:
+                    if getattr(new_ad, "platform", "") not in existing_platforms:
+                        new_ad.on_message(
+                            lambda msg, a=new_ad: _hm(adapter=a, msg=msg)
+                        )
+                        await new_ad.start()
+                        started_adapters.append(new_ad)
+                        existing_platforms.add(getattr(new_ad, "platform", ""))
+                        logger.info(
+                            "Instance %s HOT-LOADED new adapter: platform=%s identity=%s",
+                            instance_id[:8],
+                            getattr(new_ad, "platform", "?"),
+                            getattr(new_ad, "app_identity", "?"),
+                        )
+            except Exception as exc:
+                logger.debug("hot reload check failed: %s", exc)
+
+    hot_reload_task = asyncio.create_task(_hot_reload_channels())
 
     # 启动 Cron 循环（只 tick 当前实例）
     cron_stop = threading.Event()

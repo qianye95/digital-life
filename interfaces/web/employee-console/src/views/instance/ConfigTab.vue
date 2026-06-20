@@ -113,7 +113,7 @@ async function doWechatLogin() {
         clearInterval(pollTimer)
         qrDialogVisible.value = false
         wechatLoading.value = false
-        ElMessage.success(`✓ 微信登录成功（bot_id=${st.bot_id}），重启网关后生效`)
+        ElMessage.success(`✓ 微信登录成功（bot_id=${st.bot_id}），通道将在 30s 内自动生效`)
         await load()
       }
     }, 3000)
