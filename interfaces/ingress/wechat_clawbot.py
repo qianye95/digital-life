@@ -226,32 +226,29 @@ class WeChatClawBotAdapter:
     # ── 消息标准化 ────────────────────────────────────────────────────
 
     def _normalize(self, raw: dict[str, Any]) -> NormalizedMessage | None:
-        """把 ClawBot 的 JSON 消息转成 NormalizedMessage。
-
-        ClawBot 消息结构：
-          {
-            "from_user_id": "xxx@im.wechat",
-            "to_user_id": "yyy@im.bot",
-            "message_id": "...",
-            "context_token": "...",
-            "item_list": [{"type": 1, "content": "你好"}],
-            ...
-          }
-
-        type=1 是文本；其他 type（图片/语音/文件）当前不解析。
-        """
+        """把 ClawBot 的 JSON 消息转成 NormalizedMessage。"""
         if not raw:
             return None
-        # 提取文本内容（取 item_list 里第一个 type=1 的 item）
+        # DEBUG：把 raw 打出来方便对齐字段
+        logger.info("ClawBot _normalize raw keys: %s", list(raw.keys()))
+        # 提取文本内容（ClawBot 2.4.4 格式：type=1 在 text_item.text 里）
         content = ""
         items = raw.get("item_list") or []
         if isinstance(items, list):
             for item in items:
                 if isinstance(item, dict) and item.get("type") == 1:
-                    content = str(item.get("content") or "").strip()
-                    break
+                    # 优先 text_item.text（真实格式）
+                    ti = item.get("text_item") or {}
+                    content = str(ti.get("text") or "").strip()
+                    if content:
+                        break
+                    # fallback content（老格式兼容）
+                    c = str(item.get("content") or "").strip()
+                    if c:
+                        content = c
+                        break
         if not content:
-            # 非文本消息（图片/语音等），跳过
+            logger.info("ClawBot _normalize: no text (item_list=%s)", items[:1] if items else "[]")
             return None
 
         from_user = str(raw.get("from_user_id") or "")
