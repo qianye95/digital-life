@@ -122,7 +122,7 @@ async function doWechatLogin() {
 }
 
 // 实例私有：身份 / 飞书凭证 / 模型 / 任务策略
-const INSTANCE_SECTIONS = ['employee', 'feishu', 'messenger', 'wechat', 'model', 'tasks']
+const INSTANCE_SECTIONS = ['employee', 'model', 'feishu', 'wechat', 'behavior', 'tasks']
 
 const instanceSections = computed(() =>
   allSections.value.filter(s => INSTANCE_SECTIONS.includes(s.key))
