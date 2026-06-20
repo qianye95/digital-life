@@ -7,6 +7,24 @@
 
     <div v-if="loading" class="dev-placeholder"><span class="mono">loading…</span></div>
     <div v-else>
+      <!-- 微信扫码登录（有 wechat channel 时显示，独立于 section 循环） -->
+      <div v-if="hasWechatChannel" class="neon-card"
+           style="margin-bottom: var(--space-4); padding: var(--space-5); border-left: 3px solid var(--neon-lime);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <div>
+            <strong style="font-family: var(--font-display); color: var(--neon-lime);">
+              微信 ClawBot 扫码登录
+            </strong>
+            <p class="brand-sub" style="margin-top: 4px; color: var(--text-muted);">
+              扫码后自动写入 WECHAT_BOT_TOKEN。ClawBot 仅支持私聊。
+            </p>
+          </div>
+          <el-button type="success" :loading="wechatLoading" @click="doWechatLogin">
+            {{ wechatLoading ? '等待扫码…(最多120s)' : '扫码登录' }}
+          </el-button>
+        </div>
+      </div>
+
       <div v-for="section in instanceSections" :key="section.key" class="neon-card" style="margin-bottom: var(--space-4);">
         <h3 class="page-title" style="font-size: 16px; margin: 0 0 var(--space-3);">
           {{ section.label }}
@@ -33,24 +51,6 @@
                       :show-password="field.secret"
                       :placeholder="field.secret && field.configured ? '留空保留当前密钥' : ''" />
           </div>
-        </div>
-      </div>
-
-      <!-- 微信扫码登录（仅 wechat section 显示） -->
-      <div v-if="section.key === 'wechat'" class="neon-card"
-           style="margin-bottom: var(--space-4); padding: var(--space-5); border-left: 3px solid var(--neon-lime);">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-          <div>
-            <strong style="font-family: var(--font-display); color: var(--neon-lime);">
-              微信 ClawBot 扫码登录
-            </strong>
-            <p class="brand-sub" style="margin-top: 4px; color: var(--text-muted);">
-              扫码后自动写入 WECHAT_BOT_TOKEN。ClawBot 仅支持私聊。
-            </p>
-          </div>
-          <el-button type="success" :loading="wechatLoading" @click="doWechatLogin">
-            {{ wechatLoading ? '等待扫码…(最多120s)' : '扫码登录' }}
-          </el-button>
         </div>
       </div>
 
@@ -99,11 +99,14 @@ async function doWechatLogin() {
 }
 
 // 实例私有：身份 / 飞书凭证 / 模型 / 任务策略
-// runtime（token 上限 / 精力系数）是全局共享的，在 /system/config 编辑
-const INSTANCE_SECTIONS = ['employee', 'messenger', 'model', 'tasks']
+const INSTANCE_SECTIONS = ['employee', 'feishu', 'messenger', 'wechat', 'model', 'tasks']
 
 const instanceSections = computed(() =>
   allSections.value.filter(s => INSTANCE_SECTIONS.includes(s.key))
+)
+
+const hasWechatChannel = computed(() =>
+  instanceSections.value.some(s => s.key === 'wechat')
 )
 
 const changes = computed(() => {
