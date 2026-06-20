@@ -463,7 +463,9 @@ _wechat_login_state: dict[str, Any] = {}
 async def _handle_wechat_qrcode(request: web.Request) -> web.Response:
     """POST /api/system/instances/{iid}/wechat-login/qrcode —— 获取二维码。
 
-    返回 {qrcode_url: "...", session_key: "..."} 供前端弹窗展示二维码图片。
+    ClawBot API 格式（来自 npm 包 @tencent-weixin/openclaw-weixin 2.4.4 源码）：
+      POST /ilink/bot/get_bot_qrcode?bot_type=3  body={"local_token_list":[]}
+      返回 {qrcode: "token", qrcode_img_content: "https://...", ret: 0}
     """
     iid = request.match_info["iid"]
     if iid not in (_load_registry() or {}):
@@ -474,41 +476,47 @@ async def _handle_wechat_qrcode(request: web.Request) -> web.Response:
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                "https://ilinkai.weixin.qq.com/ilink/bot/get_bot_qrcode"
+                "https://ilinkai.weixin.qq.com/ilink/bot/get_bot_qrcode?bot_type=3",
+                json={"local_token_list": []},
             )
             resp.raise_for_status()
             data = resp.json()
     except Exception as exc:
+        logger.exception("wechat qrcode fetch failed")
         return web.json_response({"error": f"获取二维码失败: {exc}"}, status=502)
 
-    qrcode_url = data.get("qrcode_url") or data.get("url") or ""
-    session_key = data.get("session_key") or data.get("ticket") or ""
-
-    if not qrcode_url or not session_key:
+    if data.get("ret") not in (0, None):
         return web.json_response(
-            {"error": f"ClawBot 未返回二维码 URL, response: {data}"}, status=502
+            {"error": f"ClawBot 返回错误: {data.get('err_msg', data.get('ret'))}"}, status=502
         )
 
-    # 存 session_key 到内存状态（status 轮询需要）
-    _wechat_login_state[iid] = {"session_key": session_key, "status": "pending"}
+    qrcode_token = data.get("qrcode") or ""
+    qrcode_url = data.get("qrcode_img_content") or ""
 
-    return web.json_response({"qrcode_url": qrcode_url, "session_key": session_key})
+    if not qrcode_token or not qrcode_url:
+        return web.json_response(
+            {"error": f"ClawBot 未返回二维码数据, response: {data}"}, status=502
+        )
+
+    _wechat_login_state[iid] = {"qrcode_token": qrcode_token, "status": "pending"}
+
+    return web.json_response({"qrcode_url": qrcode_url, "qrcode_token": qrcode_token})
 
 
 async def _handle_wechat_login_status(request: web.Request) -> web.Response:
     """GET /api/system/instances/{iid}/wechat-login/status —— 轮询扫码状态。
 
-    返回:
-      {status: "pending"} —— 等待扫码
-      {status: "confirmed", bot_id: "xxx", token_written: true} —— 扫码成功
-      {status: "error", error: "..."}
+    ClawBot API 格式：
+      GET /ilink/bot/get_qrcode_status?qrcode=xxx  (长轮询 hold 35s)
+      返回 status: wait | scaned | need_verifycode | confirmed | expired
+
+    confirmed 时返回 ilink_bot_id + bot_token。
     """
     iid = request.match_info["iid"]
     state = _wechat_login_state.get(iid)
     if not state:
         return web.json_response({"status": "pending"})
 
-    # 已确认 → 直接返回缓存状态
     if state.get("status") == "confirmed":
         return web.json_response({
             "status": "confirmed",
@@ -516,32 +524,29 @@ async def _handle_wechat_login_status(request: web.Request) -> web.Response:
             "token_written": state.get("token_written", False),
         })
 
-    session_key = state.get("session_key", "")
-    if not session_key:
+    qrcode_token = state.get("qrcode_token", "")
+    if not qrcode_token:
         return web.json_response({"status": "pending"})
 
-    # 调 ClawBot 查状态
     import httpx
 
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(
-                "https://ilinkai.weixin.qq.com/ilink/bot/get_qrcode_status",
-                json={"session_key": session_key},
+        async with httpx.AsyncClient(timeout=40) as client:
+            resp = await client.get(
+                f"https://ilinkai.weixin.qq.com/ilink/bot/get_qrcode_status?qrcode={qrcode_token}",
             )
             resp.raise_for_status()
             data = resp.json()
     except Exception:
         return web.json_response({"status": "pending"})
 
-    sc = data.get("status") or data.get("ret")
-    if sc in ("confirmed", "ok", 0, "0"):
+    status = data.get("status", "")
+    # 映射状态给前端理解
+    if status == "confirmed":
         bot_token = data.get("bot_token") or ""
-        bot_id = data.get("bot_id") or ""
+        bot_id = data.get("ilink_bot_id") or data.get("bot_id") or ""
         if bot_token:
-            # 写入 secrets.env
             _write_env_secret(iid, "WECHAT_BOT_TOKEN", bot_token)
-            # 写入 app.yaml channels.wechat
             try:
                 _patch_instance_app_yaml(iid, {
                     "channels": {
@@ -554,18 +559,20 @@ async def _handle_wechat_login_status(request: web.Request) -> web.Response:
                 })
             except Exception:
                 pass
-            _wechat_login_state[iid] = {
-                "status": "confirmed",
-                "bot_id": bot_id,
-                "token_written": True,
-            }
+            _wechat_login_state[iid] = {"status": "confirmed", "bot_id": bot_id, "token_written": True}
             return web.json_response({
                 "status": "confirmed",
                 "bot_id": bot_id,
                 "token_written": True,
             })
-    # 否则 pending
-    return web.json_response({"status": "pending"})
+    elif status == "scaned":
+        return web.json_response({"status": "scaned", "message": "已扫码，等待确认…"})
+    elif status == "need_verifycode":
+        return web.json_response({"status": "need_verifycode", "message": "请在手机上输入验证码"})
+    elif status == "expired":
+        return web.json_response({"status": "expired", "message": "二维码已过期，请重新获取"})
+
+    return web.json_response({"status": "wait"})
 
 
 def _write_env_secret(iid: str, key: str, value: str) -> None:
