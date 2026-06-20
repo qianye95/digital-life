@@ -50,6 +50,18 @@
         </el-button>
       </div>
     </div>
+
+    <!-- 微信扫码 Dialog -->
+    <el-dialog v-model="qrDialogVisible" title="微信扫码登录" width="360px" :close-on-click-modal="false">
+      <div style="text-align: center; padding: 20px;">
+        <img v-if="qrCodeUrl" :src="qrCodeUrl" alt="微信二维码"
+             style="width: 240px; height: 240px; object-fit: contain; border: 1px solid var(--border-line); border-radius: var(--radius); margin-bottom: 16px;" />
+        <div v-else style="width: 240px; height: 240px; display: flex; align-items: center; justify-content: center; margin: 0 auto 16px; background: var(--bg-deep); border-radius: var(--radius);">
+          <span class="brand-sub" style="color: var(--text-muted);">加载中…</span>
+        </div>
+        <p style="color: var(--text-secondary); font-size: 14px;">{{ qrStatus }}</p>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -64,6 +76,9 @@ const iid = computed(() => String(route.params.iid || ''))
 const loading = ref(true)
 const saving = ref(false)
 const wechatLoading = ref(false)
+const qrDialogVisible = ref(false)
+const qrCodeUrl = ref('')
+const qrStatus = ref('')
 const allSections = ref([])
 const draft = ref({})
 const baseline = ref({})
@@ -71,19 +86,38 @@ const baseline = ref({})
 async function doWechatLogin() {
   if (wechatLoading.value) return
   wechatLoading.value = true
-  ElMessage.info('请在终端查看二维码并扫码（最多 120s）…')
+  qrCodeUrl.value = ''
+  qrDialogVisible.value = true
+  qrStatus.value = '获取二维码…'
   try {
-    const d = await systemApi.wechatLogin(iid.value)
+    const d = await systemApi.wechatQrcode(iid.value)
     if (d.error) {
-      ElMessage.error(`登录失败：${d.error}`)
+      qrStatus.value = `获取二维码失败：${d.error}`
       return
     }
-    ElMessage.success(`✓ 微信登录成功（bot_id=${d.bot_id}），WECHAT_BOT_TOKEN 已写入。重启网关后生效。`)
-    await load()
+    qrCodeUrl.value = d.qrcode_url || ''
+    qrStatus.value = '请用手机微信扫码'
+    // 开始轮询（3s 间隔，最多 40 次 = 120s）
+    let polls = 0
+    const pollTimer = setInterval(async () => {
+      polls++
+      if (polls > 40) {
+        clearInterval(pollTimer)
+        qrStatus.value = '扫码超时，请重新点击'
+        wechatLoading.value = false
+        return
+      }
+      const st = await systemApi.wechatLoginStatus(iid.value)
+      if (st.status === 'confirmed') {
+        clearInterval(pollTimer)
+        qrDialogVisible.value = false
+        wechatLoading.value = false
+        ElMessage.success(`✓ 微信登录成功（bot_id=${st.bot_id}），重启网关后生效`)
+        await load()
+      }
+    }, 3000)
   } catch (e) {
-    ElMessage.error(`网络错误：${e.message || e}`)
-  } finally {
-    wechatLoading.value = false
+    qrStatus.value = `错误：${e.message || e}`
   }
 }
 

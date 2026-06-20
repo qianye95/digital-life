@@ -92,6 +92,10 @@ export const systemApi = {
       body: JSON.stringify({}),
     }).finally(() => clearTimeout(timeout))
   },
+  wechatQrcode: (iid) =>
+    safeFetch(`/api/system/instances/${iid}/wechat-login/qrcode`, { method: 'POST', body: JSON.stringify({}) }),
+  wechatLoginStatus: (iid) =>
+    safeFetch(`/api/system/instances/${iid}/wechat-login/status`),
   gatewayRestart: (reason) => api.post('/api/system/gateway/restart', { reason }),
   projects: (iid) => api.get('/api/system/projects', iid ? { iid } : {}),
   projectDetail: (pid) => api.get(`/api/system/projects/${pid}`),

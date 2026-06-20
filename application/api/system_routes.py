@@ -47,8 +47,12 @@ def add_system_routes(app: web.Application) -> None:
     app.router.add_post(f"{SYSTEM_API_PREFIX}/instances", _handle_create_instance)
     app.router.add_patch(f"{SYSTEM_API_PREFIX}/instances/{{iid}}", _handle_update_instance)
     app.router.add_post(
-        f"{SYSTEM_API_PREFIX}/instances/{{iid}}/wechat-login",
-        _handle_wechat_login,
+        f"{SYSTEM_API_PREFIX}/instances/{{iid}}/wechat-login/qrcode",
+        _handle_wechat_qrcode,
+    )
+    app.router.add_get(
+        f"{SYSTEM_API_PREFIX}/instances/{{iid}}/wechat-login/status",
+        _handle_wechat_login_status,
     )
     app.router.add_get(f"{SYSTEM_API_PREFIX}/projects", _handle_projects)
     app.router.add_post(f"{SYSTEM_API_PREFIX}/projects", _handle_create_project)
@@ -453,51 +457,115 @@ async def _handle_update_instance(request: web.Request) -> web.Response:
     )
 
 
-async def _handle_wechat_login(request: web.Request) -> web.Response:
-    """POST /api/system/instances/{iid}/wechat-login —— ClawBot 扫码登录。
+_wechat_login_state: dict[str, Any] = {}
 
-    调用 login_clawbot_qrcode() 获取二维码 URL → 轮询等待扫码确认 →
-    返回 bot_token + bot_id。前端拿到后写入 secrets.env (WECHAT_BOT_TOKEN) +
-    app.yaml channels.wechat 段。
 
-    这是一个长轮询 endpoint（可能 hold 2 分钟等用户扫码）。
+async def _handle_wechat_qrcode(request: web.Request) -> web.Response:
+    """POST /api/system/instances/{iid}/wechat-login/qrcode —— 获取二维码。
+
+    返回 {qrcode_url: "...", session_key: "..."} 供前端弹窗展示二维码图片。
     """
     iid = request.match_info["iid"]
     if iid not in (_load_registry() or {}):
         return web.json_response({"error": f"unknown instance: {iid}"}, status=404)
 
+    import httpx
+
     try:
-        from interfaces.ingress.wechat_clawbot import login_clawbot_qrcode
-        bot_token, bot_id = await login_clawbot_qrcode(timeout=120)
-    except TimeoutError:
-        return web.json_response({"error": "扫码超时（120s），请重试"}, status=408)
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://ilinkai.weixin.qq.com/ilink/bot/get_bot_qrcode"
+            )
+            resp.raise_for_status()
+            data = resp.json()
     except Exception as exc:
-        logger.exception("wechat login failed")
-        return web.json_response({"error": str(exc)}, status=500)
+        return web.json_response({"error": f"获取二维码失败: {exc}"}, status=502)
 
-    # 自动写入 secrets.env + app.yaml channels.wechat 段
-    try:
-        _patch_instance_app_yaml(iid, {
-            "channels": {
-                "wechat": {
-                    "type": "wechat_clawbot",
-                    "domain": "https://ilinkai.weixin.qq.com",
-                    "bot_id": bot_id,
-                }
-            }
+    qrcode_url = data.get("qrcode_url") or data.get("url") or ""
+    session_key = data.get("session_key") or data.get("ticket") or ""
+
+    if not qrcode_url or not session_key:
+        return web.json_response(
+            {"error": f"ClawBot 未返回二维码 URL, response: {data}"}, status=502
+        )
+
+    # 存 session_key 到内存状态（status 轮询需要）
+    _wechat_login_state[iid] = {"session_key": session_key, "status": "pending"}
+
+    return web.json_response({"qrcode_url": qrcode_url, "session_key": session_key})
+
+
+async def _handle_wechat_login_status(request: web.Request) -> web.Response:
+    """GET /api/system/instances/{iid}/wechat-login/status —— 轮询扫码状态。
+
+    返回:
+      {status: "pending"} —— 等待扫码
+      {status: "confirmed", bot_id: "xxx", token_written: true} —— 扫码成功
+      {status: "error", error: "..."}
+    """
+    iid = request.match_info["iid"]
+    state = _wechat_login_state.get(iid)
+    if not state:
+        return web.json_response({"status": "pending"})
+
+    # 已确认 → 直接返回缓存状态
+    if state.get("status") == "confirmed":
+        return web.json_response({
+            "status": "confirmed",
+            "bot_id": state.get("bot_id", ""),
+            "token_written": state.get("token_written", False),
         })
+
+    session_key = state.get("session_key", "")
+    if not session_key:
+        return web.json_response({"status": "pending"})
+
+    # 调 ClawBot 查状态
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                "https://ilinkai.weixin.qq.com/ilink/bot/get_qrcode_status",
+                json={"session_key": session_key},
+            )
+            resp.raise_for_status()
+            data = resp.json()
     except Exception:
-        logger.warning("failed to write channels.wechat to app.yaml", exc_info=True)
+        return web.json_response({"status": "pending"})
 
-    _write_env_secret(iid, "WECHAT_BOT_TOKEN", bot_token)
-
-    return web.json_response({
-        "ok": True,
-        "bot_id": bot_id,
-        "token_written": True,
-        "hint": f"微信 ClawBot 登录成功（bot_id={bot_id}）。"
-                "WECHAT_BOT_TOKEN 已写入 secrets.env。重启网关后微信通道生效。",
-    })
+    sc = data.get("status") or data.get("ret")
+    if sc in ("confirmed", "ok", 0, "0"):
+        bot_token = data.get("bot_token") or ""
+        bot_id = data.get("bot_id") or ""
+        if bot_token:
+            # 写入 secrets.env
+            _write_env_secret(iid, "WECHAT_BOT_TOKEN", bot_token)
+            # 写入 app.yaml channels.wechat
+            try:
+                _patch_instance_app_yaml(iid, {
+                    "channels": {
+                        "wechat": {
+                            "type": "wechat_clawbot",
+                            "domain": "https://ilinkai.weixin.qq.com",
+                            "bot_id": bot_id,
+                        }
+                    }
+                })
+            except Exception:
+                pass
+            _wechat_login_state[iid] = {
+                "status": "confirmed",
+                "bot_id": bot_id,
+                "token_written": True,
+            }
+            return web.json_response({
+                "status": "confirmed",
+                "bot_id": bot_id,
+                "token_written": True,
+            })
+    # 否则 pending
+    return web.json_response({"status": "pending"})
 
 
 def _write_env_secret(iid: str, key: str, value: str) -> None:
