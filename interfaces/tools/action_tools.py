@@ -2111,19 +2111,31 @@ def _send_wechat_clawbot(
     max_len = 2000
     send_text = text[:max_len]
 
-    # 发送
+    # ClawBot 发送 header（跟 getupdates 一样）
     import base64 as _b64
     import random as _rnd
-    import time as _time
     headers = {
-        "Authorization": f"Bearer {bot_token}",
         "Content-Type": "application/json",
+        "AuthorizationType": "ilink_bot_token",
+        "Authorization": f"Bearer {bot_token}",
         "X-WECHAT-UIN": _b64.b64encode(str(_rnd.randint(0, 0xFFFFFFFF)).encode()).decode(),
+        "iLink-App-Id": "bot",
+        "iLink-App-ClientVersion": "132100",
     }
+    # ClawBot 2.4.4 sendmessage 格式（来自 npm 包 send.js buildTextMessageReq）：
+    # body = { msg: { to_user_id, client_id, message_type:2(BOT), message_state:2(FINISH),
+    #                 item_list: [{type:1, text_item:{text:...}}], context_token } }
+    import uuid as _uuid
     payload = {
-        "context_token": context_token,
-        "to_user_id": target_id,
-        "item_list": [{"type": 1, "content": send_text}],
+        "msg": {
+            "from_user_id": "",
+            "to_user_id": target_id,
+            "client_id": f"openclaw-weixin-{_uuid.uuid4().hex[:16]}",
+            "message_type": 2,
+            "message_state": 2,
+            "item_list": [{"type": 1, "text_item": {"text": send_text}}],
+            "context_token": context_token,
+        }
     }
 
     def _do_send():
@@ -2138,7 +2150,7 @@ def _send_wechat_clawbot(
             return r.json()
 
     try:
-        result = run_async_in_thread(_do_send())
+        result = _do_send()
         if isinstance(result, dict) and (result.get("ret") == 0 or result.get("errcode") == 0):
             logger.info("express_to_human wechat: sent OK (target=%s)", target_id[:20])
             return json.dumps({
