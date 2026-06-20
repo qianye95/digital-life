@@ -89,8 +89,11 @@ def _get_runtime_channel_prefix() -> str:
         pass
     # fallback：从 _REPLY_CONTEXT 读（跨线程可见）
     try:
-        from infrastructure.config import get_app_instance_id as _get_iid
-        _iid = _get_iid() or ""
+        # 优先用全局 mirror（不依赖 ContextVar），其次用 ContextVar
+        _iid = _CURRENT_INSTANCE_ID or ""
+        if not _iid:
+            from infrastructure.config import get_app_instance_id as _get_iid
+            _iid = _get_iid() or ""
         if _iid:
             ctx = _REPLY_CONTEXT.get(_iid) or {}
             pf2 = str(ctx.get("platform") or "").strip()
@@ -204,7 +207,17 @@ def _explain_feishu_send_failure(resp: dict, channel: str, receive_id: str) -> s
 
 # 全局变量：存储群聊回复上下文（备用）
 # 多实例隔离的回复上下文：每个 instance 维护自己的 group/dm chat_id
-_REPLY_CONTEXT: dict[str, dict[str, str]] = {}  # instance_id -> {group: ..., dm: ...}
+_REPLY_CONTEXT: dict[str, dict[str, str]] = {}  # instance_id -> {group, dm, platform, wechat_context_token}
+
+# 全局 mirror —— 任何线程可读可写，不依赖 ContextVar 跨线程语义
+# handler._route_to_life (子线程) 写，express_to_human (agent 主线程) 读
+_CURRENT_INSTANCE_ID: str = ""
+
+
+def _set_current_instance_id_mirror(iid: str) -> None:
+    """供 handler 调：记住当前进程在处理哪个实例。"""
+    global _CURRENT_INSTANCE_ID
+    _CURRENT_INSTANCE_ID = iid or ""
 
 _GROUP_REPLY_CHAT_ID = None
 _DM_REPLY_CHAT_ID = None

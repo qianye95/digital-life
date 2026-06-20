@@ -315,8 +315,9 @@ def _route_to_life(
             # 同时存 _REPLY_CONTEXT（为 express_to_human fallback 用）
             try:
                 import interfaces.tools.action_tools as _at2
-                from infrastructure.config import get_app_instance_id as _get_iid
-                _iid = _get_iid() or ""
+                # 用固定的 instance_id 作为 key + 设全局 mirror
+                _at2._set_current_instance_id_mirror(instance_id)
+                _iid = instance_id
                 if _iid:
                     _ctx = _at2._REPLY_CONTEXT.get(_iid) or {}
                     _ctx["platform"] = platform
