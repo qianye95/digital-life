@@ -36,10 +36,11 @@ def render_social_context(instance_id: str) -> str:
         bots = [c for c in cs if c.get("kind") == "bot"]
 
         def _channel_ids(c: dict) -> list[str]:
-            """提取联系人**所有平台**的可达 ID（带通道前缀提示）。
+            """提取联系人**所有平台**的可达 ID（带通道前缀）。
 
-            返回例：["lark:ou_eb5083eb…", "wechat:zhp@im.wechat…"]
-            模型据此知道「这个人飞书能 lark:dm:ou_xxx 发，微信能 wechat:dm:xxx 发」。
+            返回例：["lark:ou_eb5083eb...", "wechat:zhp@im.wechat..."]
+            ⚠️ 完整 ID 必须保留——模型会原样填回 express_to_human(channel=...)。
+               任何截断都会让模型拿到无法发送的废字符串。
             """
             out = []
             for p in (c.get("platform_ids") or []):
@@ -47,25 +48,24 @@ def render_social_context(instance_id: str) -> str:
                 pid = (p.get("platform_id") or "").strip()
                 if not pid:
                     continue
-                short = pid[:16] + "…" if len(pid) > 16 else pid
                 if pf == "feishu":
-                    out.append(f"lark:{short}")
+                    out.append(f"lark:{pid}")
                 elif pf == "wechat":
-                    out.append(f"wechat:{short}")
+                    out.append(f"wechat:{pid}")
                 else:
-                    out.append(f"{pf}:{short}")
+                    out.append(f"{pf}:{pid}")
             return out
 
         if humans:
             lines.append("\n联系人（人类），回复时按平台填 channel：")
             lines.append("  格式：lark:dm:<ou_xxx>（飞书私聊）/ lark:group:<oc_xxx>（飞书群）/ wechat:dm:<xxx@im.wechat>（微信）")
-            for c in humans[:20]:
+            for c in humans:
                 ids = _channel_ids(c)
                 name = (c.get("name") or "").strip()
                 label = name if name else "(未命名)"
                 id_part = f" [{', '.join(ids)}]" if ids else ""
                 note = (c.get("notes") or "").strip()
-                lines.append(f"  · {label}{id_part}" + (f" / 备注: {note[:60]}" if note else ""))
+                lines.append(f"  · {label}{id_part}" + (f" / 备注: {note[:80]}" if note else ""))
         if bots:
             lines.append("\n联系人（机器人，群内可用 @<name> 召唤）：")
             for c in bots:
@@ -74,12 +74,7 @@ def render_social_context(instance_id: str) -> str:
                 label = name if name else "(未命名 bot)"
                 id_part = f" [{', '.join(ids)}]" if ids else ""
                 note = (c.get("notes") or "").strip()
-                lines.append(f"  · {label}{id_part}" + (f" / 备注: {note[:60]}" if note else ""))
-
-        # 统计未命名 stub（信息提示，不隐藏）
-        unnamed_count = sum(1 for c in cs if not (c.get("name") or "").strip())
-        if unnamed_count > 0 and unnamed_count > len(humans) + len(bots):
-            lines.append(f"\n（其中 {unnamed_count - len(humans) - len(bots)} 个 stub 未在上方列出）")
+                lines.append(f"  · {label}{id_part}" + (f" / 备注: {note[:80]}" if note else ""))
     except Exception as exc:
         logger.debug("social_context contacts failed: %s", exc)
 
@@ -90,15 +85,14 @@ def render_social_context(instance_id: str) -> str:
             lines.append("\n参与的群，回复时按平台填 channel：")
             lines.append("  格式：lark:group:<oc_xxx>（飞书群）/ wechat:group:<group_id>（微信群，ClawBot 暂不支持群）")
             for cid, name in chats.items():
-                short = cid[:12] + "…" if len(cid) > 12 else cid
                 name_display = name or "(未命名群)"
-                # 标注平台（飞书 oc_ / 微信 @im）
+                # 标注平台（飞书 oc_ / 微信 @im）— 完整 cid 保留
                 if cid.startswith("oc_"):
-                    lines.append(f"  · {name_display}（lark:{short}）")
+                    lines.append(f"  · {name_display}（lark:{cid}）")
                 elif "@im" in cid:
-                    lines.append(f"  · {name_display}（wechat:{short}）")
+                    lines.append(f"  · {name_display}（wechat:{cid}）")
                 else:
-                    lines.append(f"  · {name_display}（{short}）")
+                    lines.append(f"  · {name_display}（{cid}）")
     except Exception as exc:
         logger.debug("social_context chats failed: %s", exc)
 

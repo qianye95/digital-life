@@ -943,11 +943,11 @@ def _wake_digital_life_inner_safe(
                 msgs = list_chat_messages(_wake_chat_id, limit=10)
                 if msgs:
                     snippet_lines = [
-                        f"## ── chat {_wake_chat_id[:8]} 近期对话流水 ──"
+                        f"## ── 当前对话近期流水 ──"
                     ]
-                    # 截断展示。跨通道消息去重已在发送侧根治（@ 到本群机器人时
-                    # 不再重复广播），存储层不再产生 lark/broadcast 同文双写，
-                    # 此处无需再做渲染时的二级去重。
+                    # ⚠️ heading 不放 chat_id（避免模型从 heading 抄到截断值），
+                    # _wake_chat_id 已由上游 express_to_human 默认回复上下文绑定，
+                    # 模型无需显式填。跨通道去重已在发送侧根治，无需二级去重。
                     for m in msgs:
                         text = (m.get("text") or "").strip()
                         if not text:
@@ -956,12 +956,10 @@ def _wake_digital_life_inner_safe(
                         sender = (m.get("sender_name") or "").strip()
                         if not sender:
                             sender = m.get("sender_id") or "未知"
-                            if len(sender) > 16:
-                                sender = sender[:12] + "…"
                         # 截断提升 200 → 800: alpha 的执行计划/操作建议常含 markdown 表格,
                         # 200 字会截掉关键参数(标的代码、买入金额、止盈止损)。
                         snippet_lines.append(f"{sender}：{text[:800]}")
-                    snippet_lines.append("## ── /近期对话流水 ──")
+                    snippet_lines.append("## ── /当前对话近期流水 ──")
                     prev_history.append({
                         "role": "user",
                         "content": "\n".join(snippet_lines),

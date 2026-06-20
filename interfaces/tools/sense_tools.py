@@ -691,10 +691,10 @@ registry.register(
 # ──────────────────────────────── sense_contacts ────────────────────────────────
 
 def _handle_sense_contacts(args: Dict[str, Any], **_) -> str:
-    """列出当前实例的联系人 + 飞书 open_id/chat_id，给 express_to_human 提供 chat_id 来源。
+    """列出当前实例的联系人 + 各平台完整 ID（ou_xxx / oc_xxx / 微信 openid），给 express_to_human 提供 channel/chat_id 来源。
 
-    返回完整 ID（ou_xxx / oc_xxx），不止 social_context 里的 12 位短码——
-    这样模型查到后可直接填进 express_to_human(text, chat_id=...) 发私聊。
+    返回**所有平台完整 ID**，模型可直接填进 express_to_human(channel=...) 发，
+    绝不截断——任何截断都会让模型拿到无法发送的废字符串。
     """
     _burn()
     try:
@@ -704,21 +704,31 @@ def _handle_sense_contacts(args: Dict[str, Any], **_) -> str:
     cs = list_contacts() or []
     out = []
     for c in cs:
-        feishu_ids = [
-            p.get("platform_id") for p in (c.get("platform_ids") or [])
-            if p.get("platform") == "feishu" and (p.get("platform_id") or "").startswith(("ou_", "oc_"))
-        ]
+        # 收集所有平台的完整 ID（带前缀，便于模型直接填 channel=...）
+        all_ids = []
+        for p in (c.get("platform_ids") or []):
+            pf = (p.get("platform") or "").strip()
+            pid = (p.get("platform_id") or "").strip()
+            if not pid:
+                continue
+            if pf == "feishu":
+                all_ids.append(f"lark:{pid}")
+            elif pf == "wechat":
+                all_ids.append(f"wechat:{pid}")
+            else:
+                all_ids.append(f"{pf}:{pid}")
         out.append({
             "name": c.get("name") or "(未命名)",
             "kind": c.get("kind") or "unknown",
-            "feishu_id": feishu_ids[0] if feishu_ids else "",
+            "channels": all_ids,
             "notes": (c.get("notes") or "").strip()[:80],
             "blocked": bool(c.get("blocked")),
         })
-    humans = [x for x in out if x["feishu_id"] and x["kind"] == "human"]
+    reachable = [x for x in out if x["channels"] and x["kind"] == "human"]
     summary_hint = (
-        f"共 {len(out)} 个联系人，其中 {len(humans)} 个有飞书 ID 可发私聊。"
-        "私聊用 ou_xxx，群聊用 oc_xxx，填入 express_to_human 的 chat_id 参数。"
+        f"共 {len(out)} 个联系人，其中 {len(reachable)} 个有可达 channel。"
+        "channel 字段已含前缀（lark:ou_xxx 私聊 / lark:oc_xxx 飞书群 / wechat:<openid> 微信），"
+        "直接填入 express_to_human(channel=...)。"
     )
     return _j({"ok": True, "contacts": out, "summary": summary_hint})
 
