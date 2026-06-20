@@ -46,6 +46,10 @@ def add_system_routes(app: web.Application) -> None:
     app.router.add_get(f"{SYSTEM_API_PREFIX}/instances", _handle_instances)
     app.router.add_post(f"{SYSTEM_API_PREFIX}/instances", _handle_create_instance)
     app.router.add_patch(f"{SYSTEM_API_PREFIX}/instances/{{iid}}", _handle_update_instance)
+    app.router.add_post(
+        f"{SYSTEM_API_PREFIX}/instances/{{iid}}/wechat-login",
+        _handle_wechat_login,
+    )
     app.router.add_get(f"{SYSTEM_API_PREFIX}/projects", _handle_projects)
     app.router.add_post(f"{SYSTEM_API_PREFIX}/projects", _handle_create_project)
     app.router.add_delete(f"{SYSTEM_API_PREFIX}/projects/{{pid}}", _handle_delete_project)
@@ -447,6 +451,72 @@ async def _handle_update_instance(request: web.Request) -> web.Response:
             },
         }
     )
+
+
+async def _handle_wechat_login(request: web.Request) -> web.Response:
+    """POST /api/system/instances/{iid}/wechat-login —— ClawBot 扫码登录。
+
+    调用 login_clawbot_qrcode() 获取二维码 URL → 轮询等待扫码确认 →
+    返回 bot_token + bot_id。前端拿到后写入 secrets.env (WECHAT_BOT_TOKEN) +
+    app.yaml channels.wechat 段。
+
+    这是一个长轮询 endpoint（可能 hold 2 分钟等用户扫码）。
+    """
+    iid = request.match_info["iid"]
+    if iid not in (_load_registry() or {}):
+        return web.json_response({"error": f"unknown instance: {iid}"}, status=404)
+
+    try:
+        from interfaces.ingress.wechat_clawbot import login_clawbot_qrcode
+        bot_token, bot_id = await login_clawbot_qrcode(timeout=120)
+    except TimeoutError:
+        return web.json_response({"error": "扫码超时（120s），请重试"}, status=408)
+    except Exception as exc:
+        logger.exception("wechat login failed")
+        return web.json_response({"error": str(exc)}, status=500)
+
+    # 自动写入 secrets.env + app.yaml channels.wechat 段
+    try:
+        _patch_instance_app_yaml(iid, {
+            "channels": {
+                "wechat": {
+                    "type": "wechat_clawbot",
+                    "domain": "https://ilinkai.weixin.qq.com",
+                    "bot_id": bot_id,
+                }
+            }
+        })
+    except Exception:
+        logger.warning("failed to write channels.wechat to app.yaml", exc_info=True)
+
+    _write_env_secret(iid, "WECHAT_BOT_TOKEN", bot_token)
+
+    return web.json_response({
+        "ok": True,
+        "bot_id": bot_id,
+        "token_written": True,
+        "hint": f"微信 ClawBot 登录成功（bot_id={bot_id}）。"
+                "WECHAT_BOT_TOKEN 已写入 secrets.env。重启网关后微信通道生效。",
+    })
+
+
+def _write_env_secret(iid: str, key: str, value: str) -> None:
+    """往实例 secrets.env 写入/更新一个 key。"""
+    secrets_path = get_project_root() / "apps" / iid / "config" / "secrets.env"
+    secrets_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = secrets_path.read_text(encoding="utf-8").splitlines() if secrets_path.exists() else []
+    written = False
+    out: list[str] = []
+    for raw in lines:
+        stripped = raw.strip()
+        if stripped.startswith(f"{key}="):
+            out.append(f"{key}={value}")
+            written = True
+        else:
+            out.append(raw)
+    if not written:
+        out.append(f"{key}={value}")
+    secrets_path.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
 
 
 def _patch_instance_app_yaml(iid: str, updates: dict[str, Any]) -> None:

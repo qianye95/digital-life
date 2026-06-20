@@ -82,6 +82,16 @@ export const systemApi = {
   resetAffair: (iid, body) => api.post(`/api/system/instances/${iid}/affairs/reset`, body),
   abortWake: (iid, wakeId, reason) => api.post(`/api/system/instances/${iid}/wakes/${wakeId}/abort`, { reason }),
   setInstanceActive: (iid, active, reason) => api.post(`/api/system/instances/${iid}/active`, { active, reason }),
+  wechatLogin: (iid, onProgress) => {
+    // 长轮询（最多 120s），用 AbortController 超时控制
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 130000)
+    return safeFetch(`/api/system/instances/${iid}/wechat-login`, {
+      method: 'POST',
+      signal: controller.signal,
+      body: JSON.stringify({}),
+    }).finally(() => clearTimeout(timeout))
+  },
   gatewayRestart: (reason) => api.post('/api/system/gateway/restart', { reason }),
   projects: (iid) => api.get('/api/system/projects', iid ? { iid } : {}),
   projectDetail: (pid) => api.get(`/api/system/projects/${pid}`),

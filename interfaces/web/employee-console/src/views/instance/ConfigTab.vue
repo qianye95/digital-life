@@ -36,6 +36,24 @@
         </div>
       </div>
 
+      <!-- 微信扫码登录（仅 wechat section 显示） -->
+      <div v-if="section.key === 'wechat'" class="neon-card"
+           style="margin-bottom: var(--space-4); padding: var(--space-5); border-left: 3px solid var(--neon-lime);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <div>
+            <strong style="font-family: var(--font-display); color: var(--neon-lime);">
+              微信 ClawBot 扫码登录
+            </strong>
+            <p class="brand-sub" style="margin-top: 4px; color: var(--text-muted);">
+              扫码后自动写入 WECHAT_BOT_TOKEN。ClawBot 仅支持私聊。
+            </p>
+          </div>
+          <el-button type="success" :loading="wechatLoading" @click="doWechatLogin">
+            {{ wechatLoading ? '等待扫码…(最多120s)' : '扫码登录' }}
+          </el-button>
+        </div>
+      </div>
+
       <div style="display: flex; gap: 8px;">
         <el-button @click="load">还原</el-button>
         <el-button type="primary" :disabled="!dirty" :loading="saving" @click="save">
@@ -50,16 +68,35 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { instanceApi } from '@/api/client'
-import { shortId } from '@/composables/useFormat'
+import { instanceApi, systemApi } from '@/api/client'
 
 const route = useRoute()
-const iid = computed(() => route.params.iid)
+const iid = computed(() => String(route.params.iid || ''))
 const loading = ref(true)
 const saving = ref(false)
+const wechatLoading = ref(false)
 const allSections = ref([])
 const draft = ref({})
 const baseline = ref({})
+
+async function doWechatLogin() {
+  if (wechatLoading.value) return
+  wechatLoading.value = true
+  ElMessage.info('请在终端查看二维码并扫码（最多 120s）…')
+  try {
+    const d = await systemApi.wechatLogin(iid.value)
+    if (d.error) {
+      ElMessage.error(`登录失败：${d.error}`)
+      return
+    }
+    ElMessage.success(`✓ 微信登录成功（bot_id=${d.bot_id}），WECHAT_BOT_TOKEN 已写入。重启网关后生效。`)
+    await load()
+  } catch (e) {
+    ElMessage.error(`网络错误：${e.message || e}`)
+  } finally {
+    wechatLoading.value = false
+  }
+}
 
 // 实例私有：身份 / 飞书凭证 / 模型 / 任务策略
 // runtime（token 上限 / 精力系数）是全局共享的，在 /system/config 编辑
