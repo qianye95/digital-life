@@ -48,62 +48,10 @@ SECTION_META: dict[str, dict[str, str]] = {
 
 
 FIELDS: tuple[ConfigField, ...] = (
-    # ════════════ 实例身份（不可改 ID 类）════════════
+    # ════════════ 实例身份 ════════════
     ConfigField("display_name", "显示名称", "employee", "yaml", path="display_name", description="实例身份名（chat_stream「我自己」/ 前端实例标签 / 日志前缀）。"),
-    # 注：DIGITAL_LIFE_INSTANCE_ID / DIGITAL_LIFE_DISPLAY_NAME 是进程屏蔽层用，
-    #     不暴露给前端配置 —— 实例 UUID 由 init_instance.py 生成，
-    #     display_name 通过 app.yaml.display_name 编辑
 
-    # ════════════ 飞书凭证（实例私有，per-instance secrets）════════════
-    ConfigField(
-        "messenger.app_id",
-        "飞书 App ID",
-        "messenger",
-        "yaml",
-        path="messenger.app_id",
-        description="该实例绑定的飞书自建应用 App ID（cli_xxx）。改动后必须重启网关。",
-    ),
-    ConfigField(
-        "FEISHU_APP_SECRET",
-        "飞书 App Secret",
-        "messenger",
-        "env",
-        secret=True,
-        description="对应自建应用的 App Secret（敏感，存实例 config/secrets.env）。",
-    ),
-    ConfigField(
-        "messenger.feishu_domain",
-        "飞书 API 域名",
-        "messenger",
-        "yaml",
-        path="messenger.feishu_domain",
-        default="https://open.feishu.cn",
-        description="国内版填 https://open.feishu.cn，国际版填 https://open.larksuite.com。",
-    ),
-    ConfigField(
-        "group_chat.attention_keywords",
-        "群聊关键词（立即响应）",
-        "messenger",
-        "yaml",
-        "array",
-        path="group_chat.attention_keywords",
-        description="含这些词的群消息立即响应。其余群消息走 30s 累积窗口。",
-    ),
-    ConfigField(
-        "group_chat.owner_names",
-        "群聊 Owner（立即响应）",
-        "messenger",
-        "yaml",
-        "array",
-        path="group_chat.owner_names",
-        description="这些人发言立即响应。",
-    ),
-
-    # ════════════ 模型配置（实例私有，per-instance yaml + secrets）════════════
-    # 事实源是 apps/<id>/config/app.yaml 段的 model.name/provider/base_url
-    # + apps/<id>/config/secrets.env 的 GLM_API_KEY
-    # 之前 6 个 DIGITAL_LIFE_MODEL/PROVIDER/SUMMARY/CHEAP/SMART_ROUTING env 字段
-    # 都已经被代码忽略（model.cfg 优先级更高），从配置中心移除避免误导。
+    # ════════════ 模型配置 ════════════
     ConfigField(
         "model.name",
         "主模型",
@@ -140,7 +88,27 @@ FIELDS: tuple[ConfigField, ...] = (
         description="LLM API Key（敏感，存实例 config/secrets.env）。留空保存 = 保留当前值。兼容旧名 GLM_API_KEY。",
     ),
 
-    # ════════════ 运行时（跨实例共享，全局通用配置）════════════
+    # ════════════ 通用通道字段（不属于某个具体平台） ════════════
+    ConfigField(
+        "group_chat.attention_keywords",
+        "群聊关键词（立即响应）",
+        "messenger",
+        "yaml",
+        "array",
+        path="group_chat.attention_keywords",
+        description="含这些词的群消息立即响应。其余群消息走 30s 累积窗口。",
+    ),
+    ConfigField(
+        "group_chat.owner_names",
+        "群聊 Owner（立即响应）",
+        "messenger",
+        "yaml",
+        "array",
+        path="group_chat.owner_names",
+        description="这些人发言立即响应。",
+    ),
+
+    # ════════════ 运行时（跨实例共享）════════════
     ConfigField("L4_TICK_INTERVAL", "心跳检查间隔（秒）", "runtime", "env", "number", default=60),
     ConfigField(
         "DIGITAL_LIFE_TOKEN_HOURLY_LIMIT",
@@ -149,8 +117,7 @@ FIELDS: tuple[ConfigField, ...] = (
         "env",
         "number",
         default=50000000,
-        description="每实例每小时 LLM token 上限。开发期默认 = 日上限（实际不拦）。"
-                    "生产部署可调小。",
+        description="每实例每小时 LLM token 上限。开发期默认 = 日上限（实际不拦）。生产部署可调小。",
     ),
     ConfigField(
         "DIGITAL_LIFE_TOKEN_DAILY_LIMIT",
@@ -159,8 +126,7 @@ FIELDS: tuple[ConfigField, ...] = (
         "env",
         "number",
         default=50000000,
-        description="每实例每天 LLM token 上限。日累计超过就拒绝新 wake 直到次日 00:00。"
-                    "默认 5000 万，给开发期留空间；生产部署可调小。",
+        description="每实例每天 LLM token 上限。日累计超过就拒绝新 wake 直到次日 00:00。默认 5000 万，给开发期留空间；生产部署可调小。",
     ),
     ConfigField(
         "DIGITAL_LIFE_ENERGY_PER_KTOKEN_INPUT",
@@ -182,7 +148,7 @@ FIELDS: tuple[ConfigField, ...] = (
                     "整体设计：一天满跑 2000 万 token 刚好耗尽 100 精力。",
     ),
 
-    # ════════════ 任务执行策略（实例私有 yaml）════════════
+    # ════════════ 任务执行策略 ════════════
     ConfigField("agent.max_turns", "最大执行轮数", "tasks", "yaml", "number", path="agent.max_turns", default=90),
     ConfigField(
         "agent.reasoning_effort",
@@ -197,6 +163,111 @@ FIELDS: tuple[ConfigField, ...] = (
 )
 
 
+def _generate_channel_fields(yaml_config: dict[str, Any]) -> list[ConfigField]:
+    """根据实例的 app.yaml channels（或旧 messenger 段）动态生成通道配置字段。
+
+    检测逻辑：
+      channels.feishu.* 或 messenger.type=feishu → 飞书字段
+      channels.wechat.* 或 type=wechat_clawbot  → 微信字段
+      未来 dingtalk / telegram 同理
+    """
+    fields: list[ConfigField] = []
+
+    # 解析当前配置有哪些通道
+    channels = yaml_config.get("channels")
+    if not isinstance(channels, dict) or not channels:
+        # 旧格式兼容：messenger 段 → 单 feishu channel
+        messenger = yaml_config.get("messenger")
+        if isinstance(messenger, dict):
+            msgr_type = str(messenger.get("type") or "feishu")
+            channels = {msgr_type: messenger}
+        else:
+            channels = {}
+
+    for ch_name, ch_cfg in channels.items():
+        if not isinstance(ch_cfg, dict):
+            continue
+        ch_type = str(ch_cfg.get("type") or ch_name)
+
+        if ch_type == "feishu":
+            fields.extend([
+                ConfigField(
+                    f"channels.{ch_name}.app_id",
+                    "飞书 App ID",
+                    "feishu",
+                    "yaml",
+                    path=f"channels.{ch_name}.app_id",
+                    description="飞书自建应用 App ID（cli_xxx）。留存 control台编辑。",
+                ),
+                ConfigField(
+                    f"channels.{ch_name}.feishu_domain",
+                    "飞书 API 域名",
+                    "feishu",
+                    "yaml",
+                    path=f"channels.{ch_name}.feishu_domain",
+                    default="https://open.feishu.cn",
+                    description="国内 https://open.feishu.cn，国际 https://open.larksuite.com。",
+                ),
+            ])
+            # 旧格式 messenger.app_id 也支持编辑
+            messenger = yaml_config.get("messenger")
+            if isinstance(messenger, dict) and messenger.get("app_id"):
+                fields.extend([
+                    ConfigField(
+                        "messenger.app_id",
+                        "飞书 App ID（旧格式）",
+                        "feishu",
+                        "yaml",
+                        path="messenger.app_id",
+                        description="旧格式 messenger.app_id（推荐迁移到 channels.feishu.app_id）。",
+                    ),
+                    ConfigField(
+                        "messenger.feishu_domain",
+                        "飞书 API 域名（旧格式）",
+                        "feishu",
+                        "yaml",
+                        path="messenger.feishu_domain",
+                        default="https://open.feishu.cn",
+                    ),
+                ])
+            fields.append(ConfigField(
+                "FEISHU_APP_SECRET",
+                "飞书 App Secret",
+                "feishu",
+                "env",
+                secret=True,
+                description="飞书 App Secret（敏感，存实例 config/secrets.env）。",
+            ))
+
+        elif ch_type == "wechat_clawbot":
+            fields.extend([
+                ConfigField(
+                    f"channels.{ch_name}.domain",
+                    "ClawBot API 域名",
+                    "wechat",
+                    "yaml",
+                    path=f"channels.{ch_name}.domain",
+                    default="https://ilinkai.weixin.qq.com",
+                    description="ClawBot iLink API 域名。",
+                ),
+                ConfigField(
+                    "WECHAT_BOT_TOKEN",
+                    "ClawBot Token",
+                    "wechat",
+                    "env",
+                    secret=True,
+                    description=(
+                        "ClawBot 扫码登录后的 Bearer token（敏感）。"
+                        "扫码登录：python -c \"import asyncio; "
+                        "from interfaces.ingress.wechat_clawbot import login_clawbot_qrcode; "
+                        "asyncio.run(login_clawbot_qrcode())\"。"
+                    ),
+                ),
+            ])
+
+    return fields
+
+
 class ConfigCenterWorkflow:
     """Expose a product-level configuration registry instead of raw env files."""
 
@@ -204,10 +275,11 @@ class ConfigCenterWorkflow:
         try:
             env = self._load_env()
             yaml_config = self._load_yaml()
+            all_fields = self._all_fields(env, yaml_config)
             sections = self._sections(env, yaml_config, employee_id)
             return UseCaseResult({
                 "sections": sections,
-                "schema": [self._field_schema(field) for field in FIELDS],
+                "schema": [self._field_schema(field) for field in all_fields],
                 "paths": self._paths(employee_id),
                 "config": self._legacy_runtime_policy(env, yaml_config),
             })
@@ -219,7 +291,10 @@ class ConfigCenterWorkflow:
             if not isinstance(body, dict):
                 return UseCaseResult({"error": "Invalid JSON body"}, 400)
             values = body.get("values") if isinstance(body.get("values"), dict) else body
-            fields_by_key = {field.key: field for field in FIELDS}
+            env = self._load_env()
+            yaml_config = self._load_yaml()
+            all_fields = self._all_fields(env, yaml_config)
+            fields_by_key = {field.key: field for field in all_fields}
             env_updates: dict[str, str | None] = {}
             yaml_updates: dict[str, Any] = {}
 
@@ -245,22 +320,38 @@ class ConfigCenterWorkflow:
         except Exception as exc:
             return UseCaseResult({"error": str(exc)}, 500)
 
+    def _all_fields(self, env: dict[str, str], yaml_config: dict[str, Any]) -> tuple[ConfigField, ...]:
+        """FIELDS + 动态通道字段。"""
+        return FIELDS + tuple(_generate_channel_fields(yaml_config))
+
     def _sections(self, env: dict[str, str], yaml_config: dict[str, Any], employee_id: str | None) -> list[dict[str, Any]]:
+        all_fields = self._all_fields(env, yaml_config)
         grouped: dict[str, list[dict[str, Any]]] = {key: [] for key in SECTION_META}
-        for field in FIELDS:
+        for field in all_fields:
+            if field.section not in grouped:
+                grouped[field.section] = []
+        for field in all_fields:
             grouped[field.section].append(self._field_payload(field, env, yaml_config))
-        # 注：之前 employee / events / diagnostics 还 extend 了一堆 _readonly 路径
-        # 显示字段，用户反馈"没用"——全部移除。需要看路径就去对应的具体页面
-        # （状态 / 实例概览 / db 路径等地方都有）。
-        return [
-            {
-                "key": key,
+        # 按 FIELDS 出现顺序构建 sections，动态生成 label/description
+        _dynamic_meta = {
+            "feishu": {"label": "飞书通道", "description": "飞书凭证（改动后需重启网关）。"},
+            "wechat": {"label": "微信通道", "description": "微信 ClawBot 凭证。仅 privé，不能群聊/主动推送。"},
+        }
+        sections: list[dict[str, Any]] = []
+        seen_sections: set[str] = set()
+        for field in all_fields:
+            sec = field.section
+            if sec in seen_sections:
+                continue
+            seen_sections.add(sec)
+            meta = SECTION_META.get(sec) or _dynamic_meta.get(sec, {"label": sec.title(), "description": ""})
+            sections.append({
+                "key": sec,
                 "label": meta["label"],
-                "description": meta["description"],
-                "fields": grouped.get(key, []),
-            }
-            for key, meta in SECTION_META.items()
-        ]
+                "description": meta.get("description", ""),
+                "fields": grouped.get(sec, []),
+            })
+        return sections
 
     def _field_payload(self, field: ConfigField, env: dict[str, str], yaml_config: dict[str, Any]) -> dict[str, Any]:
         value, origin = self._field_value(field, env, yaml_config)
