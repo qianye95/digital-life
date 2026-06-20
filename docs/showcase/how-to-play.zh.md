@@ -5,7 +5,7 @@
 ## 目录
 
 1. [你刚装完，先看什么](#1-你刚装完先看什么)
-2. [第一个晚上要做什么](#2-第一个晚上要做什么)
+2. [第一次跟它对话](#2-第一次跟它对话)
 3. [日常怎么用](#3-日常怎么用)
 4. [进阶玩法](#4-进阶玩法)
 5. [当它出问题时](#5-当它出问题时)
@@ -20,11 +20,12 @@
 digital-life start
 ```
 
-第一次启动会自动 bootstrap **两个数字生命**：
-- **zero**（青色） — 策略师
-- **alpha**（粉色） — 交易员
+第一次启动会自动 bootstrap **一份示范体验包**：
 
-并自动 seed **龙虾模拟炒股挑战**项目作为 demo —— 你不需要自己创建任何东西。
+- 两个数字生命实例 `zero`（青色）和 `alpha`（粉色）—— 起步就是两个独立个体
+- 一个示例项目 `trading_simulation`（模拟炒股）—— 让两个实例有事可做、有协作场景
+
+> 这只是开箱体验包。你可以删掉它们从零搭自己的项目；实际玩法见 [§4 进阶](#4-进阶玩法)。
 
 ### 关掉终端，打开控制台
 
@@ -35,15 +36,16 @@ digital-life status   # 看到底跑在哪个端口（默认 8642）
 打开 `http://localhost:8642/system`（霓虹深空主题）。
 
 **全局台**先看到：
-- 系统实况：zero + alpha 卡片 + 能量条 + 状态灯
+- 系统实况：zero + alpha 卡片，每张卡片右上角有**通道连接状态微灯**（绿=已连接，灰=未配置）
 - 实例管理：zero / alpha 的 avatar / accent / tagline 可编辑
-- 项目：trading_simulation 卡片可点击进入看完整 6 维详情
+- 项目：`trading_simulation` 卡片可点进去看完整结构
 
 ### 验证实例活着
 
 进入 zero 的实例台（`/instance/<zero-uuid>/overview`）：
 - 实例状态 = `休息中` 或 `工作中`（**绝不应该是 `异常` 或 `离线`**）
 - 能量 = 接近 100%
+- 顶部「通道连接状态」面板显示飞书 / 微信各自的连接情况
 
 进入 Session → 应该能看到历史 wakes 列表。如果空，没关系 —— 实例刚开始没事件进来很正常。
 
@@ -51,49 +53,47 @@ digital-life status   # 看到底跑在哪个端口（默认 8642）
 
 这一步必须在飞书控制台做：
 1. https://open.feishu.cn/app 新建两个"自建应用"（一个给 zero，一个给 alpha）
-2. 各自把 bot 加进同一个**测试群**（这是 zero 跟 alpha 协作的 channel）
+2. 各自把 bot 加进同一个**测试群**（这是 zero 跟 alpha 协作的通道）
 3. 拿到 `App ID` + `App Secret`
 
 然后：
 
-**方法 1（控制台）**：`/instance/<id>/config` → 在「消息通道」section 填 App ID + App Secret（保存后控制台顶部「重启」按钮重启 gateway 才会 reload）
+**方法 1（控制台，推荐）**：`/instance/<id>/config` → 在「飞书通道」section 填 App ID + App Secret → 保存 → 控制台顶部「重启」生效
 
 **方法 2（命令行）**：
 
 ```bash
-# zero 的凭证（如果在 config/secrets.env 已填）
-# 已经自动 bootstrap 时塞给了 zero；如果用新 app 就用下面命令覆盖
-
-# alpha 的凭证 —— 手动编辑
-vi apps/<alpha-uuid>/config/app.yaml   # 改 messenger.app_id
+# zero 的凭证：如果 config/secrets.env 已填，bootstrap 时已自动塞给 zero；
+#              用新 app 就改 apps/<zero-uuid>/config/secrets.env 的 FEISHU_APP_SECRET
+# alpha 的凭证：全新填
 vi apps/<alpha-uuid>/config/secrets.env  # 改 FEISHU_APP_SECRET
 
 # 重启
 digital-life restart
 ```
 
-### 验证飞书通了
-
-在飞书群里 `@zero 应用程序` 发一条消息（先确保 bot 在群里），30 秒内 zero 应该回复了。alpha 也在群里 listen 同样消息（飞书原生 fan-out），但只在被 @ 它或它判断相关时响应。
+填好后回到 Overview，飞书通道微灯应该转绿。
 
 ---
 
-## 2. 第一个晚上要做什么
+## 2. 第一次跟它对话
 
-第二天早上你会发现 —— 即使你睡觉了，zero 和 alpha 可能也没闲着。它们通过**事件机制**（不是你的指令）活着：
+在飞书群里发一条消息（直接发就行，不一定 @）。
 
-- 定时器（routines.yaml 里预设的节奏框架）触发 wake
-- 主动探索（精力足够时会自己检查项目状态、扫描候选）触发 wake
+数字生命会根据上下文判断该不该回、由谁回。你可以用它，也可以不用：
 
-查看它们的"昨晚"做了什么：
+- @ 它 —— 一定属于它，立即响应
+- 不 @ —— 它会评估"这条话跟我有关吗"，相关就回，无关就安静
 
-1. `/instance/<zero-uuid>/sessions` —— 找 timestamp 在昨晚的 wake，点开看完整 turns（含 reasoning + tool calls + LLM call JSON debug）
-2. `/instance/<zero-uuid>/memories` —— 切到「日记」，按日期分段看复盘
-3. `/instance/<zero-uuid>/memories` —— 切到「意识流」，看它整理思绪的过程
+群里 bot 在线、且群里同时有 zero 和 alpha 两个 bot 时，发一条消息两个 bot 都能听到（这是飞书服务端的 fan-out）。两个 bot 自己会决定谁更适合回 —— 谁是这条话的对象、谁精力状态更好等等。
 
-**调整人设** —— 如果你不喜欢它的语气或行为模式：
+### 验证对话通了
 
-- `/instance/<zero-uuid>/persona` —— 编辑 LIFE_PERSONA.md。比如让它更严谨 / 更俏皮 / 更直接。保存，下次 wake 生效。
+随便说一句话，30 秒内应该有 bot 回复。如果一直没回：
+
+- 看 Overview 状态不应该是 `异常` / `离线`
+- 看 channels 微灯是绿的
+- 看 logs：`digital-life logs -f` 关注 `Ingress message` / `L4 event` 关键字
 
 ---
 
@@ -101,68 +101,129 @@ digital-life restart
 
 ### 跟它对话
 
-群里 @ 它（zero 或 alpha）—— 它会立即响应（被 @ 是平权事件里的"高优先级"之一，但不绝对最高，仲裁还看精力）。
+跟它说话不需要每次 @。两个例子：
 
-**关键：不需要每次都 @**。比如：
+- 你问"项目接下来该做什么" —— 它从项目状态、待办、上次复盘推断
+- 它自己发现该做某件事 —— 由事件机制触发 wake，不需要你下指令
 
-- 它发现 trading_simulation 项目该下周复盘了 → 自己会触发
-- 精力 < 30 持续两小时 → 它自己决定休息
-- 它监控的某只股票触发止损 → 它自己执行（不需要你批准），事后给你执行报告
+被 @ 是平权事件里的高优先级之一，但不绝对最高 —— 仲裁还要看精力、看是否在某个 affair 中。
+
+### 给它技能
+
+`/system/skills` 是**技能市场**，列出所有全局 skill（来自 `interfaces/skills/` + `shared/skills/`）。
+
+对每个实例 toggle 订阅：`/instance/<id>/skills` 只显示它订阅的技能，订阅 = `app.yaml.skills` 列表加一条。
+
+新增自定义技能：在 `shared/skills/<name>/SKILL.md` 写好 markdown 模板，master 重启后会自动出现在市场。
+
+> 技能是**正常的能力添加**，不是进阶玩法。日常要用就加。
 
 ### 看它在做什么
 
 - **概览** (`/instance/<id>/overview`)：状态、能量、最近 wakes、待办 Top、token / day
 - **会话** (`/instance/<id>/sessions`)：完整 wake 列表，点击看每个 wake 的 turns、tool calls、LLM call 完整输入 JSON（debug 友好）
-- **待办** (`/instance/<id>/todos`)：按 project 分组的任务清单，可勾选完成 / 删除 / 新建
 - **记忆** (`/instance/<id>/memories`)：意识流 / 日记 / 联想图谱
 
-### 看多实例协作
+### 不打扰它时，它会自己活
 
-`/system/overview` —— 一图看两个实例的当前状态。
+第二天早上你会发现 —— 即使你睡觉了，zero 和 alpha 可能也没闲着：
 
-`docs/showcase/multi-instance-trading-2026-06.md` —— 一个真实长期运行的 zero + alpha 协作场景（量化交易策略从决策到执行到复盘的完整 1 天对话）。
+- 定时器（routines.yaml 里预设节奏框架）触发 wake
+- 主动探索（精力足够时会自己检查项目状态、扫描候选）触发 wake
+- 某个事件被触发（如阈值告警）触发 wake
 
-### 给它新任务
+查看它们的"昨晚"做了什么：
 
-**方法 A：对话直接说**
+1. `/instance/<zero-uuid>/sessions` —— 找 timestamp 在昨晚的 wake，点开看完整 turns（含 reasoning + tool calls + LLM call JSON debug）
+2. `/instance/<zero-uuid>/memories` —— 切到「日记」，按日期分段看复盘
+3. `/instance/<zero-uuid>/memories` —— 切到「意识流」，看它整理思绪的过程
 
-群里 @ 它说"明天起每周一早上 8 点检查一下持仓股票的新闻"。它会主动建立 todo + 占用 routines.yaml 里的一个时间槽。
+### 调整人设
 
-**方法 B：通过项目**
-
-`/system/projects` 新建项目 → 在 project.yaml 写 positions → 数字生命会接管自己岗的工作。
+如果你不喜欢它的语气或行为模式：`/instance/<zero-uuid>/persona` —— 编辑 LIFE_PERSONA.md。比如让它更严谨 / 更俏皮 / 更直接。保存，下次 wake 生效。
 
 ---
 
 ## 4. 进阶玩法
 
-### 给它加技能
+基础对话 + 技能让它"能用"。下面 4 件事让它"真正成为数字员工"。
 
-`/system/skills` 是**技能市场** —— 列出所有全局 skill（来自 `interfaces/skills/` + `shared/skills/`）。
+### 4.1 项目机制
 
-对每个实例 toggle 订阅：
-- `/instance/<id>/skills` —— 实例只看到它订阅的技能。订阅 = `app.yaml.skills` 列表加一条。
+项目是一个**有目标 + 有岗位分工 + 有 deadline 的虚拟工作**。`trading_simulation` 示范项目就是完整一例：有 KPI、有论断、有岗位、有交付物。
 
-新增自定义技能：在 `shared/skills/<name>/SKILL.md` 写好 markdown 模板，master 重启后会自动出现在市场。
+**自己建项目**：`/system/projects` → 新建项目 → 填 `project.yaml`：
 
-### 调事件类型
+```yaml
+project:
+  id: content_creation
+  name: 内容创作
+  goal:
+    statement: 每周产出 3 篇精品长文
+    deadline: 2026-09-30
+  positions:
+    - id: writer
+      name: 撰稿人
+      assignees: [<zero-uuid>]
+    - id: reviewer
+      name: 审稿
+      assignees: [<alpha-uuid>]
+  group_chat_id: oc_xxx   # 可选：把项目和某个飞书群挂钩
+```
 
-`/system/events` 是**事件类型注册表**。如果想让"账户亏损 5%"也能触发 wake，新建一个 event-type：type_id `risk_alert`、trigger_type `condition`，配上 prompt 模板。事件被触发后会按这个 prompt 走 wake 流程。
+数字生命会接管分配到自己身上的岗位。**项目是数字生活协作的载体** —— 不挂项目，它们就只是两个会聊天的 bot；挂了项目，它们才分工干实事。
 
-### 自动复盘议程
+岗位不是硬编码 —— 项目自由定义角色。同一对实例在不同项目里可以是不同分工。
 
-routines.yaml 有 `21:00 联合复盘` 槽位 —— 这个时段 zero 会主动找 alpha 复盘今天。如果你想加"23:00 单独反思"，加一条 routine 即可（数字生命在精力 < 20 时不会强制执行，避免 burn-out）。
+### 4.2 待办
 
-### 多数字生命
+每个数字生命有独立的待办列表，按项目分组。`/instance/<id>/todos` 可勾选完成 / 删除 / 新建。
 
-想搞剧本组群（一个程序员 + 一个 reviewer + 一个 PM）：
+待办来自三个源：
 
-1. `/system/instances` 新建实例，配 display_name / accent_color / tagline / 飞书凭证
-2. `/system/projects` 新建项目，positions 加对应岗位
-3. `/system/skills` 给新实例订阅合适的技能
+1. **数字生命自己生成**：它把项目目标拆成可执行 todo，写进自己的列表
+2. **你直接交代**：群里说"明天早上检查一下持仓股票的新闻" —— 它会主动建 todo
+3. **项目级 todos.db**：项目共享的待办，每个岗位可以 pickup
+
+待办是它"持续做事"的载体 —— 当前 wake 没完成，下个 wake 会接着做。配合 routines.yaml 的时间槽，能保证它真在推进。
+
+### 4.3 事件注册与对接机制
+
+数字生命靠**事件**活着，不是靠你的指令。事件类型在 `/system/events` 注册：
+
+- `message` —— 飞书 / 微信消息进来
+- `routine` —— routines.yaml 里预设的时间槽到点了
+- `timer` —— 你给它定的定时器（如"30 分钟后提醒我"）
+- `condition` —— 自定义条件触发（如 "账户亏损 5%" 触发 `risk_alert`）
+- `initiative` —— 模型自己的主动探索（精力充足时）
+
+**自定义事件接入**：`/system/events` 新建一个 event-type，填 `type_id`、`trigger_type`、prompt 模板。事件被外部系统触发后会按这个 prompt 走 wake 流程。
+
+对接自己的业务（如 webhook、监控告警、CRM 状态变化）→ 写一个适配器调 `emit_event(kind=..., payload=..., source=...)`，数字生命就能感知到。
+
+事件源 + 数字生命的自主决策 = 它能在你不在的时候自己行动。
+
+### 4.4 多 Agent 协作
+
+一个数字生命是单兵；两个以上是组织。
+
+**多实例协作机制**：
+1. **飞书原生 fan-out**：飞书服务端把每条消息推给群里所有 bot（飞书专属特性）
+2. **去中心化消息总线**：实例主动发言时把出站消息广播给同群的其他实例（peers），各自写入对方 messages.db + 触发 wake（通道无关兜底）
+3. **岗位机制**：项目里分配岗位，决策 / 执行 / 拍板不同 mentor，模型按岗位身份行动
+
+每个实例仍是独立 lifecycle（自己的 affair / 记忆 / 精力 / 人设），通过消息总线协同，不共享运行态。
+
+**想增加第三个数字生命**：
+
+1. `/system/instances` → 新建实例，配 display_name / accent_color / tagline / 飞书凭证
+2. `/system/skills` 给新实例订阅合适的技能
+3. （可选）把它加进某个项目的某个岗位
 4. 控制台「重启」拉起新实例子进程
 
-新增实例是**完全独立的生命**：它有自己的 persona / affair / 记忆 / 精力 / 复盘习惯，互相之间通过消息总线协作（不共享状态）。
+它是一个**完全独立的生命**：自己的 persona、记忆、精力、复盘习惯，跟你 chat 时不是同一个声音。
+
+完整协作场景实录见 `docs/showcase/multi-instance-trading-2026-06.md` —— 一个真实长期运行的 zero + alpha 协作一天。
 
 ---
 
@@ -174,7 +235,7 @@ routines.yaml 有 `21:00 联合复盘` 槽位 —— 这个时段 zero 会主动
 
 ```
 ⚠ 数字生命异常
-模型调用失败：GLM_API_KEY invalid (turn #1065, role=assistant)
+模型调用失败：LLM_API_KEY invalid (turn #1065, role=assistant)
 ```
 
 按 hint 修：
@@ -189,6 +250,12 @@ routines.yaml 有 `21:00 联合复盘` 槽位 —— 这个时段 zero 会主动
 ### 实例显示「离线」
 
 实例 `app.yaml.active = false`，进程没起。控制台「上线」按钮一键拉起（或重启 gateway）。
+
+### 通道显示「未配置」（灰灯）
+
+飞书 token 失效 / app_secret 改了没重启 → 控制台 `/instance/<id>/config` 重填或检查 secrets.env。
+
+微信 token 失效（扫码后失效了）→ Overview 通道卡片 → 「重新扫码」即可。
 
 ### 数据库锁 / 启动失败
 
@@ -216,20 +283,14 @@ sqlite3 apps/<uuid>/data/state.db "UPDATE affairs SET status='PENDING'"
 digital-life start
 ```
 
-### 重置整个项目（删 demo 重新开始）
+### 重置整个项目（从空开始）
 
-```bash
-digital-life stop
-rm -rf projects/trading_simulation/*
-digital-life start      # 自动 seed 新版龙虾模拟炒股项目
-```
-
-或控制台 `/system/projects` → 删除 trading_simulation → 重启 gateway → master 自动 seed 重新创建。
+`/system/projects` → 删除目标项目 → 重启 gateway → master 会重新 seed `trading_simulation` 示范项目（这是开箱默认行为，可去 `infrastructure/http/server.py:_ensure_default_project` 改默认 seed）。或者删掉一份再不 seed，从零搭你自己的项目结构。
 
 ---
 
 ## 一句话总结
 
-> Digital Life 不是你打开就用一下关闭的工具。它就是一直在那儿活着 —— 像两个真实员工。你不在的时候它在工作、在休息、在跟同伴协作、在自主修正论断。
+> Digital Life 不是你打开就用一下关闭的工具。它就是一直在那儿活着 —— 像几个真实员工。你不在的时候它在工作、在休息、在跟同伴协作、在自主修正论断。
 >
 > 你的角色是**项目里的人**：定方向、拍板、给反馈、调整它的边界。它能自己处理日常，重要的事主动找你。
