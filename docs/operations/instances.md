@@ -230,7 +230,7 @@ model:
 | 智谱 GLM（默认） | `https://open.bigmodel.cn/api/paas/v4` | 唯一在生产中实测完整 reasoning 闭环 |
 | DeepSeek | `https://api.deepseek.com` | 适用 deepseek-chat / deepseek-reasoner |
 | 通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | 走 OpenAI 兼容模式 |
-| Kimi | `https://api.moonshot.cn/v1` | |
+| Kimi（Moonshot K1.5）| `https://api.moonshot.cn/v1` | 走 K1.5 才有 reasoning；moonshot-v1 系列为通用对话无思考链 |
 | OpenAI | `https://api.openai.com/v1` | |
 | 经 LiteLLM 代理接 Claude | `https://<your-litellm>/v1` | 仅基础对话+工具可用，thinking 逐轮牺牲 |
 
@@ -242,9 +242,9 @@ model:
 - 模型名含 `o1`/`o3`/`o4` → `OpenAIReasoningProvider`
 - 其它（DeepSeek / Qwen / Kimi / Moonshot / GPT-4o / Claude-via-proxy / unknown）→ `GenericOpenAIProvider`
 
-### `reasoning_content` 出站字段：4 家国内模型同名
+### `reasoning_content` 出站字段：思考模型同名
 
-GLM / DeepSeek / Qwen / Kimi 四家在响应 `message.reasoning_content` 上字段名相同，出站抽取一份代码覆盖。
+GLM / DeepSeek-Reasoner / Qwen3 / Kimi-K1.5 思考模型在响应 `message.reasoning_content` 上字段名相同，出站抽取一份代码覆盖。Moonshot 的 **moonshot-v1 系列不含思考**，结果 `reasoning_content` 为空——仍能跑，没有跨轮思考。
 
 ### thinking_keep_mode：跨轮 reasoning 注入策略差异
 

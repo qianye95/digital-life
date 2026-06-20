@@ -263,7 +263,7 @@ projects/{id}/      跨实例共享项目（project.yaml + todos.db + docs + mem
 
 模型适配以智谱 **GLM**（4.5/4.6/5/5.2）为主线，思考链跨轮延续、5 档思考强度，是当前唯一在生产中**实测验证**过的家族。
 
-国内的 **DeepSeek、通义千问、Kimi、Moonshot** 也都接 OpenAI 兼容 API —— 出站 `reasoning_content` 字段四家同名，配 base_url + key 即可用。**但**各家族对"跨轮思考是否拼回"策略不同：DeepSeek-Reasoner 多轮强制不带历史 thinking（否则服务端 400），GLM / Kimi 则反之；系统按 family 自动选择，无需手动调。**OpenAI o1/o3/o4** 走专属推理分支（思考强度自动收敛为 low/medium/high）。
+国内的 **DeepSeek、通义千问、Kimi（Moonshot K1.5）** 也都接 OpenAI 兼容 API —— 出站 `reasoning_content` 字段这几家思考模型同名，配 base_url + key 即可用。**但**各家族对"跨轮思考是否拼回"策略不同：DeepSeek-Reasoner 多轮强制不带历史 thinking（否则服务端 400），GLM / Kimi 则反之；系统按 family 自动选择，无需手动调。**OpenAI o1/o3/o4** 走专属推理分支（思考强度自动收敛为 low/medium/high）。Moonshot **moonshot-v1 系列不含思考能力**，作为通用对话模型也能跑，但没有跨轮思考链。
 
 **Claude 原生 API 目前不适配**（endpoint、tools schema、thinking block 都与 OpenAI 协议不兼容）。要接 Claude 必须经 LiteLLM 等 OpenAI 兼容代理转译 —— 这种方式能跑对话+工具，但 thinking 因协议层缺少 `signature` 字段会在多轮逐次牺牲。原生 Claude thinking 闭环是后续工作。
 
@@ -285,9 +285,10 @@ projects/{id}/      跨实例共享项目（project.yaml + todos.db + docs + mem
 
 ## 开发者文档
 
-- [AGENTS.md](AGENTS.md) — Agent 协作入口
-- [docs/architecture/current-system.md](docs/architecture/current-system.md) — 当前架构总览
-- [docs/development/development-workflow.md](docs/development/development-workflow.md) — 开发流程
+- [AGENTS.md](AGENTS.md) — Agent 协作入口（含架构总览 + 开发流程指向）
+- [docs/operations/instances.md](docs/operations/instances.md) — 实例运维手册（含通道 / 模型详细配置）
+- [docs/design/digital-life-system-design.md](docs/design/digital-life-system-design.md) — 系统设计主文档
+- 详细架构 / 开发流程文档位于仓库本地 `docs/architecture/` 与 `docs/development/`（未入 git，AGENTS.md 内有指向）
 
 ```bash
 python3 -m pytest                                            # 测试

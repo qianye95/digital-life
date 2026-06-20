@@ -240,7 +240,7 @@ Channel credentials (Feishu App Secret / WeChat token) live in `secrets.env`; ch
 
 Model adaptation centers on Zhipu **GLM** (4.5 / 4.6 / 5 / 5.2) — thought-chain cross-turn continuation, 5-step thinking intensity, currently the only family **validated in production**.
 
-Other domestic Chinese models — **DeepSeek, Qwen, Kimi, Moonshot** — all expose OpenAI-compatible APIs and share the same `reasoning_content` outbound field; configure base_url + key to use. **But** each family differs on whether to feed historical thinking back: DeepSeek-Reasoner forbids it in multi-turn (server returns 400); GLM / Kimi require it. The system auto-selects per family, no manual tuning. **OpenAI o1 / o3 / o4** follow a dedicated reasoning branch (thinking intensity auto-collapses to low / medium / high).
+Other domestic Chinese models — **DeepSeek, Qwen, Kimi (Moonshot K1.5)** — all expose OpenAI-compatible APIs and share the same `reasoning_content` outbound field on their thinking-model variants; configure base_url + key to use. **But** each family differs on whether to feed historical thinking back: DeepSeek-Reasoner forbids it in multi-turn (server returns 400); GLM / Kimi require it. The system auto-selects per family, no manual tuning. **OpenAI o1 / o3 / o4** follow a dedicated reasoning branch (thinking intensity auto-collapses to low / medium / high). Moonshot **moonshot-v1 series has no thinking capability** — usable as a general chat model but no cross-turn thought chain.
 
 **Claude native API is not yet adapted** (endpoint, tools schema, and thinking-block structure all differ from the OpenAI protocol). To wire Claude up you must route through an OpenAI-compatible proxy like LiteLLM — this gives you dialogue + tools, but thinking is degraded turn-by-turn (the OpenAI protocol lacks the `signature` field Claude needs for stateless multi-turn). Native Claude thinking closed-loop is future work.
 
@@ -262,9 +262,10 @@ Each instance remains an independent lifecycle (its own affair / memory / energy
 
 ## Developer Docs
 
-- [AGENTS.md](AGENTS.md) — Agent collaboration entry point
-- [docs/architecture/current-system.md](docs/architecture/current-system.md) — Architecture overview
-- [docs/development/development-workflow.md](docs/development/development-workflow.md) — Development workflow
+- [AGENTS.md](AGENTS.md) — Agent collaboration entry point (includes architecture overview + dev workflow pointers)
+- [docs/operations/instances.md](docs/operations/instances.md) — Instances operations manual (channel / model detailed config)
+- [docs/design/digital-life-system-design.md](docs/design/digital-life-system-design.md) — Main system design doc
+- Detailed architecture / development docs live in the local repo under `docs/architecture/` and `docs/development/` (not in git; AGENTS.md points to them)
 
 ```bash
 python3 -m pytest                                            # Tests
