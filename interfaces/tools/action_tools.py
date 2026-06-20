@@ -2151,7 +2151,7 @@ def _send_wechat_clawbot(
 
     try:
         result = _do_send()
-        if isinstance(result, dict) and (result.get("ret") == 0 or result.get("errcode") == 0):
+        if isinstance(result, dict) and (not result or result.get("ret") == 0 or result.get("errcode") == 0):
             logger.info("express_to_human wechat: sent OK (target=%s)", target_id[:20])
             return json.dumps({
                 "sent": True,
