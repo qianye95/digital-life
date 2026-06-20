@@ -40,8 +40,6 @@ def _sender_is_sibling_bot(sender_id: str, platform: str) -> str:
     """
     if not sender_id or not platform:
         return ""
-    if platform != "feishu":
-        return ""
     try:
         from infrastructure.config import discover_instances, get_app_instance_id
     except Exception:
@@ -65,10 +63,26 @@ def _sender_is_sibling_bot(sender_id: str, platform: str) -> str:
                 data = _yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
             except Exception:
                 continue
-            messenger = (data.get("messenger") or {})
-            app_id = (messenger.get("app_id") or "").strip()
-            if app_id and app_id == sender_id:
-                return app_id
+            # 旧/新格式都支持：messenger.app_id 或 channels.feishu.app_id
+            identities = []
+            messenger = data.get("messenger") or {}
+            if isinstance(messenger, dict):
+                aid = (messenger.get("app_id") or "").strip()
+                if aid:
+                    identities.append(aid)
+            channels = data.get("channels")
+            if isinstance(channels, dict):
+                for ch_cfg in channels.values():
+                    if isinstance(ch_cfg, dict):
+                        aid = (ch_cfg.get("app_id") or "").strip()
+                        if aid:
+                            identities.append(aid)
+                        bid = (ch_cfg.get("bot_id") or "").strip()
+                        if bid:
+                            identities.append(bid)
+            for ident in identities:
+                if ident and ident == sender_id:
+                    return ident
     except Exception:
         return ""
     return ""
@@ -94,8 +108,8 @@ async def handle_message(*, adapter: IngressAdapter, msg: NormalizedMessage) -> 
     if msg.sender_id:
         try:
             from domain.contacts import is_blocked, get_or_create_stub
-            # 平台归一化为 'feishu'（目前只接飞书，未来钉钉/微信扩展）
-            platform = "feishu" if msg.platform == "feishu" else msg.platform
+            # platform 直接用 msg.platform（wechat/feishu/...）
+            platform = msg.platform
             # 先查黑名单（若已 blocked 直接 drop，不消耗资源创建 stub）
             if is_blocked(platform, msg.sender_id):
                 logger.info(

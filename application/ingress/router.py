@@ -50,11 +50,6 @@ def resolve_instance(msg: NormalizedMessage) -> str:
                 pass
 
         # 1) 群聊 + @ 路由：优先级最高
-        # 注意：多进程架构下，每个 instance subprocess 自己跑 feishu WS。
-        # 每个进程收到的同一群消息 header.app_id 是自己的 bot，
-        # 因此优先级 3 (bot_app_id 兜底) 会让每个进程都路由到"自己"——
-        # 这是预期行为：两个实例是两个人，**都看完整消息、各自响应**。
-        # 不要在这里加 name 匹配让"被 @ 的那个独占响应"，会破坏这个语义。
         if msg.is_group and getattr(msg, "mentioned_bot_app_ids", None):
             mentioned = list(msg.mentioned_bot_app_ids)
             for instance_id in discover_instances():
@@ -90,4 +85,11 @@ def resolve_instance(msg: NormalizedMessage) -> str:
                 except Exception:
                     pass
 
+    elif msg.platform == "wechat":
+        # WeChat (ClawBot) 路由：当前进程就是这个实例的 adapter，
+        # 没有 bot_app_id 兜底（ClawBot 长轮询只有自己一个 bot）。
+        # 私聊场景默认路由到当前实例（就是 env DIGITAL_LIFE_INSTANCE_ID）。
+        return os.environ.get("DIGITAL_LIFE_INSTANCE_ID") or "zero"
+
+    # 兜底：其它平台（dingtalk / telegram 等）也走 fallback
     return os.environ.get("DIGITAL_LIFE_INSTANCE_ID") or os.environ.get("L4_AGENT_ID") or "zero"

@@ -466,6 +466,10 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
                 ),
             })
 
+    # ── WeChat (ClawBot) 发送路径 —— 按 channel 前缀分发 ──
+    if channel.startswith("wechat:"):
+        return _send_wechat_clawbot(channel, text, context, mention_user_ids)
+
     # Send via feishu direct API (primary path)
     sent = False
     err = None
@@ -2016,3 +2020,150 @@ registry.register(
 
 
 __all__ = []
+
+
+# ── WeChat ClawBot 发送（express_to_human 的 wechat 路径）──────────────
+
+def _send_wechat_clawbot(
+    channel: str,
+    text: str,
+    context: dict,
+    mention_user_ids: list,
+) -> str:
+    """通过 ClawBot API 发送微信私聊消息。
+
+    channel 格式：wechat:dm:<user_id>
+    user_id 形如 xxx@im.wechat。
+
+    ClawBot 限制：
+      - 必须带 context_token（从收到的消息里取），否则不能发
+      - 仅私聊，不支持群聊
+      - 不能主动推送（必须有 context_token 关联对话）
+    """
+    parts = channel.split(":", 2)
+    if len(parts) < 3:
+        return json.dumps({"sent": False, "channel": channel, "error": "channel 格式错误，应为 wechat:dm:<user_id>"}, ensure_ascii=False)
+    kind, target_id = parts[1], parts[2].strip()
+    if kind != "dm":
+        return json.dumps({"sent": False, "channel": channel, "error": "ClawBot 仅支持私聊（dm），不支持群聊"}, ensure_ascii=False)
+
+    # 读 ClawBot 凭证
+    from infrastructure.config import get_app_instance_id, get_project_root
+    iid = get_app_instance_id()
+    if not iid:
+        return json.dumps({"sent": False, "error": "无法确定当前实例 ID"}, ensure_ascii=False)
+
+    bot_token = ""
+    import os as _os
+    bot_token = (_os.getenv("WECHAT_BOT_TOKEN") or "").strip()
+    if not bot_token:
+        # 从实例 secrets.env 读
+        secrets_path = get_project_root() / "apps" / iid / "config" / "secrets.env"
+        if secrets_path.exists():
+            for line in secrets_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line.startswith("WECHAT_BOT_TOKEN="):
+                    bot_token = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+    if not bot_token:
+        return json.dumps({"sent": False, "error": "WECHAT_BOT_TOKEN 未配置（在 secrets.env 中填）"}, ensure_ascii=False)
+
+    # 从 runtime context 拿 context_token（wake 时存的入站消息上下文）
+    context_token = ""
+    try:
+        from domain.lifecycle.runtime_context import get_express_context
+        ctx = get_express_context() or {}
+        context_token = str(ctx.get("wechat_context_token") or "")
+    except Exception:
+        pass
+    # 也从全局上下文试取
+    if not context_token:
+        try:
+            from interfaces.tools.action_tools import _REPLY_CONTEXT
+            iid_key = iid
+            ctx = _REPLY_CONTEXT.get(iid_key) or {}
+            context_token = str(ctx.get("wechat_context_token") or "")
+        except Exception:
+            pass
+
+    if not context_token:
+        return json.dumps({
+            "sent": False,
+            "channel": channel,
+            "error": "ClawBot 需要 context_token 才能回复（当前会话没有微信上下文）。ClawBot 不支持主动推送。",
+        }, ensure_ascii=False)
+
+    # 截断文本
+    max_len = 2000
+    send_text = text[:max_len]
+
+    # 发送
+    import base64 as _b64
+    import random as _rnd
+    import time as _time
+    headers = {
+        "Authorization": f"Bearer {bot_token}",
+        "Content-Type": "application/json",
+        "X-WECHAT-UIN": _b64.b64encode(str(_rnd.randint(0, 0xFFFFFFFF)).encode()).decode(),
+    }
+    payload = {
+        "context_token": context_token,
+        "to_user_id": target_id,
+        "item_list": [{"type": 1, "content": send_text}],
+    }
+
+    def _do_send():
+        import httpx
+        with httpx.Client(timeout=30) as c:
+            r = c.post(
+                "https://ilinkai.weixin.qq.com/ilink/bot/sendmessage",
+                headers=headers,
+                json=payload,
+            )
+            r.raise_for_status()
+            return r.json()
+
+    try:
+        result = run_async_in_thread(_do_send())
+        if isinstance(result, dict) and (result.get("ret") == 0 or result.get("errcode") == 0):
+            logger.info("express_to_human wechat: sent OK (target=%s)", target_id[:20])
+            return json.dumps({
+                "sent": True,
+                "channel": channel,
+                "text": send_text,
+            }, ensure_ascii=False)
+        else:
+            return json.dumps({
+                "sent": False,
+                "channel": channel,
+                "error": f"ClawBot API returned: {result}",
+            }, ensure_ascii=False)
+    except Exception as exc:
+        logger.error("express_to_human wechat send failed: %s", exc)
+        return json.dumps({
+            "sent": False,
+            "channel": channel,
+            "error": str(exc),
+        }, ensure_ascii=False)
+
+
+def run_async_in_thread(coro_func):
+    """在同步上下文里跑 async coroutine（用于 express_to_human 的同步 handler）。"""
+    import threading
+    result = [None]
+    exc = [None]
+    def _runner():
+        import asyncio
+        loop = asyncio.new_event_loop()
+        try:
+            result[0] = loop.run_until_complete(coro_func)
+        except Exception as e:
+            exc[0] = e
+        finally:
+            loop.close()
+    t = threading.Thread(target=_runner)
+    t.start()
+    t.join(timeout=35)
+    if exc[0]:
+        raise exc[0]
+    return result[0]

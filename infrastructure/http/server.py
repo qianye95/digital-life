@@ -103,16 +103,42 @@ def _cleanup_stale_affair_on_startup(instance_id: str) -> None:
 
 
 async def run_instance_gateway(instance_id: str) -> None:
-    """跑单个实例：FeishuAdapter + Cron loop。不起 HTTP。"""
-    from interfaces.ingress.feishu import FeishuAdapter
-    from application.ingress.handler import handle_message as ingress_handle_message
-    from infrastructure.config import set_current_instance_id
-    from domain.lifecycle.events import set_instance_context
+    """跑单个实例：消息通道 adapter(s) + Cron loop。不起 HTTP。
 
-    app_id, app_secret = _instance_feishu_credentials(instance_id)
-    if not app_id:
-        logger.error("Instance %s has no feishu.app_id, exiting", instance_id[:8])
+    通过 registry 从 app.yaml 配置创建一个或多个通道 adapter（飞书/微信/钉钉...）。
+    旧格式（只有 messenger 段）自动兼容为单飞书通道。
+    """
+    from application.ingress.handler import handle_message as ingress_handle_message
+    from infrastructure.config import set_current_instance_id, get_project_root
+    from domain.lifecycle.events import set_instance_context
+    from interfaces.ingress.registry import create_adapters_from_config
+    import yaml as _yaml
+
+    # 读实例 app.yaml + secrets.env
+    _root = get_project_root()
+    cfg_path = _root / "apps" / instance_id / "config" / "app.yaml"
+    secrets_path = _root / "apps" / instance_id / "config" / "secrets.env"
+    app_yaml_cfg = {}
+    if cfg_path.exists():
+        try:
+            app_yaml_cfg = _yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            pass
+    secrets_env = {}
+    if secrets_path.exists():
+        for line in secrets_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                secrets_env[k.strip()] = v.strip().strip('"').strip("'")
+
+    # 创建所有通道 adapter
+    adapters = create_adapters_from_config(app_yaml_cfg, secrets_env)
+    if not adapters:
+        logger.error("Instance %s has no valid channels, exiting", instance_id[:8])
         return
+
+    logger.info("Instance %s starting with %d channel(s)", instance_id[:8], len(adapters))
 
     # 设置进程级 ContextVar —— 这个进程只服务于这一个实例
     os.environ["DIGITAL_LIFE_INSTANCE_ID"] = instance_id
@@ -125,27 +151,20 @@ async def run_instance_gateway(instance_id: str) -> None:
     except Exception:
         pass
 
-    # 注入运行时适配器（含 HermesSessionEvidenceReader —— 让 todo 完成门禁
-    # 的 fallback 能查到 messages DB 里实际的 terminal / express_to_human 调用）。
-    # 历史上只有 CLI 路径调过 configure_runtime_provider，生产 server / instance
-    # worker 从未注入，导致 evidence store 的 fallback 一直是 NullSessionEvidenceReader，
-    # "证据门禁"形同虚设又苛刻无比。这里补一刀，让证据链真能查到 DB。
+    # 注入运行时适配器
     try:
         from application.runtime_provider import configure_runtime_provider
         configure_runtime_provider()
     except Exception as exc:
         logger.warning("configure_runtime_provider failed at instance startup: %s", exc)
 
-    # Startup stale 清理：进程重启后，DB 里残留的 RUNNING affair 一定是 stale
-    # （旧 session 驱动已死）。立即回退到 BLOCKED，避免 5min 等待 —
-    # 否则 mid-session 期间到达的新消息事件会卡在 DB 直到 stale 触发。
+    # Startup stale 清理
     try:
         _cleanup_stale_affair_on_startup(instance_id)
     except Exception as exc:
         logger.warning("Instance %s startup stale cleanup failed: %s", instance_id[:8], exc)
 
-    # 集中初始化所有 SQLite 表（state.db 全量表 + tasks.db 等）
-    # 各 domain 模块的 schema 在此一次性幂等创建，避免运行时懒加载遗漏
+    # 集中初始化所有 SQLite 表
     try:
         from domain.lifecycle.schema import init_all_schemas
         init_all_schemas()
@@ -165,11 +184,18 @@ async def run_instance_gateway(instance_id: str) -> None:
         except NotImplementedError:
             pass
 
-    # 启动 FeishuAdapter
-    feishu = FeishuAdapter(app_id=app_id, app_secret=app_secret)
-    feishu.on_message(lambda msg, f=feishu: ingress_handle_message(adapter=f, msg=msg))
-    await feishu.start()
-    logger.info("Instance %s feishu adapter started (app_id=%s)", instance_id[:8], app_id[:12])
+    # 启动所有通道 adapter
+    for adapter in adapters:
+        adapter.on_message(
+            lambda msg, a=adapter: ingress_handle_message(adapter=a, msg=msg)
+        )
+        await adapter.start()
+        logger.info(
+            "Instance %s adapter started (platform=%s, identity=%s)",
+            instance_id[:8],
+            getattr(adapter, "platform", "?"),
+            getattr(adapter, "app_identity", "?"),
+        )
 
     # 启动 Cron 循环（只 tick 当前实例）
     cron_stop = threading.Event()
@@ -185,10 +211,11 @@ async def run_instance_gateway(instance_id: str) -> None:
     await stop_event.wait()
     logger.info("Instance %s shutting down...", instance_id[:8])
 
-    try:
-        await feishu.stop()
-    except Exception:
-        pass
+    for adapter in adapters:
+        try:
+            await adapter.stop()
+        except Exception:
+            pass
     cron_stop.set()
     cron_thread.join(timeout=5)
     logger.info("Instance %s stopped", instance_id[:8])
