@@ -3,7 +3,7 @@
 配置层级（2026-06-17 重构）：
   1. config/default.yaml          — 系统级（端口/tick/精力/budget）
   2. apps/<id>/config/app.yaml    — 实例级（模型/飞书/技能/群聊）
-  3. apps/<id>/config/secrets.env — 实例密钥（GLM_API_KEY / FEISHU_APP_SECRET）
+  3. apps/<id>/config/secrets.env — 实例密钥（LLM_API_KEY / FEISHU_APP_SECRET）
 
 旧的 config/secrets.env 全局文件已删除——密钥下沉到每实例。
 旧的 apps/<id>/data/config.yaml 已废弃——实例配置统一到 config/app.yaml。

@@ -189,7 +189,7 @@ async function create() {
     await ElMessageBox.alert(
       `✅ 实例已创建：${d.instance.display_name}\n\nUUID: ${d.instance.id}\n\n` +
       `下一步：\n1. 重启网关（实例才会被自动 spawn）：digital-life restart\n` +
-      `2. 检查 apps/${d.instance.id}/config/secrets.env 的 GLM_API_KEY + FEISHU_APP_SECRET\n` +
+      `2. 检查 apps/${d.instance.id}/config/secrets.env 的 LLM_API_KEY + FEISHU_APP_SECRET\n` +
       `3. 访问 /instance/${d.instance.id}/overview`,
       '创建成功',
       { type: 'success', confirmButtonText: '知道了' }

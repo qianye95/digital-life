@@ -731,7 +731,7 @@ async def _handle_create_instance(request: web.Request) -> web.Response:
         f"新实例「{display_name}」已初始化"
         + (f"并自动启动（PID 已 spawn）。" if spawn_ok else
            f"。自动 spawn 失败（{spawn_error}），请重启网关 `digital-life restart`。")
-        + " 首次唤醒前请确保 secrets.env 的 GLM_API_KEY 与 FEISHU_APP_SECRET 正确。"
+        + " 首次唤醒前请确保 secrets.env 的 LLM_API_KEY 与 FEISHU_APP_SECRET 正确。"
     )
 
     return web.json_response({

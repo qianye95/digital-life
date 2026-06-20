@@ -230,7 +230,7 @@ def _ensure_default_instance() -> None:
 
     体验：新人 clone 仓库后只需：
       1. cp config/secrets.example.env config/secrets.env
-      2. 填 GLM_API_KEY + FEISHU_APP_ID/SECRET + API_SERVER_KEY
+      2. 填 LLM_API_KEY + FEISHU_APP_ID/SECRET + API_SERVER_KEY
       3. digital-life start
     完全不用跑 scripts/init_instance.py —— 启动发现无实例时，自动创建两个
     示范实例（zero 和 alpha），把 secrets.env 里已填的飞书凭证写进 zero，
@@ -250,7 +250,7 @@ def _ensure_default_instance() -> None:
 
     feishu_app_id = os.environ.get("FEISHU_APP_ID", "").strip()
     feishu_app_secret = os.environ.get("FEISHU_APP_SECRET", "").strip()
-    glm_api_key = os.environ.get("GLM_API_KEY", "").strip()
+    glm_api_key = (os.environ.get("LLM_API_KEY") or os.environ.get("GLM_API_KEY") or "").strip()
 
     default_instances = [
         {

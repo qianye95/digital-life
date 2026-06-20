@@ -112,7 +112,7 @@ def _embed_texts(texts: List[str]) -> Optional[List[List[float]]]:
         return []
     api_key = _get_api_key()
     if not api_key:
-        logger.warning("GLM_API_KEY not found, skipping embedding")
+        logger.warning("LLM API Key not found, skipping embedding")
         return None
     try:
         import urllib.request
