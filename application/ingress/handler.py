@@ -547,7 +547,7 @@ def _inject_msg_to_running_session(
                         from domain.lifecycle.scheduler import wake_digital_life
                         wake_digital_life(
                             instance_id=instance_id,
-                            trigger_reason=f"message:delayed_after_inject",
+                            trigger_reason=f"{kind}:delayed_after_inject",
                             affair_id=affair_id,
                         )
                 except Exception as exc:
