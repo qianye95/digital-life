@@ -355,6 +355,12 @@ class EmployeeConsoleAPIService:
             html = html.replace("</head>", config_script + "</head>", 1)
         else:
             html = config_script + html
+        # 给所有 /assets/{file} 引用戳个 ?v=<mtime>,让浏览器永远拉新版
+        # (即使浏览器 ETag 命中 304 用旧 cache,query 变了也会强制重新拉)
+        import time as _time
+        _v = str(int(index_path.stat().st_mtime))
+        import re as _re_v
+        html = _re_v.sub(r'(/assets/[^"?]+)"', r'\1?v=' + _v + '"', html)
         return web.Response(
             text=html, content_type="text/html",
             headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
