@@ -113,7 +113,7 @@
             placeholder="详情记忆：填入会覆盖现有内容。留空保存 = 清空详情。"
           />
           <div class="brand-sub" style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
-            详情是整段覆盖（增删改,非追加）。模型 sense_todos 时会看到。
+            详情字段 = 整段替换。每次写入以新内容覆盖旧版；想增删改某段,自己读旧文 + 编辑后整体再提交。模型 sense_todos 时会看到。
           </div>
         </el-form-item>
         <el-form-item label="优先级">
