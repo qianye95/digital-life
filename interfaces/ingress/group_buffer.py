@@ -1,44 +1,41 @@
 """群消息合并窗口 + 每实例静态 offset —— 收口到 adapter。
 
-设计意图：
+设计意图:
 - 取代 domain/lifecycle/events.py 里 group_message 类的 30s debounce
-  —— 事件层只调度,不合并(单一职责)
-- 每实例独立 0~29s offset（配置在 app.yaml.group_chat.batch_offset_s）
-  —— 防止多个 bot 同步吐 batch → 同步 wake → 群消息交错两份方案同时到
+  (事件层只调度,不合并,单一职责)
+- 每实例独立 0~29s offset (app.yaml.group_chat.batch_offset_s)
+  防止多个 bot 同步吐 batch → 同步 wake → 群消息交错两份方案同时到
 
-核心机制：
-1. 群消息进来 → 加进 buffer
-2. 一个 30s tick 的 flush 协程
-3. 每实例有自己的 offset（如 zero=0s、alpha=15s）—— tick 触发时间错开
-4. flush 时把窗口里所有 NormalizedMessage 聚成 **单个** NormalizedMessage，
-   第一条作为 base，其余以 [{sender, text}, ...] 形式塞 base.merged_texts
-   字段（handler / payload 透传给事件层,模型 wake 时能看到 batch 历史）
-5. handler 一次调用
+⚠️ 2026-06-21 重大 bug 修法:
+之前 _flush_loop 是 asyncio task,跑在调用 add 时所在的 event loop。但
+FeishuAdapter 把 lark_oapi WSClient 跑在子线程,子线程的 loop 用
+`loop.run_until_complete(_connect())` blocking — add 在该 blocking loop
+里被调,即便 create_task 了 _flush_loop,loop 永远 stuck 在 socket read
+不 yield 给该 task → flush 偶发跑不跑。
 
-各实例读 offset 的来源：
-  - app.yaml.group_chat.batch_offset_s（推荐写这里,前端 ConfigTab 可见）
-  - fallback 环境 FG_GROUP_BATCH_OFFSET
-  - 最终默认 0(意思是该实例跟 tick 同步吐,适合单实例或主导实例)
+修法: 扔掉 asyncio task timing, 改 daemon thread + 异步 run coroutine。
+daemon thread 每 30s tick, 每次用独立 asyncio.run(_flush_once) 跑 handler。
+彻底脱离 lark WS 的 blocking loop。
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+import time
 from typing import Any, Awaitable, Callable, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
-# 窗口长度（秒）。所有实例共用 —— 错开是靠 offset,不是靠窗口长度本身。
+# 窗口长度(秒)
 GROUP_BATCH_WINDOW_S = 30
 
 
 class GroupMessageBuffer:
-    """pipeline: 收→ buffer → 每 30s + offset 吐 batch。
+    """pipeline: 收 → buffer → 30s + offset 吐 batch (1 个 NormalizedMessage)。
 
-    每个 adapter 持有自己一个实例(独立 process,无需锁 cross-instance)。
-    线程模型: add 在飞书 WS 回调线程(我们把消息 normalize 后异步塞);
-    flush 协程在 adapter 自己的 event loop。
+    每 adapter 一个实例。flush 在 daemon thread 跑, 不依赖任何外部 loop。
     """
 
     def __init__(
@@ -50,30 +47,35 @@ class GroupMessageBuffer:
     ) -> None:
         self._handler = handler
         self._window_s = window_s
-        self._offset_s = offset_s  # None 时按 _read_offset() 动态读
+        self._offset_s = offset_s
+        # buffer 跨线程共享, threading.Lock 保护
         self._buffer: List[Any] = []
-        self._lock = asyncio.Lock()
-        self._flush_task: Optional[asyncio.Task] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._buffer_lock = threading.Lock()
+        # stop flag 让 daemon thread 跳出循环
+        self._stop_flag = threading.Event()
+        self._flush_thread: Optional[threading.Thread] = None
+        self._started = False
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        """adapter 在 start() 时绑定 loop。如果 GroupMessageBuffer 在 loop
-        之外被构造(比如 __init__),需要 adapter.start 显式 set 一次。"""
-        self._loop = loop
+        """兼容接口。flush 已不再依赖 loop timing, 这方法是 no-op。"""
+        pass
 
     def add(self, msg: Any) -> None:
-        """加一条群消息。如果 flush 协程没起,自动起。"""
-        if self._loop is None:
-            # 退化为同步立即派发(理论上不会发生,adapter start 时一定 set loop)
-            logger.warning("GroupMessageBuffer.add called before set_loop; dispatching now")
-            self._loop = asyncio.get_event_loop()
-        # 把 msg 塞 buffer。lock 走协程,但 add 可能从非 async 上下文调,
-        # 用 call_soon_threadsafe 跳回 loop 线程。
-        def _do():
+        """加一条群消息。同步、线程安全。首次 add 启动 daemon thread。"""
+        with self._buffer_lock:
             self._buffer.append(msg)
-            if self._flush_task is None or self._flush_task.done():
-                self._flush_task = self._loop.create_task(self._flush_loop())
-        self._loop.call_soon_threadsafe(_do)
+        self._ensure_started()
+
+    def _ensure_started(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        self._flush_thread = threading.Thread(
+            target=self._flush_run,
+            daemon=True,
+            name="group-buffer-flush",
+        )
+        self._flush_thread.start()
 
     def get_offset(self) -> float:
         """offset 来源: 构造期显式 > env > app.yaml > 默认 0。"""
@@ -102,23 +104,30 @@ class GroupMessageBuffer:
             pass
         return 0.0
 
-    async def _flush_loop(self) -> None:
-        """每 _window_s 秒吐一次 batch,首次启动延迟 = offset。
+    def _flush_run(self) -> None:
+        """daemon thread 主循环: offset sleep → window sleep → flush。每次 flush 用
+        asyncio.run 在临时 loop 跑,避免污染 lark_oapi blocking WS loop。"""
+        try:
+            offset = self.get_offset()
+            if offset > 0:
+                # 用 event.wait 让 stop 时能立刻 break
+                if self._stop_flag.wait(offset):
+                    return
+        except Exception:
+            pass
 
-        offset 的作用:让多个实例即使在同一时间窗收到消息,也不会同时吐。
-        比如 zero offset=0 → T+0/30/60 吐; alpha offset=15 → T+15/45/75 吐。
-        各自看到的 batch 内容不同（alpha 吐时已经能看到 zero 刚才发的消息）。
-        """
-        offset = self.get_offset()
-        # 首次延迟 offset 让首个 tick 时间错开
-        await asyncio.sleep(offset)
-        while True:
-            await asyncio.sleep(self._window_s)
-            await self._flush_once()
+        while not self._stop_flag.is_set():
+            # 等 window_s 秒(stop 时立刻 break)
+            if self._stop_flag.wait(self._window_s):
+                break
+            try:
+                asyncio.run(self._flush_once())
+            except Exception as exc:
+                logger.warning("GroupMessageBuffer flush run failed: %s", exc)
 
     async def _flush_once(self) -> None:
         """把 buffer 里所有消息聚成单个 NormalizedMessage 一次调 handler。"""
-        async with self._lock:
+        with self._buffer_lock:
             if not self._buffer:
                 return
             batch = list(self._buffer)
@@ -127,15 +136,12 @@ class GroupMessageBuffer:
         if not batch:
             return
 
-        # 第一条作为 base（保留 chat_id / platform / is_group 等元信息）
         base = batch[0]
-        # 单条直接 dispatch（无需包成 batch payload）
         if len(batch) == 1:
             await self._handler(base)
             return
 
-        # 多条合并:把其余条目以 [{sender, text}, ...] 形式挂在 base.merged_texts
-        # NormalizedMessage 是 dataclass,直接 setattr; handler 把它传给 payload 透传
+        # 多条合并:把所有 sender/text 收集, base 字段换成最新一条
         merged_texts = []
         for m in batch:
             sender = getattr(m, "sender_name", "") or getattr(m, "sender_id", "") or "?"
@@ -143,16 +149,13 @@ class GroupMessageBuffer:
             if text:
                 merged_texts.append({"sender": sender, "text": text[:500]})
         try:
-            # 构造合并 message 时把最新一条作为 base 内容（让 prompt 主行看到最新一条）
             latest = batch[-1]
-            # 复制 base 但替换 content/sender 为最新一条 —— dataclass 不支持 replace by default
-            # 简单 setattr（NormalizedMessage 是 mutable dataclass）
             for field in ("content", "sender_name", "sender_id", "message_id"):
                 if hasattr(latest, field):
                     setattr(base, field, getattr(latest, field))
-            base.merged_texts = merged_texts  # 见 base.py NormalizedMessage 字段
+            base.merged_texts = merged_texts
         except Exception as exc:
-            logger.warning("GroupMessageBuffer merge failed, fallback to per-msg dispatch: %s", exc)
+            logger.warning("GroupMessageBuffer merge failed, fallback per-msg: %s", exc)
             for m in batch:
                 await self._handler(m)
             return
@@ -163,37 +166,12 @@ class GroupMessageBuffer:
         )
         await self._handler(base)
 
-    async def stop(self) -> None:
-        """adapter stop 时取消 flush。"""
-        if self._flush_task and not self._flush_task.done():
-            self._flush_task.cancel()
-            try:
-                await self._flush_task
-            except asyncio.CancelledError:
-                pass
-        # 最后吐一次残留
-        await self._flush_once()
-
-
-# 默认实例:每个 adapter 持有自己的 buffer（独立 process,无需共享）
-# 但简化使用,这里给个 _default_buffer lazy 单例,供上面 _GROUP_MSG_BUFFER 调用
-_default_buffer: Optional[GroupMessageBuffer] = None
-
-
-def get_default_buffer(handler: Optional[Callable] = None) -> GroupMessageBuffer:
-    """获取默认 buffer 单例。第一次调用必须传 handler。"""
-    global _default_buffer
-    if _default_buffer is None:
-        if handler is None:
-            raise RuntimeError(
-                "GroupMessageBuffer default not initialized; "
-                "call get_default_buffer(handler=...) first"
-            )
-        _default_buffer = GroupMessageBuffer(handler)
-    return _default_buffer
-
-
-def set_default_buffer(buf: GroupMessageBuffer) -> None:
-    """让 adapter start() 时显式注入带正确 loop 的 buffer。"""
-    global _default_buffer
-    _default_buffer = buf
+    def stop(self) -> None:
+        """adapter stop 时停止 daemon thread + 吐最后一批。"""
+        self._stop_flag.set()
+        try:
+            asyncio.run(self._flush_once())
+        except Exception as exc:
+            logger.warning("GroupMessageBuffer stop flush failed: %s", exc)
+        if self._flush_thread and self._flush_thread.is_alive():
+            self._flush_thread.join(timeout=2.0)

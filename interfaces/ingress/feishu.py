@@ -152,9 +152,10 @@ class FeishuAdapter(IngressAdapter):
     async def stop(self) -> None:
         logger.info("FeishuAdapter stopping...")
         # 清掉 group_buffer 里残留的最后一批,避免消息丢失
+        # (stop 现在是 sync:daemon thread + asyncio.run flush, 不 await)
         if self._group_buffer is not None:
             try:
-                await self._group_buffer.stop()
+                self._group_buffer.stop()
             except Exception as exc:
                 logger.warning("group_buffer stop failed: %s", exc)
 
@@ -342,11 +343,10 @@ class FeishuAdapter(IngressAdapter):
     def on_message(self, handler: MessageHandler) -> None:
         self._handlers.append(handler)
 
-    def _ensure_group_buffer(self, loop: asyncio.AbstractEventLoop) -> None:
-        """懒创建群消息 buffer。绑定 WS 子线程 loop,把所有 handler 包成一个 callback
-        给 buffer（flush 时调一次 → 串行给所有 handler）。
+    def _ensure_group_buffer(self) -> None:
+        """懒创建群消息 buffer。flush 在 daemon thread 跑独立 loop, 不需 loop 引用。
 
-        offset 通过 app.yaml.group_chat.batch_offset_s 配置（fallback 默认 0）。
+        offset 通过 app.yaml.group_chat.batch_offset_s 配置(fallback 默认 0)。
         """
         if self._group_buffer is not None:
             return
@@ -360,7 +360,6 @@ class FeishuAdapter(IngressAdapter):
                     logger.exception("group_buffer dispatch handler error: %s", exc)
 
         self._group_buffer = GroupMessageBuffer(_dispatch_all)
-        self._group_buffer.set_loop(loop)
 
     # -- Internals -----------------------------------------------------------
 
@@ -411,8 +410,7 @@ class FeishuAdapter(IngressAdapter):
                 #     (只带 merged_texts 列表),一次调 handler —— 取代事件层 group_message 的 30s debounce
                 #   - 这是消息系统问题,事件层只调度不再合并
                 if getattr(normalized, "is_group", False):
-                    loop = asyncio.get_running_loop()
-                    self._ensure_group_buffer(loop)
+                    self._ensure_group_buffer()
                     self._group_buffer.add(normalized)
                 else:
                     for handler in self._handlers:
