@@ -145,6 +145,10 @@ const loadingAssoc = ref(false)
 const currentContent = ref('')
 const segments = ref([])
 const loaded = ref({})  // {kind: bool} 哪些已加载
+// 每种 kind 独立的 segments 缓存 —— 切 tab 时先从 cache 拿,空再走网络拉
+// 之前 bug:insights 加载过 (loaded.insights=true),切回 context 时 loaded.context
+// 也是 true 就跳过 loadMemory,但 segments 还是上一份 (insights 的空),显示为空
+const segCache = ref({})
 
 const assoc = ref({
   chunks: 0,
@@ -219,6 +223,11 @@ function splitByChapters(content) {
 }
 
 async function loadMemory(kind) {
+  // 优先用 in-memory cache(切回来用,不动网络),网络拉了就放进去
+  if (segCache.value[kind]) {
+    segments.value = segCache.value[kind]
+    return
+  }
   loading.value = true
   segments.value = []
   try {
@@ -227,9 +236,11 @@ async function loadMemory(kind) {
       currentContent.value = String(d.content || '')
       const segs = splitByChapters(currentContent.value)
       segments.value = segs
+      segCache.value[kind] = segs  // 缓存
       counts.value = { ...counts.value, [kind]: segs.length }
     } else {
       counts.value = { ...counts.value, [kind]: 0 }
+      segCache.value[kind] = []  // 缓存空,避免下次切回重新拉
     }
     loaded.value[kind] = true
   } finally {
@@ -265,6 +276,9 @@ function expandAll() {
 }
 
 async function reloadAll() {
+  // 强制刷新:清 cache 让下次访问必走网络
+  segCache.value = {}
+  loaded.value = {}
   // 预加载 consciousness + assoc (默认两个最常用)
   // 其他按需加载 (切 tab 时)
   await Promise.all([loadMemory('consciousness'), loadAssoc()])
