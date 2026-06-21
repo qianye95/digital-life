@@ -357,19 +357,20 @@ class MonitorConsoleWorkflow:
 
     @staticmethod
     def _memory_file_map() -> dict[str, str]:
+        # 前端 MemoriesTab 展示的 kind 必须全部在这里映射,否则 404。
+        # 已退役(goals/him)从可选 list 移除,read_goals/read_about_him 改返退役提示。
         return {
             "consciousness": "CONSCIOUSNESS.md",
-            "scratchpad": "SCRATCHPAD.md",
-            "sent_log": "SENT_LOG.md",
-            "goals": "GOALS.md",
-            "plans": "PLANS.md",
-            "him": "HIM.md",
-            "daily": "DAILY.md",
-            "rules": "RULES.md",
-            "context": "CONTEXT.md",
-            "lessons": "LESSONS.md",
-            "user": "USER.md",
-            "memory": "MEMORY.md",
+            "scratchpad":    "SCRATCHPAD.md",
+            "sent_log":      "SENT_LOG.md",
+            "plans":         "PLANS.md",
+            "daily":         "DAILY.md",
+            "rules":         "RULES.md",
+            "context":       "CONTEXT.md",
+            "lessons":       "LESSONS.md",
+            "insights":      "INSIGHTS.md",
+            "user":          "USER.md",
+            "memory":        "MEMORY.md",
         }
 
     def memory_dates(self, name: str) -> UseCaseResult:
