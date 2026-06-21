@@ -199,6 +199,7 @@ async def handle_message(*, adapter: IngressAdapter, msg: NormalizedMessage) -> 
                 # 多通道：把 platform + ClawBot context_token 穿透到 express_to_human
                 platform=msg.platform,
                 ctx_token=getattr(msg, "context_token", "") or "",
+                merged_texts=getattr(msg, "merged_texts", None) or None,
             )
         finally:
             reset_current_instance_id(config_token)
@@ -289,7 +290,7 @@ def _route_to_life(
         msg_id=msg_id,
         app_id=app_id,
         platform=platform,
-        merged_texts=getattr(msg, "merged_texts", None) or None,
+        merged_texts=merged_texts,
         adapter=adapter,
     )
 
