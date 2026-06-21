@@ -143,3 +143,6 @@ interfaces/**/dist/
 # === OS ===
 .DS_Store
 Thumbs.db
+
+# AI agent 跑活时的临时 todo / 实验数据, 不入 git
+todos/
