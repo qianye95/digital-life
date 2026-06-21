@@ -35,14 +35,15 @@
           <div v-for="t in group" :key="t.id" class="todo-row">
             <div
               class="done-dot"
-              :class="{ 'is-done': t.status === 'done' || t.status === 'completed' }"
-              :title="(t.status === 'done' || t.status === 'completed') ? '已完成' : '点击标记完成'"
+              :class="{ 'is-done': t.status === 'done' || t.status === 'completed', 'is-cancelled': t.status === 'cancelled' }"
+              :title="(t.status === 'done' || t.status === 'completed') ? '已完成' : (t.status === 'cancelled' ? '已取消' : '点击标记完成')"
               @click="() => complete(t)"
             >
               <span v-if="t.status === 'done' || t.status === 'completed'" class="done-check">✓</span>
+              <span v-else-if="t.status === 'cancelled'" class="cancelled-mark">×</span>
             </div>
             <div style="flex: 1; min-width: 0;">
-              <div :class="{ 'todo-done': t.status === 'done' || t.status === 'completed' }">
+              <div :class="{ 'todo-done': t.status === 'done' || t.status === 'completed' || t.status === 'cancelled' }">
                 {{ t.title || '(无标题)' }}
               </div>
               <div class="brand-sub mono" style="color: var(--text-muted); font-size: 11px;">
@@ -375,9 +376,21 @@ onMounted(load)
   cursor: default;  /* 终态,不可反向点 */
   box-shadow: 0 0 8px color-mix(in oklab, var(--neon-cyan) 50%, transparent);
 }
+.done-dot.is-cancelled {
+  background: color-mix(in oklab, var(--neon-red) 12%, var(--bg-elevated));
+  border-color: var(--neon-red);
+  cursor: default;
+  opacity: 0.7;
+}
 .done-check {
   color: var(--neon-cyan);
   font-size: 12px;
+  line-height: 1;
+  font-weight: bold;
+}
+.cancelled-mark {
+  color: var(--neon-red);
+  font-size: 14px;
   line-height: 1;
   font-weight: bold;
 }
