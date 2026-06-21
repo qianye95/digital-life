@@ -1,0 +1,112 @@
+[
+  {
+    "scenario": "开心分享",
+    "message": "今天拿到了一直想要的offer！太开心了，终于等到这一天了！",
+    "detected_sentiment": "user_message_excited",
+    "expected_sentiment": "user_message_excited",
+    "match": true,
+    "emotion_label": "开心",
+    "vad": {
+      "V": 0.3,
+      "A": 0.5,
+      "D": 0.6
+    },
+    "regulation": {
+      "express_warmth": 0.2,
+      "express_detail": 0.1,
+      "proactive_freq": 0.2,
+      "empathy_depth": 0.1,
+      "humor_level": 0.2,
+      "self_disclosure": 0.15
+    },
+    "shadow_note": "开心状态：express_warmth+20%，express_detail+10%，proactive_freq+20%，empathy_depth+10%，humor_level+20%，self_disclosure+15%"
+  },
+  {
+    "scenario": "抱怨吐槽",
+    "message": "今天上班烦死了，领导又安排了一堆活，累得不行，唉",
+    "detected_sentiment": "user_message_angry",
+    "expected_sentiment": "user_message_negative",
+    "match": false,
+    "emotion_label": "警惕",
+    "vad": {
+      "V": -0.3,
+      "A": 0.6,
+      "D": 0.3
+    },
+    "regulation": {
+      "express_warmth": 0.15,
+      "express_detail": 0.2,
+      "proactive_freq": 0.3,
+      "empathy_depth": 0.25,
+      "humor_level": -0.3,
+      "self_disclosure": -0.1
+    },
+    "shadow_note": "警惕状态：express_warmth+15%，express_detail+20%，proactive_freq+30%，empathy_depth+25%，humor_level-30%，self_disclosure-10%"
+  },
+  {
+    "scenario": "深度话题",
+    "message": "你有没有想过，人为什么总是对已经失去的东西念念不忘？最近一直在想这个问题",
+    "detected_sentiment": "user_message_neutral",
+    "expected_sentiment": "user_message_neutral",
+    "match": true,
+    "emotion_label": "平静",
+    "vad": {
+      "V": 0.0,
+      "A": 0.35,
+      "D": 0.5
+    },
+    "regulation": {
+      "express_warmth": 0.0,
+      "express_detail": 0.0,
+      "proactive_freq": 0.0,
+      "empathy_depth": 0.0,
+      "humor_level": 0.0,
+      "self_disclosure": 0.0
+    },
+    "shadow_note": "平静状态：按基线执行"
+  },
+  {
+    "scenario": "日常闲聊",
+    "message": "你今天干嘛了？我刚吃完午饭，今天天气还行",
+    "detected_sentiment": "user_message_neutral",
+    "expected_sentiment": "user_message_neutral",
+    "match": true,
+    "emotion_label": "平静",
+    "vad": {
+      "V": 0.0,
+      "A": 0.35,
+      "D": 0.5
+    },
+    "regulation": {
+      "express_warmth": 0.0,
+      "express_detail": 0.0,
+      "proactive_freq": 0.0,
+      "empathy_depth": 0.0,
+      "humor_level": 0.0,
+      "self_disclosure": 0.0
+    },
+    "shadow_note": "平静状态：按基线执行"
+  },
+  {
+    "scenario": "情绪低落",
+    "message": "最近好难过，感觉什么都做不好，压力好大，有点想哭",
+    "detected_sentiment": "user_message_negative",
+    "expected_sentiment": "user_message_negative",
+    "match": true,
+    "emotion_label": "平静",
+    "vad": {
+      "V": -0.2,
+      "A": 0.5,
+      "D": 0.4
+    },
+    "regulation": {
+      "express_warmth": 0.0,
+      "express_detail": 0.0,
+      "proactive_freq": 0.0,
+      "empathy_depth": 0.0,
+      "humor_level": 0.0,
+      "self_disclosure": 0.0
+    },
+    "shadow_note": "平静状态：按基线执行"
+  }
+]

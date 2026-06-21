@@ -356,7 +356,10 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command")
 
     start = subparsers.add_parser("start", help="Start the digital life runtime")
-    start.add_argument("--api-port", default="auto", help="API server port, or 'auto'")
+    # default=None:不传时 server 用 config/secrets.env 的 API_SERVER_PORT(=8642)
+    # 固定端口,避免端口漂移导致的浏览器/cache/文档对不上 bug
+    # 传 'auto' 仍可显式找空闲端口(开发场景); 数字显式锁定
+    start.add_argument("--api-port", default=None, help="API server port (默认 8642 走 config); 'auto' 找空闲或显式数字")
     start.add_argument("--foreground", action="store_true", help="Run in foreground instead of background")
     start.add_argument("--health-wait", type=float, default=2.0, help="Seconds to wait for early startup failure")
     start.set_defaults(func=_start)
@@ -367,7 +370,7 @@ def main(argv: list[str] | None = None) -> int:
     stop.set_defaults(func=_stop)
 
     restart = subparsers.add_parser("restart", help="Restart the digital life runtime")
-    restart.add_argument("--api-port", default="auto", help="API server port, or 'auto'")
+    restart.add_argument("--api-port", default=None, help="API server port (默认 8642 走 config); 'auto' 找空闲或显式数字")
     restart.add_argument("--timeout", type=float, default=20.0)
     restart.add_argument("--health-wait", type=float, default=2.0)
     restart.set_defaults(func=_restart)
