@@ -73,11 +73,11 @@
       <div class="card-title">最近已消费 ({{ consumedSessions.length }})</div>
       <div v-for="sess in consumedSessions" :key="sess.session_id" class="session-group" style="cursor:pointer" @click="$emit('selectSession', sess.session_id)">
         <div class="session-head">
-          <code class="session-link">{{ sess.session_id }}</code>
+          <strong class="session-name">{{ sess.name || sess.session_id }}</strong>
           <span class="session-time">{{ sess.ended_at_display }}</span>
         </div>
         <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">
-          {{ sess.source }} · {{ sess.message_count }}条 · {{ sess.tool_call_count }}次工具 · {{ sess.end_reason }}
+          <code>{{ sess.session_id }}</code> · {{ sess.source }} · {{ sess.message_count }}条 · {{ sess.tool_call_count }}次工具 · {{ sess.end_reason }}
         </div>
         <div v-if="sess.title" style="font-size:12px;color:var(--text-secondary);margin-top:2px;">{{ sess.title }}</div>
       </div>
