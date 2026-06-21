@@ -77,14 +77,15 @@
         v-for="sess in consumedSessions"
         :key="sess.session_id"
         class="session-group"
-        @click="goSession(sess.session_id)"
+        @click="goConsumed(sess)"
       >
         <div class="session-head">
-          <code class="session-link mono">{{ sess.session_id }}</code>
+          <strong class="session-name">{{ sess.name || sess.session_id }}</strong>
           <span class="session-time">{{ sess.ended_at_display }}</span>
         </div>
-        <div class="brand-sub" style="font-size: 12px; margin-top: 2px;">
-          {{ sess.source }} · {{ sess.message_count }} 条 · {{ sess.tool_call_count }} 次工具 · {{ sess.end_reason }}
+        <div class="brand-sub" style="font-size: 12px; margin-top: 2px; color: var(--text-muted);">
+          <code class="mono">{{ sess.session_id }}</code>
+          · {{ sess.message_count }} 条 · {{ sess.tool_call_count }} 次工具 · {{ sess.end_reason }}
         </div>
         <div v-if="sess.title" style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">{{ sess.title }}</div>
       </div>
@@ -423,6 +424,16 @@ function goSession(sid) {
   }
 }
 
+function goConsumed(sess) {
+  // consumed_sessions 列表点击入口 —— 也是优先 wake_id
+  const target = sess.wake_id || sess.session_id
+  if (target) {
+    router.push({ path: `/instance/${iid.value}/sessions`, query: { wake_id: target } })
+  } else {
+    router.push(`/instance/${iid.value}/sessions`)
+  }
+}
+
 let hourTimer = null
 onMounted(() => {
   loadCalendar()
@@ -538,6 +549,12 @@ watch(days, () => {
   background: color-mix(in oklab, var(--neon-cyan) 10%, transparent);
 }
 .session-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.session-name {
+  font-family: var(--font-display);
+  font-size: 13px;
+  color: var(--neon-cyan);
+  letter-spacing: 0.03em;
+}
 .session-link { color: var(--neon-cyan); cursor: pointer; font-size: 12px; }
 .session-time { font-size: 11px; color: var(--text-muted); }
 

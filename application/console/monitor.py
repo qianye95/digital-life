@@ -682,6 +682,23 @@ class MonitorConsoleWorkflow:
             # ── 拉 win 内所有 wake (来自 runtime_log.db) 用于 sid→wake_id 时间匹配 ──
             # session 跟 wake 没 id 关联,只靠 started_at(~0.1s 差)。
             # 给每个 session 解析出对应的 wake_id;前端 calendar 点击 session 跳转用 wake_id。
+            # _wake_type_labels = session.id → 中文名映射,calendar 全局共用
+            _wake_type_labels = {
+                "initiative": "主动探索",
+                "group_message": "群聊消息",
+                "message": "私聊消息",
+                "timer": "定时唤醒",
+                "awaiting_reply": "等待回复",
+                "routine": "作息节奏",
+                "vital_threshold": "精力阈值",
+                "l4_wake": "L4 唤醒",
+                "self_iteration": "自我审查",
+                "nurture_energy": "鸡腿投喂",
+                "task_momentum": "任务惯性",
+                "task_reminder": "任务提醒",
+                "birth": "出生事件",
+                "project_created": "项目新建",
+            }
             session_wake_map: dict[str, int | None] = {}
             try:
                 import sqlite3 as _sqlite3
@@ -771,9 +788,19 @@ class MonitorConsoleWorkflow:
                 source_label = _source_labels.get(row[1], row[1])
                 # 解析 session 对应的 wake_id(session.started_at 最近匹配)
                 wake_id = _find_wake_id(started_ts_val) if started_ts_val else None
+                # 解析 session 中文名: title 优先,否则 session.id 反解 wake type 中文
+                import re as _re2
+                _sid_str = str(sid_val or "")
+                _m2 = _re2.match(r"tx_([a-z_]+?)_\d{4}_\d{4}_[a-f0-9]+$", _sid_str)
+                if _m2:
+                    _default_name = _wake_type_labels.get(_m2.group(1), _m2.group(1))
+                else:
+                    _src_short = _source_labels.get(row[1], str(row[1])[:4])
+                    _default_name = _src_short
                 session_item = {
                     "session_id": sid_val,
                     "wake_id": wake_id,
+                    "name": (row[7] if len(row) > 7 else "") or _default_name,
                     "source": row[1],
                     "started_at": row[2],
                     "ended_at": ended_ts_val,
@@ -913,42 +940,12 @@ class MonitorConsoleWorkflow:
                 items.sort(key=lambda x: x.get("fire_at", ""))
 
                 # 把当天的已完成 session 追加到 items
-                _wake_type_labels = {
-                    "initiative": "主动探索",
-                    "group_message": "群聊消息",
-                    "message": "私聊消息",
-                    "timer": "定时唤醒",
-                    "awaiting_reply": "等待回复",
-                    "routine": "作息节奏",
-                    "vital_threshold": "精力阈值",
-                    "l4_wake": "L4 唤醒",
-                    "self_iteration": "自我审查",
-                    "nurture_energy": "鸡腿投喂",
-                    "task_momentum": "任务惯性",
-                    "task_reminder": "任务提醒",
-                    "birth": "出生事件",
-                    "project_created": "项目新建",
-                }
-                import re as _re
+                # session.name + session.wake_id 已在构造 session_item 时算好,直接用
                 for sess in sessions_by_day.pop(day_str, []):
-                    # 默认名 = 该 session 第一个事件的 wakeup type（从 session.id 解析）
-                    # pattern: tx_<type>_<MMDD>_<HHMM>_<hex>
-                    default_name = sess.get("session_id") or ""
-                    m = _re.match(r"tx_([a-z_]+?)_\d{4}_\d{4}_[a-f0-9]+$", str(default_name))
-                    if m:
-                        wt = m.group(1)
-                        default_name = _wake_type_labels.get(wt, wt)
-                    else:
-                        # fallback:source 缩写
-                        src_short = {"l4_wake": "唤醒", "initiative": "探索",
-                                     "timer": "定时", "message": "回复",
-                                     "group_message": "群聊"}.get(sess["source"], sess["source"][:4])
-                        default_name = src_short
-                    display_name = sess.get("title") or default_name
                     items.append({
                         "id": f"session:{sess['session_id']}",
                         "kind": "session",
-                        "name": display_name,
+                        "name": sess.get("name") or sess["session_id"],
                         "time": sess["ended_at_display"],
                         "fire_at": sess.get("ended_at_iso", ""),
                         "consumed": True,
