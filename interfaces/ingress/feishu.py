@@ -121,6 +121,9 @@ class FeishuAdapter(IngressAdapter):
         # 群消息 buffer（30s 合并窗口 + per-instance offset）。
         # lazy 创建:第一次 on_message 注册 handler 时初始化;非群消息不走 buffer。
         self._group_buffer = None
+        # tenant_access_token 缓存（reaction API 用）；5 分钟内可复用。
+        self._token_cache: tuple[str, float] | None = None
+        self._token_ttl = 1500.0  # 25 分钟（飞书默认 2 小时,留余量）
 
     # -- IngressAdapter impl -------------------------------------------------
 
@@ -253,6 +256,87 @@ class FeishuAdapter(IngressAdapter):
             return await asyncio.to_thread(_do_send)
         except Exception as exc:
             logger.warning("Feishu send error: %s", exc)
+            return False
+
+    # ── Reaction API(三态收条:👀 收到 → ⚙️ 思考中 → 发送后撤回) ──
+    # 设计动机:用户反馈循环 —— 真人发消息后能即时感知"被收到 / 在处理",
+    # 而不是等几十秒后才看到 bot 出声。类似 Hermes / Slack 收条机制。
+
+    def _get_token(self) -> str:
+        """获取 tenant_access_token(带 25 分钟缓存)。"""
+        import time as _time
+        now = _time.time()
+        if self._token_cache and (now - self._token_cache[1]) < self._token_ttl:
+            return self._token_cache[0]
+        try:
+            import httpx
+            with httpx.Client(timeout=5.0) as c:
+                tr = c.post(
+                    f"{self._domain}/open-apis/auth/v3/tenant_access_token/internal",
+                    json={"app_id": self._app_id, "app_secret": self._app_secret},
+                )
+                token = tr.json().get("tenant_access_token", "")
+                if token:
+                    self._token_cache = (token, now)
+                    return token
+        except Exception as exc:
+            logger.debug("_get_token failed: %s", exc)
+        return ""
+
+    async def add_reaction(self, msg_id: str, emoji: str) -> str:
+        """给消息加 emoji 表情回应。返 reaction_id(用于后续 remove),失败返 ""。
+
+        emoji 用飞书 emoji_type 字符串,如 "EYES"(👀) / "SETTINGS"(⚙️) / "THUMBSUP"(👍)。
+        完整 list: https://open.feishu.cn/document/ukTMukTMukTM/uAjNyYjL4YTMxkDOyYjN
+        """
+        if not msg_id:
+            return ""
+        try:
+            import httpx
+            import json as _json
+            token = self._get_token()
+            if not token:
+                return ""
+
+            def _do():
+                with httpx.Client(timeout=5.0) as c:
+                    r = c.post(
+                        f"{self._domain}/open-apis/im/v1/messages/{msg_id}/reactions",
+                        headers={"Authorization": f"Bearer {token}",
+                                 "Content-Type": "application/json"},
+                        data=_json.dumps({"reaction_type": {"emoji_type": emoji}}),
+                    )
+                    data = r.json() or {}
+                    if data.get("code") == 0:
+                        return (data.get("data") or {}).get("reaction_id", "")
+                    logger.debug("add_reaction failed: %s", data)
+                    return ""
+            return await asyncio.to_thread(_do)
+        except Exception as exc:
+            logger.debug("add_reaction error: %s", exc)
+            return ""
+
+    async def remove_reaction(self, msg_id: str, reaction_id: str) -> bool:
+        """删除一个 reaction(基于 reaction_id)。"""
+        if not msg_id or not reaction_id:
+            return False
+        try:
+            import httpx
+            token = self._get_token()
+            if not token:
+                return False
+
+            def _do():
+                with httpx.Client(timeout=5.0) as c:
+                    r = c.delete(
+                        f"{self._domain}/open-apis/im/v1/messages/{msg_id}/reactions/{reaction_id}",
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                    data = r.json() or {}
+                    return data.get("code") == 0
+            return await asyncio.to_thread(_do)
+        except Exception as exc:
+            logger.debug("remove_reaction error: %s", exc)
             return False
 
     def on_message(self, handler: MessageHandler) -> None:

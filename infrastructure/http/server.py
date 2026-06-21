@@ -189,6 +189,14 @@ async def run_instance_gateway(instance_id: str) -> None:
         )
         await adapter.start()
         started_adapters.append(adapter)
+        # 三态收条:把本进程的 adapter 注册到 reaction_state,
+        # 这样 express_to_human 发送完不需要拿 adapter 引用也能撤 ⚙️
+        if hasattr(adapter, "add_reaction"):
+            try:
+                from application.ingress.reaction_state import register_adapter
+                register_adapter(adapter)
+            except Exception:
+                pass
         logger.info(
             "Instance %s adapter started (platform=%s, identity=%s)",
             instance_id[:8],

@@ -115,3 +115,26 @@ def reset_current_context_token(token) -> None:
         _context_token.reset(token)
     except Exception:
         pass
+
+
+# 当前 wake 对应的"入站原消息 msg_id"(三态收条用)
+# handler 入站 set；express_to_human 发送成功后读它 -> clear_on_reply 撤掉 ⚙️
+# wake 结束(没回任何消息)时也该清掉残留 ⚙️ —— 由 wake_inner finally 调 reset
+_reply_msg_id: ContextVar[str] = ContextVar("digital_life_reply_msg_id", default="")
+
+
+def set_current_reply_msg_id(msg_id: str) -> object:
+    """记录当前 wake 对应的入站消息 id（三态收条:👀/⚙️ 的 key）。返回 token。"""
+    return _reply_msg_id.set(msg_id or "")
+
+
+def get_current_reply_msg_id() -> str:
+    """返回当前 wake 的入站原消息 id(用于收条表情管理)。空表示无关联消息。"""
+    return _reply_msg_id.get()
+
+
+def reset_current_reply_msg_id(token) -> None:
+    try:
+        _reply_msg_id.reset(token)
+    except Exception:
+        pass

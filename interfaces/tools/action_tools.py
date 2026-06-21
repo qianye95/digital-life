@@ -799,6 +799,12 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
 
     # 发送成功 → 记录到对话日志 + 排队"等回复"事件
     if sent:
+        # 三态收条-态 3: 发送成功 → 撤掉 ⚙️(消息本身即是回应)
+        try:
+            from application.ingress.reaction_state import clear_current_reply_sync
+            clear_current_reply_sync()
+        except Exception as _ce:
+            logger.debug("clear_current_reply ⚙️ failed: %s", _ce)
         try:
             from domain.lifecycle.conversation_log import log_conversation
             parts = channel.split(":")
