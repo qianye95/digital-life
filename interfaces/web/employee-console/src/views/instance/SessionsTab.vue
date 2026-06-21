@@ -41,6 +41,16 @@
           </div>
         </div>
         <div v-if="!wakes.length" class="dev-placeholder"><span class="mono">暂无唤醒记录</span></div>
+
+        <!-- 分页:加载更多 -->
+        <div v-if="hasMore" style="text-align: center; padding: 8px 0;">
+          <el-button size="small" plain :loading="loadingMore" @click="loadMore">
+            加载更多 · 已加载 {{ wakes.length }} / {{ totalWakes }}
+          </el-button>
+        </div>
+        <div v-else-if="wakes.length" class="brand-sub" style="font-size: 11px; color: var(--text-muted); text-align: center; padding: 8px 0;">
+          共 {{ totalWakes }} 条已全部加载
+        </div>
       </aside>
 
       <!-- 右：单 wake 详情 -->
@@ -178,16 +188,12 @@
         </template>
       </main>
     </div>
-
-    <p class="brand-sub" style="margin-top: 16px;">
-      <RouterLink :to="`/legacy/employee/${iid}/`">旧版会话视图 →</RouterLink>
-    </p>
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
-import { useRoute, RouterLink } from 'vue-router'
+import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { Refresh, ArrowDown, ArrowUp, View, Document } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { instanceApi } from '@/api/client'
@@ -198,6 +204,7 @@ import {
 import { renderMarkdown } from '@/composables/useMarkdown'
 
 const route = useRoute()
+const router = useRouter()
 const iid = computed(() => String(route.params.iid || ''))
 
 const wakes = ref([])
@@ -210,6 +217,12 @@ const expandedTurns = reactive({})  // {turnId: bool}
 const callInputs = reactive({})      // {callKey: messages[]}
 const callInputModels = reactive({})
 const callLoading = reactive({})
+
+// 分页
+const PAGE_SIZE = 30
+const totalWakes = ref(0)
+const hasMore = computed(() => wakes.value.length < totalWakes.value)
+const loadingMore = ref(false)
 
 // 帮助方法：trigger / chat 从 meta_json 提取
 function metaTrigger(w) {
@@ -235,13 +248,35 @@ function fmtRelativeEpoch(ep) {
 }
 
 async function load() {
-  const d = await instanceApi(iid.value).wakeSnapshot()
+  const d = await instanceApi(iid.value).wakeSnapshot(PAGE_SIZE, 0)
   if (!d.error) {
     wakes.value = Array.isArray(d.wakes) ? d.wakes : []
-    if (wakes.value.length && !selectedId.value) {
-      await selectWake(wakes.value[0].id)
+    totalWakes.value = Number(d.total) || wakes.value.length
+    // 自动选:route query.sid 优先,其次第一个
+    const qSid = route.query.wake_id || route.query.sid
+    const initial = (qSid && wakes.value.find(w => String(w.id) === String(qSid)))
+      || wakes.value[0]
+    if (initial) {
+      await selectWake(initial.id)
     }
   }
+}
+
+async function loadMore() {
+  if (!hasMore.value || loadingMore.value) return
+  loadingMore.value = true
+  try {
+    const d = await instanceApi(iid.value).wakeSnapshot(PAGE_SIZE, wakes.value.length)
+    if (!d.error) {
+      const more = Array.isArray(d.wakes) ? d.wakes : []
+      // 去重(理论上 offset 模式不会重复,防御 merge)
+      const seen = new Set(wakes.value.map(w => w.id))
+      for (const w of more) {
+        if (!seen.has(w.id)) wakes.value.push(w)
+      }
+      totalWakes.value = Number(d.total) || totalWakes.value
+    }
+  } finally { loadingMore.value = false }
 }
 
 async function selectWake(wakeId) {

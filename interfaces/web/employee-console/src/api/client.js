@@ -137,7 +137,7 @@ export const instanceApi = (iid) => ({
   contacts:      () => api.get(`/api/employee/${iid}/contacts`),
   memories:      (name) => api.get(`/api/employee/${iid}/memories/${name}`),
   associations:  () => api.get(`/api/employee/${iid}/associations`),
-  wakeSnapshot:  () => api.get(`/api/employee/${iid}/wakes`, { limit: 30 }),
+  wakeSnapshot:  (limit, offset = 0) => api.get(`/api/employee/${iid}/wakes`, { limit: limit || 30, offset }),
   wakeDetail:    (wakeId) => api.get(`/api/employee/${iid}/wakes/${wakeId}`),
   wakeCallInput: (wakeId, callSeq) => api.get(`/api/employee/${iid}/wakes/${wakeId}/input/${callSeq}`),
   budget:        () => api.get(`/api/employee/${iid}/budget`),

@@ -412,9 +412,11 @@ function kindLabel(k) {
 
 function goSession(sid) {
   detailVisible.value = false
-  router.push(`/instance/${iid.value}/sessions`).then(() => {
-    // sessions 页面会自己 mount 后读 sid query 进入详情（保留兼容性）
-  })
+  if (sid) {
+    router.push({ path: `/instance/${iid.value}/sessions`, query: { wake_id: sid } })
+  } else {
+    router.push(`/instance/${iid.value}/sessions`)
+  }
 }
 
 let hourTimer = null

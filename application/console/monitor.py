@@ -871,10 +871,38 @@ class MonitorConsoleWorkflow:
                 items.sort(key=lambda x: x.get("fire_at", ""))
 
                 # 把当天的已完成 session 追加到 items
+                _wake_type_labels = {
+                    "initiative": "主动探索",
+                    "group_message": "群聊消息",
+                    "message": "私聊消息",
+                    "timer": "定时唤醒",
+                    "awaiting_reply": "等待回复",
+                    "routine": "作息节奏",
+                    "vital_threshold": "精力阈值",
+                    "l4_wake": "L4 唤醒",
+                    "self_iteration": "自我审查",
+                    "nurture_energy": "鸡腿投喂",
+                    "task_momentum": "任务惯性",
+                    "task_reminder": "任务提醒",
+                    "birth": "出生事件",
+                    "project_created": "项目新建",
+                }
+                import re as _re
                 for sess in sessions_by_day.pop(day_str, []):
-                    # 构造一个可读的短名称：source 缩写 + 时间
-                    src_short = {"l4_wake": "唤醒", "initiative": "探索", "timer": "定时", "message": "回复", "group_message": "群聊"}.get(sess["source"], sess["source"][:4])
-                    display_name = sess.get("title") or f"{src_short} · {sess['session_id'][-12:]}"
+                    # 默认名 = 该 session 第一个事件的 wakeup type（从 session.id 解析）
+                    # pattern: tx_<type>_<MMDD>_<HHMM>_<hex>
+                    default_name = sess.get("session_id") or ""
+                    m = _re.match(r"tx_([a-z_]+?)_\d{4}_\d{4}_[a-f0-9]+$", str(default_name))
+                    if m:
+                        wt = m.group(1)
+                        default_name = _wake_type_labels.get(wt, wt)
+                    else:
+                        # fallback:source 缩写
+                        src_short = {"l4_wake": "唤醒", "initiative": "探索",
+                                     "timer": "定时", "message": "回复",
+                                     "group_message": "群聊"}.get(sess["source"], sess["source"][:4])
+                        default_name = src_short
+                    display_name = sess.get("title") or default_name
                     items.append({
                         "id": f"session:{sess['session_id']}",
                         "kind": "session",
