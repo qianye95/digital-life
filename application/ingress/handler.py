@@ -279,6 +279,7 @@ def _route_to_life(
         msg_id=msg_id,
         app_id=app_id,
         platform=platform,
+        merged_texts=getattr(msg, "merged_texts", None) or None,
     )
 
     try:
@@ -725,6 +726,7 @@ def _emit_l4_human_event(
     msg_id: str = "",
     app_id: str = "",
     platform: str = "feishu",
+    merged_texts: list = None,
 ) -> int:
     """发出人类消息事件——消息入口的最后一步。
     流程：
@@ -770,6 +772,17 @@ def _emit_l4_human_event(
                     sender_position = f"（{pos_info[0]} / {pos_info[1]}）"
             except Exception:
                 pass
+            # batch 历史渲染（如果 adapter 群消息 buffer 合并了多条群消息，
+            # 见 interfaces/ingress/group_buffer.py，merged_texts 是 [{sender, text}]）
+            _mt = merged_texts or []
+            _mt_block = ""
+            if _mt:
+                lines = ["[近 30 秒合并群消息]"]
+                for item in _mt:
+                    s = (item.get("sender") if isinstance(item, dict) else "") or "?"
+                    t = (item.get("text") if isinstance(item, dict) else "") or ""
+                    lines.append(f"  {s}：{t}")
+                _mt_block = "\n".join(lines)
             event_id = emit_event(
                 kind="group_message",
                 payload={
@@ -787,6 +800,9 @@ def _emit_l4_human_event(
                     "deltas": deltas,
                     "at": now_iso(),
                     "gateway_handled": True,
+                    # batch 历史（adapter 30s + offset buffer 合并出来的,可能空）
+                    "_merged_texts": _mt,
+                    "_merged_texts_block": _mt_block,
                 },
                 channel=f"gateway:{pf}:group",
             )

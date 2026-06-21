@@ -118,6 +118,9 @@ class FeishuAdapter(IngressAdapter):
         self._http: lark.Client | None = None
         self._handlers: list[MessageHandler] = []
         self._bot_name: str = ""
+        # 群消息 buffer（30s 合并窗口 + per-instance offset）。
+        # lazy 创建:第一次 on_message 注册 handler 时初始化;非群消息不走 buffer。
+        self._group_buffer = None
 
     # -- IngressAdapter impl -------------------------------------------------
 
@@ -145,6 +148,12 @@ class FeishuAdapter(IngressAdapter):
 
     async def stop(self) -> None:
         logger.info("FeishuAdapter stopping...")
+        # 清掉 group_buffer 里残留的最后一批,避免消息丢失
+        if self._group_buffer is not None:
+            try:
+                await self._group_buffer.stop()
+            except Exception as exc:
+                logger.warning("group_buffer stop failed: %s", exc)
 
     def _fetch_bot_name(self) -> str:
         try:
@@ -249,6 +258,26 @@ class FeishuAdapter(IngressAdapter):
     def on_message(self, handler: MessageHandler) -> None:
         self._handlers.append(handler)
 
+    def _ensure_group_buffer(self, loop: asyncio.AbstractEventLoop) -> None:
+        """懒创建群消息 buffer。绑定 WS 子线程 loop,把所有 handler 包成一个 callback
+        给 buffer（flush 时调一次 → 串行给所有 handler）。
+
+        offset 通过 app.yaml.group_chat.batch_offset_s 配置（fallback 默认 0）。
+        """
+        if self._group_buffer is not None:
+            return
+        from interfaces.ingress.group_buffer import GroupMessageBuffer
+
+        async def _dispatch_all(msg):
+            for h in self._handlers:
+                try:
+                    await h(msg)
+                except Exception as exc:
+                    logger.exception("group_buffer dispatch handler error: %s", exc)
+
+        self._group_buffer = GroupMessageBuffer(_dispatch_all)
+        self._group_buffer.set_loop(loop)
+
     # -- Internals -----------------------------------------------------------
 
     def _build_http_client(self) -> lark.Client:
@@ -291,12 +320,25 @@ class FeishuAdapter(IngressAdapter):
                     self._app_id[:12],
                 )
                 normalized = self._normalize(event)
-                for handler in self._handlers:
-                    try:
-                        loop = asyncio.get_running_loop()
-                        loop.call_soon(lambda h=handler, n=normalized: asyncio.create_task(h(n)))
-                    except RuntimeError:
-                        asyncio.run(handler(normalized))
+                # 群消息走 30s 合并窗口 + per-instance offset（防多 bot 同步竞争 / 群消息交错）。
+                # 私聊立即下发（用户等不起）。
+                # 设计:
+                #   - 群消息入 self._group_buffer (30s flush + offset);flush 时聚成单条 NormalizedMessage
+                #     (只带 merged_texts 列表),一次调 handler —— 取代事件层 group_message 的 30s debounce
+                #   - 这是消息系统问题,事件层只调度不再合并
+                if getattr(normalized, "is_group", False):
+                    loop = asyncio.get_running_loop()
+                    self._ensure_group_buffer(loop)
+                    self._group_buffer.add(normalized)
+                else:
+                    for handler in self._handlers:
+                        try:
+                            loop = asyncio.get_running_loop()
+                            loop.call_soon(
+                                lambda h=handler, n=normalized: asyncio.create_task(h(n))
+                            )
+                        except RuntimeError:
+                            asyncio.run(handler(normalized))
             except Exception as exc:
                 logger.exception("Feishu _on_message error: %s", exc)
 

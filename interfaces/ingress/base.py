@@ -48,6 +48,10 @@ class NormalizedMessage:
     # 平台可能需要的上下文 token（如 ClawBot 的 context_token），send 时回传。
     # 对飞书/钉钉等留空；上层不直接读这个字段，由 adapter.send 自行使用。
     context_token: str = ""
+    # 群消息 batch 合并历史:adapter 30s 窗口 + per-instance offset 吐 batch 时,
+    # 把窗口里多条群消息以 [{sender, text}, ...] 形式挂这里。单条消息此字段为空 list。
+    # 见 interfaces/ingress/group_buffer.py。handler 透传到事件 payload 供模型看到 batch 上下文。
+    merged_texts: list = field(default_factory=list)
     raw: Any = None
 
 

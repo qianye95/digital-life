@@ -138,6 +138,9 @@ group_chat:
   attention_keywords:
 {keywords_yaml}
   owner_names: []
+  # 群消息 30s batch flush 后再延迟 X 秒，让多实例自然错峰
+  # （zero=0 / alpha=15 等，不配置默认 0）。详见 interfaces/ingress/group_buffer.py
+  batch_offset_s: 0
 
 # ── 已注册技能 ──
 skills:

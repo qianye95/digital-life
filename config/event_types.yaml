@@ -80,7 +80,10 @@ event_types:
       mention_names: string?
       mention_map: string?
     description: 群聊中有新消息时触发
-    debounce_window_s: [20, 40]   # 20~40 秒随机窗口，多实例自然错峰避免并行 wake
+    # debounce 关闭:消息合并已在 ingress adapter 内完成（见 interfaces/ingress/group_buffer.py）
+    # —— adapter 一次 flush 一条 NormalizedMessage(带 merged_texts 列表),事件层不再合并。
+    # 多实例错峰由 adapter 的 per-instance batch_offset_s 保证。
+    debounce_window_s: 0
     merge_policy: accumulate
     consumption_policy: on_trigger
     wake_prompt: |
