@@ -17,6 +17,7 @@
         <el-radio-button label="all">全部 ({{ allCount }})</el-radio-button>
         <el-radio-button label="active">进行中 ({{ activeCount }})</el-radio-button>
         <el-radio-button label="done">已完成 ({{ doneCount }})</el-radio-button>
+        <el-radio-button label="cancelled">已取消 ({{ cancelledCount }})</el-radio-button>
       </el-radio-group>
     </div>
 
@@ -174,8 +175,10 @@ const editDlg = reactive({
 })
 
 const allCount = computed(() => todos.value.length)
+// 进行中 = 仍在动的（不含 done / cancelled 终态）
 const activeCount = computed(() => todos.value.filter(t => !['done', 'completed', 'cancelled'].includes(t.status)).length)
 const doneCount = computed(() => todos.value.filter(t => ['done', 'completed'].includes(t.status)).length)
+const cancelledCount = computed(() => todos.value.filter(t => t.status === 'cancelled').length)
 
 const filteredTodos = computed(() => {
   if (filterStatus.value === 'active') {
@@ -183,6 +186,9 @@ const filteredTodos = computed(() => {
   }
   if (filterStatus.value === 'done') {
     return todos.value.filter(t => ['done', 'completed'].includes(t.status))
+  }
+  if (filterStatus.value === 'cancelled') {
+    return todos.value.filter(t => t.status === 'cancelled')
   }
   return todos.value
 })
