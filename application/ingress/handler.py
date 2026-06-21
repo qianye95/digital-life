@@ -200,6 +200,7 @@ async def handle_message(*, adapter: IngressAdapter, msg: NormalizedMessage) -> 
                 platform=msg.platform,
                 ctx_token=getattr(msg, "context_token", "") or "",
                 merged_texts=getattr(msg, "merged_texts", None) or None,
+                adapter=adapter,
             )
         finally:
             reset_current_instance_id(config_token)
@@ -238,6 +239,7 @@ def _route_to_life(
     platform: str = "feishu",
     ctx_token: str = "",
     merged_texts: list = None,
+    adapter=None,
 ) -> None:
     """消息路由核心——发出事件并根据 affair 状态决定唤醒策略。
 
