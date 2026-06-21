@@ -223,12 +223,15 @@ function splitByChapters(content) {
 }
 
 async function loadMemory(kind) {
-  // 优先用 in-memory cache(切回来用,不动网络),网络拉了就放进去
-  if (segCache.value[kind]) {
+  // cache hit:segCache[kind] 是 array(可能空 []=空内容文件)→ 直接复用,不延迟
+  // ⚠️ 用 kind in segCache.value 判断 key 是否存在(空数组也算缓存),
+  //    不能用 truthy([]是 truthy 但 'foo' in 对象判断更准)
+  if (kind in segCache.value) {
     segments.value = segCache.value[kind]
     return
   }
   loading.value = true
+  // cache miss:先清空,等网络回写
   segments.value = []
   try {
     const d = await instanceApi(iid.value).memories(kind)
@@ -236,11 +239,11 @@ async function loadMemory(kind) {
       currentContent.value = String(d.content || '')
       const segs = splitByChapters(currentContent.value)
       segments.value = segs
-      segCache.value[kind] = segs  // 缓存
+      segCache.value[kind] = segs  // 缓存(可能空 [])
       counts.value = { ...counts.value, [kind]: segs.length }
     } else {
       counts.value = { ...counts.value, [kind]: 0 }
-      segCache.value[kind] = []  // 缓存空,避免下次切回重新拉
+      segCache.value[kind] = []  // 缓存空,下次切回不再走网络
     }
     loaded.value[kind] = true
   } finally {
@@ -288,7 +291,11 @@ watch(active, (v) => {
   if (v === 'assoc') {
     if (!loaded.value.assoc) loadAssoc()
   } else {
-    if (!loaded.value[v]) loadMemory(v)
+    // 总是调 loadMemory:
+    // - cache hit → segments=cache,瞬切
+    // - cache miss → 走网络拉 + 拉完写 cache
+    // 不能用 `if (!loaded.value[v])` 跳过 —— 切回时 segments 还是上一个的,内容错配
+    loadMemory(v)
   }
 })
 
