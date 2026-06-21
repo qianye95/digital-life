@@ -237,6 +237,7 @@ def _route_to_life(
     app_id: str = "",
     platform: str = "feishu",
     ctx_token: str = "",
+    merged_texts: list = None,
 ) -> None:
     """消息路由核心——发出事件并根据 affair 状态决定唤醒策略。
 
