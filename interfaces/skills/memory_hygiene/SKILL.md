@@ -172,6 +172,81 @@ CONTEXT.md 仅作为「下一个 rest 的交接清单」存在。每晚必清。
 - 只保留最近 24 小时的清单
 - 文件总长 < 2000 字
 
+### 7.5 实体索引整理(核心 step,价值保证)
+
+> **实体是联想唯一的入口**。如果 entity_index 噪音太多,模型 wake 时联想会被水量淹没,真正该想起的远期记忆反而召不出。
+>
+> **存在的标准只有一个:有联想价值** —— 反复出现,或足够重要(单次也该挂)。
+
+#### 什么是真实体 vs 噪音
+
+|✅ 真实体|❌ 不是实体|
+|---|---|
+|反复出现的人(张浩普 / 苏迪)|临时任务 ID(hash / 编号)|
+|稳定可记的概念(涨停次日策略 / 论断3)|代码文件名(action_tools.py / sense_tools.py)|
+|反复发生的事件模式(止损失败 / 集合竞价首板失败)|动词 / 没上下文的词("修复" / "复查")|
+|外部服务/工具(akshare / 飞书 / sina)|模块名表 / 表名(messages.db / events 表)|
+|反复触到的股票(电投产融 / 华能蒙电)|股票代码(000539 这种,模型用人话交流才联想)|
+|稳定的项目角色(7月策略 / 风控)|子代动作名(sense_schedule / wake_brief)|
+
+#### 4 件整理动作
+
+#### a. 删噪音实体(P0，砍 ≥ 30%)
+
+删除标准(完整三条都满足):
+1. `mem_count == 1` (只挂一条 memory)
+2. `type == '?' or ''` (无类型)
+3. 不在 `aliases` 列表(不是别名)
+4. **名字不在任何 active project 的 .yaml 关键词 / persona 关键词里**(防止误删重要但只单 mem 实体)
+
+工具: `terminal` 直接 edit entity_index.json (备份原版),或运行:
+```python
+# 一行实现 P0 砍 noise
+load_entity_index() → for n,e in ents.items(): if 噪音判断: del ents[n] → save
+```
+
+完成定义: entity_index 总数减少 ≥ 30%,理想从 616 → ~ 200。
+
+**反模式**: ❌ 一夜删光全部单 mem entity —— 一次砍最多 1/3,剩下的下次再评估
+
+#### b. 合并别名(P1)
+
+找出同一概念不同写法:
+- `论断4` / `论断 4` / `论断四` / `论断4修正执行缺陷` — 同一实体几个写法
+- `电投产融` / `600025` (如果有) — 同一公司代码与名
+
+工具有 2:
+- 看完 candidates 后用 `merge_entities(primary='<strongest>', alias='<weak>')` (在 entity_curation skill 或 entity_index.py)
+- 或者 terminal 改 json
+
+判断标准:
+- 名字仅标点 / 大小写 / 数字写法不同
+- 或明肖是同一概念(如 "论断4修正" 显然属于 "论断4" 家族)
+
+完成定义: 同一 hot entity 没有 ≥ 3 个写法变体分散在外。merge 后别名进 aliases,memories 合并去重。
+
+#### c. 清 dangling memory 引用(P0)
+
+合并 LESSONS / 删 INSIGHTS 之后,entity_index.memories 里的 `memory_id` 可能指向已删的 memory。
+
+逐 entity memories_list 查:
+- 如果 `memory_type=lesson` 但 memory_id 对应的 ts 在 LESSONS.md 里 grep 不到 → dangling
+- 删该 memory entry(从 entity memories list 移除)
+
+完成定义: 减完或 0 个 dangling memory_id ref(asttest unload 通过 orphan memory_id count ≈ 0)
+
+#### d. 关键 lesson 补回 entity (P1,但有严门槛)
+
+对 LESNSONS.md 里某些**高度可联想的 lessons** 写入时没标 entities(或标错):
+- 该 lesson 描述一个事件模式(如"涨停 < 10 时停止")
+- 当前没挂在对应 entity("集合竞价" / "涨停阈值")下
+
+**门槛**: 只补**单日内 ≤ 5 条**(避免一次重写大量),且每条用 `terminal` 用 grep 验证"该 lesson 描述的核心概念确实可省这次想抽的 entity"。
+
+工具: `update_entity_index(entity, snippet, memory_type='lesson', memory_id='lesson:ts')`
+
+完成定义: 验证 5 条很有联想价值的 lessons 已挂合理 entity。
+
 ### 8. 写 [整理] audit trail(必做)
 
 整理全做完,在 CONSCIOUSNESS.md 顶部 record_thought 一行(用 `record_thought(kind=status)`):
@@ -183,6 +258,7 @@ CONTEXT.md 仅作为「下一个 rest 的交接清单」存在。每晚必清。
   - 删 INSIGHTS 5 个 block + 升级 2 个 idea 为 lesson
   - SCRATCHPAD 4 段 → 2 段
   - CONTEXT 清 6/18 / 6/19 段
+  - entity_index 砍 noise 329→~200, 合别名 8 对, 清 dangling 12 条, 补 entity 5 条
 下次醒来应在「## 记忆体检」段看到 ✓ 记忆状态健康。
 ```
 
@@ -224,6 +300,8 @@ CONTEXT.md 仅作为「下一个 rest 的交接清单」存在。每晚必清。
 5. **「在 21:00 evening_review 也跑」**: 复盘和整理不是一回事, 不要在白天跑本 skill
 6. **「INSIGHTS → LESSONS 不验证就迁」**: 升级必须先有 add_lesson 真写了, 才能删 INSIGHTS
 7. **「RULES 主动删过期」**: 只标 ⚠️, 删要让人 / 下次手动 wake 确认
+8. **「为每条 lesson 都补 entity」**: 实体不是标签, 联想价值才是唯一标准。一条 lesson 写"今晚复盘做了什么"不需要挂 "复盘" 实体 —— 单 mem 弱实体就是噪音来源。**少而准的实体索引 > 多而糊**
+9. **「一夜大清 entity_index」**: 实体整理一次最多砍 1/3, 剩下的下次再评估; merge 别名一次 ≤ 5 对
 
 ## 失败兜底
 
