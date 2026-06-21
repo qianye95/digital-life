@@ -1168,13 +1168,31 @@ def _handle_update_scratchpad(args: Dict[str, Any], **_) -> str:
     if mode not in ("append", "replace"):
         return registry.tool_error("mode must be 'append' or 'replace'")
 
+    # 写入纪律提示:SCRATCHPAD 同时 task 段超 2 应提示收敛
+    # (不阻止写入, 返警告让模型自觉)
+    warning = ""
+    try:
+        from pathlib import Path as _P
+        from domain.memory.memory.consciousness.runtime import _get_runtime_home
+        sp_path = _get_runtime_home() / "memories" / "SCRATCHPAD.md"
+        if sp_path.exists():
+            cur = sp_path.read_text(encoding="utf-8")
+            cur_tasks = [L for L in cur.split("\n") if L.startswith("## ")]
+            if len(cur_tasks) >= 3:
+                warning = (
+                    f" ⚠ 当前草稿已有 {len(cur_tasks)} 个并行任务段(>2),"
+                    "建议先调 memory_hygiene 收敛,或主动把旧任务 done。"
+                )
+    except Exception:
+        pass
+
     snap = vitals.consume_energy(ENERGY_COST_PER_CALL)
     _scratchpad(text, mode=mode)
 
     return _j({
         "ok": True,
         "mode": mode,
-        "note": f"草稿本已更新（{mode}）",
+        "note": f"草稿本已更新（{mode}）{warning}",
         "energy": round(snap.energy, 1),
     })
 
@@ -1627,9 +1645,31 @@ def _handle_add_lesson(args: Dict[str, Any], **_) -> str:
     else:
         _add_lesson(text, section=section)
 
+    # 写入纪律提示:同 section 同主题超阈 → 提示合并而非新写
+    warning = ""
+    try:
+        from pathlib import Path as _P
+        from domain.memory.memory.consciousness.runtime import _get_runtime_home
+        les_path = _get_runtime_home() / "memories" / "LESSONS.md"
+        if les_path.exists():
+            text_full = les_path.read_text(encoding="utf-8")
+            # 同 section 条数 (粗略)
+            section_titles = {
+                "trading": "交易策略", "system": "代码工程", "tool": "工具使用",
+                "workflow": "工作方式", "rule": "沟通规则", "other": "其他",
+            }
+            st = section_titles.get(section, "其他")
+            if f"## {st}" in text_full:
+                sec_text = text_full.split(f"## {st}", 1)[1].split("## ", 1)[0]
+                sec_count = sec_text.count("---\n[")
+                if sec_count >= 25:
+                    warning = f" ⚠ 当前 ## {st} 已 {sec_count} 条,建议调 memory_hygiene skill 合并同主题"
+    except Exception:
+        pass
+
     return _j({
         "ok": True,
-        "note": "经验教训已记录。",
+        "note": "经验教训已记录。" + warning,
         "energy": round(snap.energy, 1),
     })
 

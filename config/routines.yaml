@@ -58,9 +58,11 @@ routines:
   name: 晚间复盘
   priority: 5
   prompt_template: |
-    🌙 坐下来，认真回望今天。
+    🌙 坐下来,认真回望今天。
 
-    调用 `skill_view self_review` 按完整复盘方法论走：归集今天的材料 → 五个真问题 → 写明日 jump-in（工作板 + update_context + add_lesson）。
+    ⚠ 先跑 `skill_view memory_hygiene` —— 每天记忆整理纪律,必跑(扫 ⚠ 待清理项,按 skill 流程清完后才完成今天的记忆卫生)。
+
+    然后调 `skill_view self_review` 按完整复盘方法论走:归集今天的材料 → 五个真问题 → 写明日 jump-in(工作板 + update_context + add_lesson)。
   recurrence: daily
   time: '21:00'
 - description: 周度回顾：量化为模式、识别为洞察、决定为行动——每次回顾至少产出一个行为改变

@@ -71,14 +71,146 @@ def _policy_flag(policy: dict, key: str, default: bool = True) -> bool:
     return policy.get(key, default)
 
 
+def _memory_health_snapshot() -> str:
+    """记忆体检面板:扫各文件状态,生成简短摘要 + ⚠️ 异常标记。
+
+    每次 wake 注入到 prompt 顶部,让模型自觉到记忆系统健康度。
+    ~150 token 预算内。
+    """
+    try:
+        from pathlib import Path as _P
+        from domain.memory.memory.consciousness.runtime import _get_runtime_home
+        mem_dir = _get_runtime_home() / "memories"
+        if not mem_dir.exists():
+            return ""
+
+        import time as _time
+        now = _time.time()
+        warn_items = []
+        scan_files = [
+            ("意识流",   "CONSCIOUSNESS.md", 100),
+            ("教训",     "LESSONS.md",       80),
+            ("规则",     "RULES.md",         40),
+            ("草稿",     "SCRATCHPAD.md",    2000),  # chars
+            ("洞察",     "INSIGHTS.md",      30),
+            ("上下文",   "CONTEXT.md",       2000),  # chars
+        ]
+        lines = ["## 记忆体检"]
+        for label, fname, threshold in scan_files:
+            p = mem_dir / fname
+            if not p.exists():
+                continue
+            try:
+                # 读基础指标
+                text = p.read_text(encoding="utf-8")
+                if fname.endswith("SCRATCHPAD.md") or fname.endswith("CONTEXT.md"):
+                    # char-based 阈值
+                    size = len(text)
+                    if size <= threshold:
+                        continue  # 不展示
+                    extra = f"{size} 字"
+                    # SCRATCHPAD 段数(## 标题数,> 2 算多)
+                    if fname == "SCRATCHPAD.md":
+                        seg_count = sum(1 for L in text.split("\n") if L.startswith("## "))
+                        if seg_count > 2:
+                            warn_items.append(f"{label} {seg_count} 个并行任务(建议 ≤2)")
+                        extra += f" · {seg_count} 段"
+                    lines.append(f"  · {label}  {extra}")
+                else:
+                    # 条目计算 --- count
+                    if fname == "CONSCIOUSNESS.md":
+                        # status tag 数(应清理)
+                        status_count = text.count("[status]") + text.count("[trading_wait]") + \
+                                       text.count("[system_wait]") + text.count("[final_status]")
+                        entries = sum(1 for L in text.split("\n") if L.startswith("## "))
+                        extra = f"{entries} 段"
+                        if status_count >= 5:
+                            warn_items.append(f"{label} {status_count} 个状态报告(more_hygiene 该清)")
+                            extra += f" · {status_count} 状态报告"
+                        lines.append(f"  · {label}  {extra}")
+                    elif fname == "LESSONS.md":
+                        sections = sum(1 for L in text.split("\n") if L.startswith("## "))
+                        entries = text.count("---\n[")
+                        warn = ""
+                        if any(k in text for k in ["交易策略", "代码工程", "工具使用"]):
+                            for sec in ["交易策略", "代码工程", "工具使用", "工作方式", "沟通规则", "其他"]:
+                                if f"## {sec}" in text:
+                                    # 数 section 内条数(粗略,--- + [ts])
+                                    sec_text = text.split(f"## {sec}", 1)[1].split("## ", 1)[0] if f"## {sec}" in text else ""
+                                    sec_count = sec_text.count("---\n[")
+                                    if sec_count > threshold / 4:
+                                        warn += f" {sec}={sec_count}"
+                        if warn:
+                            warn_items.append(f"{label}{warn}(其中某 section 超 {threshold // 4} 条)")
+                        lines.append(f"  · {label}  {sections} 节 / {entries} 条{warn}")
+                    elif fname == "RULES.md":
+                        sections = sum(1 for L in text.split("\n") if L.startswith("## "))
+                        if sections > threshold:
+                            warn_items.append(f"规则 {sections} 节(建议 ≤ {threshold})")
+                        lines.append(f"  · {label}  {sections} 节")
+                    elif fname == "INSIGHTS.md":
+                        # kind 分布
+                        idea_cnt = text.count("[idea]")
+                        warn_cnt = text.count("[warning]")
+                        block_cnt = text.count("[block]")
+                        total = idea_cnt + warn_cnt + block_cnt
+                        if total > threshold:
+                            warn_items.append(f"洞察 {total} 条(建议 ≤ {threshold}, 跑 memory_hygiene 清)")
+                        lines.append(f"  · {label}  idea={idea_cnt}/ warning={warn_cnt}/ block={block_cnt}")
+
+                # 文件超过 7 天没动 → 提示 dead
+                try:
+                    mtime = p.stat().st_mtime
+                    age_days = int((now - mtime) / 86400)
+                    if age_days >= 7:
+                        warn_items.append(f"{label} {age_days} 天没动(可能 dead)")
+                except Exception:
+                    pass
+            except Exception:
+                continue
+
+        # 时间戳末次整理
+        try:
+            consol_p = mem_dir / "CONSCIOUSNESS.md"
+            if consol_p.exists():
+                text = consol_p.read_text(encoding="utf-8")
+                # 搜 [整理] YYYY-MM-DD HH:MM
+                import re as _re
+                m = _re.findall(r"\[整理\]\s*(\d{4}-\d{2}-\d{2})", text)
+                if m:
+                    last = m[0]
+                    lines.append(f"  上次 memory_hygiene 跑过: {last}")
+                else:
+                    warn_items.append("还未跑过 memory_hygiene skill(evening_review)")
+        except Exception:
+            pass
+
+        if warn_items:
+            lines.append("  ⚠ 待清理: " + " · ".join(warn_items))
+        else:
+            lines.append("  ✓ 记忆状态健康")
+
+        return "\n".join(lines) if len(lines) > 2 else ""
+    except Exception:
+        return ""
+
+
 def _build_memory_context(reason: str = "", extra: str = "", events_text: str = "", policy: dict | None = None) -> str:
-    """构建记忆上下文 — 近期教训 + 实体触发记忆。
+    """构建记忆上下文 — 记忆体检面板 + 近期教训 + 实体触发记忆。
 
     RULES / CONTEXT / SCRATCHPAD 不再注入，模型按需通过 sense 工具查询。
     CONSCIOUSNESS 由 scheduler._load_prev_session_summary() 以 conversation_history 承载。
     """
     parts = []
     policy = policy or {}
+
+    # ── 记忆体检面板(每次 wake 都加,~150 token 上限) ──
+    try:
+        health = _memory_health_snapshot()
+        if health:
+            parts.append(health)
+    except Exception:
+        pass
 
     # LESSONS.md — 最近 3 条教训，始终注入
     try:
