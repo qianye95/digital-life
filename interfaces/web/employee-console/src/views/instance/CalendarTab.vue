@@ -411,9 +411,13 @@ function kindLabel(k) {
 }
 
 function goSession(sid) {
+  // sid 可能是 string(session_id) — 优先用 wake_id(后端 calendar 解析好了),
+  // 退化场景走 session_id(老 payload)
   detailVisible.value = false
-  if (sid) {
-    router.push({ path: `/instance/${iid.value}/sessions`, query: { wake_id: sid } })
+  const wakeId = (detailEvent.value || {}).wake_id || (detailSession.value || {}).wake_id
+  const targetWake = wakeId || sid
+  if (targetWake) {
+    router.push({ path: `/instance/${iid.value}/sessions`, query: { wake_id: targetWake } })
   } else {
     router.push(`/instance/${iid.value}/sessions`)
   }

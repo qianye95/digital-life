@@ -679,6 +679,43 @@ class MonitorConsoleWorkflow:
             ws_iso = _clock.to_storage_iso(ws)
             we_iso = _clock.to_storage_iso(we)
 
+            # ── 拉 win 内所有 wake (来自 runtime_log.db) 用于 sid→wake_id 时间匹配 ──
+            # session 跟 wake 没 id 关联,只靠 started_at(~0.1s 差)。
+            # 给每个 session 解析出对应的 wake_id;前端 calendar 点击 session 跳转用 wake_id。
+            session_wake_map: dict[str, int | None] = {}
+            try:
+                import sqlite3 as _sqlite3
+                from infrastructure.config import get_project_root, get_app_instance_id
+                _iid = get_app_instance_id() or ""
+                if _iid:
+                    runtime_db = get_project_root() / "apps" / _iid / "data" / "runtime_log.db"
+                    if runtime_db.exists():
+                        with _sqlite3.connect(str(runtime_db)) as rconn:
+                            rconn.row_factory = _sqlite3.Row
+                            wts = ws.timestamp()
+                            wte = we.timestamp()
+                            wake_rows = rconn.execute(
+                                "SELECT id, started_at FROM wake WHERE started_at >= ? AND started_at <= ?",
+                                (wts, wte),
+                            ).fetchall()
+                            # 时间索引,供 session 查 nearest
+                            wake_times = [(row["id"], float(row["started_at"])) for row in wake_rows]
+            except Exception:
+                wake_times = []
+
+            def _find_wake_id(target_ts: float, tolerance: float = 5.0) -> int | None:
+                """找最接近 target_ts 的 wake id,tolerance 内匹配不到返 None。
+                session 跟 wake 通常差 < 0.5s;放宽 5s 兜底边界 wake。"""
+                if not wake_times or target_ts is None:
+                    return None
+                best_id, best_diff = None, tolerance
+                for wid, wt in wake_times:
+                    diff = abs(wt - target_ts)
+                    if diff < best_diff:
+                        best_diff = diff
+                        best_id = wid
+                return best_id
+
             # 查询 timers 表获取未触发的闹钟
             timer_rows = db.execute(
                 "SELECT id, event_kind, fire_at, payload_json FROM timers "
@@ -723,15 +760,20 @@ class MonitorConsoleWorkflow:
             consumed_sessions: list[dict[str, Any]] = []
             _source_labels = {"l4_wake": "唤醒", "initiative": "探索", "timer": "定时", "message": "回复", "group_message": "群聊"}
             for row in session_rows:
+                sid_val = row[0]
                 ended_ts_val = row[3]
+                started_ts_val = row[2]
                 try:
                     ended_dt = datetime.fromtimestamp(ended_ts_val, tz=tz8)
                 except Exception:
                     continue
                 day_key = ended_dt.date().isoformat()
                 source_label = _source_labels.get(row[1], row[1])
+                # 解析 session 对应的 wake_id(session.started_at 最近匹配)
+                wake_id = _find_wake_id(started_ts_val) if started_ts_val else None
                 session_item = {
-                    "session_id": row[0],
+                    "session_id": sid_val,
+                    "wake_id": wake_id,
                     "source": row[1],
                     "started_at": row[2],
                     "ended_at": ended_ts_val,
@@ -911,6 +953,7 @@ class MonitorConsoleWorkflow:
                         "fire_at": sess.get("ended_at_iso", ""),
                         "consumed": True,
                         "consumed_by_session_id": sess["session_id"],
+                        "wake_id": sess.get("wake_id"),  # 跳 sessions 页用 wake_id(不是 sid)
                         "payload": sess,
                         "source": "session",
                     })
