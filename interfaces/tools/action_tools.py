@@ -60,6 +60,7 @@ from domain.memory.memory.consciousness.runtime import (
     update_rules as _update_rules,
     update_context as _update_context,
     add_lesson as _add_lesson,
+    append_insight as _append_insight,
     update_self_knowledge as _update_self_knowledge,
 )
 
@@ -1697,6 +1698,62 @@ registry.register(
     handler=_handle_add_lesson,
     check_fn=lambda: True,
     emoji="💡",
+)
+
+
+# ──────────────────────────────── add_insight ─────────────────────────────────────────
+# 之前 INSIGHTS.md 是 record_thought(kind != status) 内部副带写,模型不知道这回事,
+# 没有专门写入入口。补 add_insight 让模型显式记灵感/质疑/卡点/警告。
+
+def _handle_add_insight(args: Dict[str, Any], **_) -> str:
+    text = (args.get("text") or "").strip()
+    if not text:
+        return registry.tool_error("text is required")
+    kind = (args.get("kind") or "idea").strip().lower()
+    valid_kinds = {"idea", "doubt", "block", "warning"}
+    if kind not in valid_kinds:
+        kind = "idea"
+    snap = vitals.consume_energy(ENERGY_COST_PER_CALL)
+    entities = args.get("entities") if isinstance(args.get("entities"), list) else None
+    try:
+        _append_insight(kind=kind, text=text, entities=entities)
+    except Exception as exc:
+        return registry.tool_error(f"append insight failed: {exc}")
+    return _j({
+        "ok": True,
+        "note": f"灵感碎片已记录 [{kind}]。",
+        "energy": round(snap.energy, 1),
+    })
+
+
+registry.register(
+    name="add_insight",
+    toolset="actions",
+    schema={
+        "name": "add_insight",
+        "description": (
+            "记录一条灵感碎片。INSIGHTS.md 是闪念寄存室——idea/doubt/block/warning 四类。"
+            "和 LESSONS(已验证打法)区别:INSIGHTS 是未验证的、值得回头看的、不必每次 wake 都见。"
+            "self_review 复盘时会 sense_insights 拾起来评估,验证后该升级成 lesson + 删原 insight。"
+            "你不该用 add_insight 记抽象的大道理或当日记——那是 record_thought / write_diary 的活。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "一句话灵感/质疑/卡点/警告。建议短(<150 字)"},
+                "kind": {
+                    "type": "string",
+                    "description": "idea(闪现洞察,doubt=质疑当前做法,block=具体卡点(缺什么/可能解),warning=反模式警觉",
+                    "enum": ["idea", "doubt", "block", "warning"],
+                },
+                "entities": {"type": "array", "items": {"type": "string"}, "description": "关联实体(股票名/概念/工具名),用于语义联想"},
+            },
+            "required": ["text"],
+        },
+    },
+    handler=_handle_add_insight,
+    check_fn=lambda: True,
+    emoji="✨",
 )
 
 

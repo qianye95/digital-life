@@ -1157,17 +1157,29 @@ class AIAgent:
         if not memories:
             return
 
-        # Format as breadcrumb — just entity names + one-line hint, NOT full snippets.
-        # Model decides if worth pulling details by calling recall_entity(name).
-        # This saves 500-1500 tokens per LLM call while still giving directional hints.
+        # Format as detail block — entity name + matched memory snippet + type tag.
+        # 用户原设计:联想命中要返详情,不只名字。模型在 turn 中能直接看到关联记忆,
+        # 不必再调 recall_entity('名字') 二次拉 (那一步本来基本不发生)。
+        # 每个 memory 用 200 字 snippet (足以看到关键结论,不至于过长占 token)
         if new_entities:
             self._prune_recall_injections(messages)
-            # Compact breadcrumb: comma-separated matched entity names + invited recall
-            breadcrumb_text = (
-                f"[联想命中 — 上下文里提到了这些你知道的实体] "
-                + " / ".join(new_entities[:8])
-                + "\n如需某实体的记忆 detail，调 recall_entity('实体名')。"
-            )
+            lines = ["[联想命中 — 你正在思考的上下文里提到了你有相关记忆的实体]"]
+            for mem in memories:
+                mtype = str(mem.get("memory_type", "")).upper()
+                entity = str(mem.get("_matched_entity", ""))
+                tag = f"[实体:{entity}]" if entity else ""
+                snippet = str(mem.get("snippet", "")).strip().replace("\n", " ")
+                if len(snippet) > 200:
+                    snippet = snippet[:100] + "…" + snippet[-100:]
+                # snippet 只截关键部分(避免长篇日记占满 faketool)
+                lines.append(f"- [{mtype}]{tag} {snippet}")
+            # 注解:多少实体命中 / 多少 memory 返回
+            lines.append(f"(命中 {len(new_entities)} 实体: "
+                         f"{', '.join(new_entities[:8])}"
+                         + (f" 等{len(new_entities)-8}个" if len(new_entities) > 8 else "")
+                         + f"; 召回 {len(memories)} 条。"
+                           f"如需更多调 recall_entity('实体名'))")
+            breadcrumb_text = "\n".join(lines)
             assistant_msg, tool_msg = self._sys_tool_call("entity_recall", breadcrumb_text)
             messages.append(assistant_msg)
             messages.append(tool_msg)
