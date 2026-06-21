@@ -32,10 +32,14 @@
         </h3>
         <div class="neon-card">
           <div v-for="t in group" :key="t.id" class="todo-row">
-            <el-checkbox
-              :model-value="t.status === 'done' || t.status === 'completed'"
-              @change="() => toggle(t)"
-            />
+            <div
+              class="done-dot"
+              :class="{ 'is-done': t.status === 'done' || t.status === 'completed' }"
+              :title="(t.status === 'done' || t.status === 'completed') ? '已完成' : '点击标记完成'"
+              @click="() => complete(t)"
+            >
+              <span v-if="t.status === 'done' || t.status === 'completed'" class="done-check">✓</span>
+            </div>
             <div style="flex: 1; min-width: 0;">
               <div :class="{ 'todo-done': t.status === 'done' || t.status === 'completed' }">
                 {{ t.title || '(无标题)' }}
@@ -123,6 +127,19 @@
             <el-option label="低" value="low" />
           </el-select>
         </el-form-item>
+        <el-form-item label="状态">
+          <el-select v-model="editDlg.status" style="width: 100%;">
+            <el-option label="构思" value="idea" />
+            <el-option label="计划" value="planned" />
+            <el-option label="执行" value="in_progress" />
+            <el-option label="暂停" value="paused" />
+            <el-option label="完成" value="done" />
+            <el-option label="取消" value="cancelled" />
+          </el-select>
+          <div class="brand-sub" style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
+            从「完成」切回「计划」= 重新激活（恢复任务）。
+          </div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="editDlg.open = false">取消</el-button>
@@ -153,7 +170,7 @@ const dlg = reactive({
 const editDlg = reactive({
   open: false, loading: false,
   id: '', title: '', description: '', detail: '',
-  priority: 'medium',
+  priority: 'medium', status: 'planned',
 })
 
 const allCount = computed(() => todos.value.length)
@@ -264,6 +281,7 @@ function openEdit(t) {
   editDlg.description = t.description || ''
   editDlg.detail = t.detail || ''
   editDlg.priority = t.priority || 'medium'
+  editDlg.status = t.status || 'planned'
 }
 
 async function saveEdit() {
@@ -276,6 +294,7 @@ async function saveEdit() {
       description: editDlg.description,
       detail: editDlg.detail,
       priority: editDlg.priority,
+      status: editDlg.status,
     }
     const d = await instanceApi(iid.value).updateTodo(editDlg.id, body)
     if (d.error) {
@@ -288,18 +307,17 @@ async function saveEdit() {
   } finally { editDlg.loading = false }
 }
 
-async function toggle(t) {
-  // 勾选切换 active <-> done
-  const isDone = t.status === 'done' || t.status === 'completed'
-  const nextStatus = isDone ? 'planned' : 'done'
+// 状态点点击 = 单向标记完成。done/cancelled 状态不响应点击（复活走编辑按钮）。
+async function complete(t) {
+  const doneSet = ['done', 'completed', 'cancelled']
+  if (doneSet.includes(t.status)) return  // 终态不可反向点
   try {
-    const d = await instanceApi(iid.value).updateTodo(t.id, { status: nextStatus })
+    const d = await instanceApi(iid.value).updateTodo(t.id, { status: 'done' })
     if (d.error) {
-      ElMessage.error(`切换失败：${d.error}`)
+      ElMessage.error(`标记完成失败：${d.error}`)
       return
     }
-    // 就地更新避免重新拉取
-    t.status = nextStatus
+    t.status = 'done'
   } catch (e) {
     ElMessage.error(String(e.message || e))
   }
@@ -325,6 +343,39 @@ onMounted(load)
 }
 .todo-row:last-child { border: none; }
 .todo-done { text-decoration: line-through; opacity: 0.5; }
+
+/* 状态点（○ → ✓ 发亮）。单向语义:dodo/cancelled 不可反向点击 */
+.done-dot {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1.5px solid var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2px;
+  transition: all 0.2s ease;
+}
+.done-dot:hover {
+  border-color: var(--neon-cyan);
+  box-shadow: 0 0 6px color-mix(in oklab, var(--neon-cyan) 35%, transparent);
+}
+.done-dot.is-done {
+  background: color-mix(in oklab, var(--neon-cyan) 18%, var(--bg-elevated));
+  border-color: var(--neon-cyan);
+  cursor: default;  /* 终态,不可反向点 */
+  box-shadow: 0 0 8px color-mix(in oklab, var(--neon-cyan) 50%, transparent);
+}
+.done-check {
+  color: var(--neon-cyan);
+  font-size: 12px;
+  line-height: 1;
+  font-weight: bold;
+}
+
 .todo-detail {
   margin-top: 4px;
   font-size: 11px;
