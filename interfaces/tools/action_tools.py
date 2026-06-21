@@ -1621,10 +1621,11 @@ def _handle_add_lesson(args: Dict[str, Any], **_) -> str:
 
     snap = vitals.consume_energy(ENERGY_COST_PER_CALL)
     entities = args.get("entities")
+    section = (args.get("section") or "other").strip().lower()
     if entities and isinstance(entities, list):
-        _add_lesson(text, entities=entities)
+        _add_lesson(text, entities=entities, section=section)
     else:
-        _add_lesson(text)
+        _add_lesson(text, section=section)
 
     return _j({
         "ok": True,
@@ -1638,12 +1639,17 @@ registry.register(
     toolset="actions",
     schema={
         "name": "add_lesson",
-        "description": "记录一条可迁移的经验教训。长期积累，每次唤醒时自动注入最近 3 条。",
+        "description": "记录一条可迁移的经验教训。长期积累,每次唤醒时自动注入最近 3 条。LESSONS.md 按 section 主题分节存,请选最贴切的 section。",
         "parameters": {
             "type": "object",
             "properties": {
-                "text": {"type": "string", "description": "教训内容——发现了什么，以后应该怎么做"},
-                "entities": {"type": "array", "items": {"type": "string"}, "description": "关联的实体，用于后续检索。如股票代码、工具名、概念名等"},
+                "text": {"type": "string", "description": "教训内容——发现了什么,以后应该怎么做"},
+                "section": {
+                    "type": "string",
+                    "description": "主题分节。trading(交易策略/量化) / system(代码工程/系统行为) / tool(工具使用:express_to_human/terminal/sense_*/飞书@机制/权限) / workflow(工作方式/复盘方法论/精力管理) / rule(沟通规则/权限边界) / other",
+                    "enum": ["trading", "system", "tool", "workflow", "rule", "other"],
+                },
+                "entities": {"type": "array", "items": {"type": "string"}, "description": "关联的实体,用于后续检索。如股票代码、工具名、概念名等"},
             },
             "required": ["text"],
         },

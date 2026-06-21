@@ -356,9 +356,16 @@ def write_about_him(text: str) -> None:
 
 
 def read_about_him(limit_chars: int = 2000) -> str:
+    """读关于人类联系人的记忆。
+
+    注意:HIM.md 已退役(没有写入工具入口,纯摆设),返回退役提示。
+    关于人的信息改走 contacts 体系(每实例 state.db.contacts 表 + memory snapshot)。
+    """
     if not _him_path().exists():
-        return "（还没有关于他的记录）"
+        return "（HIM.md 已退役；关于人的记忆改走 contacts 体系）"
     text = _him_path().read_text(encoding="utf-8")
+    if not text.strip():
+        return "（HIM.md 已退役；关于人的记忆改走 contacts 体系）"
     return text[-limit_chars:]
 
 
@@ -686,9 +693,16 @@ def _init_goals() -> None:
 
 
 def read_goals() -> str:
-    """读目标列表。"""
-    _init_goals()
-    return _goals_path().read_text(encoding="utf-8")
+    """读目标列表。
+
+    注意:GOALS.md 已退役(从 MemoriesTab UI 移除 + 不写入),这里返回退役提示
+    避免被 read_goals 调用时因 _init_goals 重建空模板。
+    保留入口兼容老 prompt / 工具调用,但不再有数据。
+    """
+    if not _goals_path().exists():
+        return "（GOALS.md 已退役；目标管理改在项目 project.yaml 写）"
+    text = _goals_path().read_text(encoding="utf-8").strip()
+    return text if text else "（GOALS.md 已退役；目标管理改在项目 project.yaml 写）"
 
 
 def _find_goal_section(content: str, text_match: str):
@@ -947,41 +961,118 @@ def clear_insights_older_than(days: int = 7) -> int:
     return removed
 
 
-def add_lesson(text: str, entities: list[str] | None = None) -> None:
-    """追加一条经验教训。自动去重：与新近条目相似度>60%则合并。"""
+def add_lesson(text: str, entities: list[str] | None = None, section: str = "other") -> None:
+    """追加一条经验教训,按主题分节写入。
+
+    section 是主题分类,LESSONS.md 按这个组织。可选:
+      - trading    交易策略 / 量化
+      - system     代码工程 / 系统行为
+      - tool       工具使用 (express_to_human / terminal / sense_*)
+      - workflow   工作方式 / 复盘方法论
+      - rule       沟通规则 / 权限边界
+      - other      其他
+    自动去重:与新近条目相似度>60%则合并。
+    若对应 section 在 LESSONS.md 还没建,自动创建 ## 标题。
+
+    模型拿 prompt 时「最近 3 条 lessons」按时间倒序取(不分 section,
+    但下次可以让 selector 按 wake 主题相关联)。
+    """
+    # 标准化 section
+    _VALID_SECTIONS = {
+        "trading": "交易策略",
+        "system": "代码工程",
+        "tool": "工具使用",
+        "workflow": "工作方式",
+        "rule": "沟通规则",
+        "other": "其他",
+    }
+    if section not in _VALID_SECTIONS:
+        section = "other"
+    section_title = _VALID_SECTIONS[section]
+
     _ensure_files()
     if not _lessons_path().exists():
         _lessons_path().write_text("# 经验教训\n\n", encoding="utf-8")
 
     content = _lessons_path().read_text(encoding="utf-8")
-    entries = [e.strip() for e in content.split("\n---\n") if e.strip() and not e.strip().startswith("#")]
+
+    # 确保对应 ## section 存在;不存在就追加到末尾
+    section_marker = f"## {section_title}"
+    if section_marker not in content:
+        if not content.endswith("\n\n"):
+            content = content.rstrip("\n") + "\n\n"
+        content += f"{section_marker}\n\n"
+        _lessons_path().write_text(content, encoding="utf-8")
+
+    # 解析整个文件:split by ## 标题获得各 section 文本
+    sections = {}  # {section_title: [entry_str]}
+    section_order = []  # 保持原顺序
+    cur_title = "_header"  # 文件头(不在 ## 下的部分)
+    cur_entries = []
+    for line in content.split("\n"):
+        if line.startswith("## "):
+            # 收尾前一段
+            sections[cur_title] = cur_entries
+            section_order.append(cur_title)
+            cur_title = line[3:].strip()
+            cur_entries = []
+        else:
+            cur_entries.append(line)
+    sections[cur_title] = cur_entries
+    section_order.append(cur_title)
+    if section_title not in sections:
+        # 兜底:fallback to other
+        section_title = "其他"
+        if section_title not in sections:
+            sections[section_title] = []
+            section_order.append(section_title)
+
+    my_section_entries = "\n".join(sections[section_title])
+    my_section_items = [
+        e.strip() for e in my_section_entries.split("\n---\n")
+        if e.strip() and not e.strip().startswith("##")
+    ]
 
     # Check last 5 entries for similarity > 60% → merge
-    for i in range(len(entries) - 1, max(len(entries) - 6, -1), -1):
-        similarity = compute_text_similarity(text, entries[i])
+    merged = False
+    for i in range(len(my_section_items) - 1, max(len(my_section_items) - 6, -1), -1):
+        if i < 0:
+            break
+        similarity = compute_text_similarity(text, my_section_items[i])
         if similarity > 0.6:
             ts = _now_dt().strftime("%Y-%m-%d %H:%M")
-            merged = f"{entries[i]}\n（{ts} 再次确认：{text.strip()[:80]}）"
-            entries[i] = merged
-            header = content.split("\n---\n")[0]
-            _lessons_path().write_text(header + "\n---\n" + "\n---\n".join(entries), encoding="utf-8")
-            if entities:
-                try:
-                    from domain.memory.memory.consciousness.entity_index import bump_verification_for_entities
-                    bump_verification_for_entities(entities, "lesson")
-                except Exception:
-                    pass
-            return
+            my_section_items[i] = f"{my_section_items[i]}\n（{ts} 再次确认：{text.strip()[:80]}）"
+            merged = True
+            break
 
-    # No duplicate found → normal append
-    ts = _now_dt().strftime("%Y-%m-%d %H:%M")
-    entry = f"\n---\n\n[{ts}] {text.strip()}\n"
-    with _lessons_path().open("a", encoding="utf-8") as f:
-        f.write(entry)
+    if not merged:
+        ts = _now_dt().strftime("%Y-%m-%d %H:%M")
+        my_section_items.append(f"[{ts}] {text.strip()}")
+
+    # 重新组装整份 LESSONS.md
+    sections[section_title] = ("\n" + "\n---\n\n".join(my_section_items)).split("\n")
+    new_lines = []
+    for stitle in section_order:
+        if stitle == "_header":
+            new_lines.extend(sections[stitle])
+        else:
+            # 清理尾部空行 + 确保节末有 \n
+            sect_text = "\n".join(sections[stitle]).rstrip()
+            new_lines.append(f"## {stitle}\n")
+            if sect_text:
+                new_lines.append(sect_text)
+            new_lines.append("")  # 空行分隔
+    new_content = "\n".join(new_lines).rstrip() + "\n"
+    _lessons_path().write_text(new_content, encoding="utf-8")
 
     if entities:
+        try:
+            from domain.memory.memory.consciousness.entity_index import bump_verification_for_entities
+            bump_verification_for_entities(entities, "lesson")
+        except Exception:
+            pass
         _write_entities(entities, memory_type="lesson",
-                        memory_id=f"lesson:{ts}", snippet=text)
+                        memory_id=f"lesson:{section}:{ts}", snippet=text)
 
 
 # ---- 自我认知 (SELF_KNOWLEDGE) ----

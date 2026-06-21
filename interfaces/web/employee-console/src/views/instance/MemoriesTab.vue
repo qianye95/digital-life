@@ -3,7 +3,7 @@
     <section class="page-hero">
       <div>
         <h1 class="page-title">Memory</h1>
-        <p class="page-subtitle">数字生命的记忆沉淀 · 8 个文件 + 联想图谱</p>
+        <p class="page-subtitle">数字生命的记忆沉淀 · 7 类文件(已有/add_lesson 按主题分节) + 联想图谱</p>
       </div>
       <el-button @click="reloadAll"><el-icon><Refresh /></el-icon></el-button>
     </section>
@@ -128,17 +128,15 @@ import { renderMarkdown } from '@/composables/useMarkdown'
 const route = useRoute()
 const iid = computed(() => String(route.params.iid || ''))
 
-// 9 个 kind,顺序按重要性:意识流 / 联想 / 日记 / 教训 / 草稿 / 上下文 / 目标 / 洞察 / 关于他
+// 7 个 kind:已退役 GOALS / HIM,删了对应 tab
 const kinds = [
   { key: 'consciousness', label: '意识流', icon: '🌀', file: 'CONSCIOUSNESS.md' },
   { key: 'assoc',         label: '联想',   icon: '🔗', file: 'associations API' },
   { key: 'diary',         label: '日记',   icon: '📔', file: 'diary/' },
-  { key: 'lessons',       label: '教训',   icon: '⚠️', file: 'LESSONS.md' },
+  { key: 'lessons',       label: '教训',   icon: '⚠️', file: 'LESSONS.md (按主题分节)' },
   { key: 'scratchpad',    label: '草稿',   icon: '📝', file: 'SCRATCHPAD.md' },
   { key: 'context',       label: '上下文', icon: '🔗', file: 'CONTEXT.md' },
-  { key: 'goals',         label: '目标',   icon: '🎯', file: 'GOALS.md' },
   { key: 'insights',      label: '洞察',   icon: '💡', file: 'INSIGHTS.md' },
-  { key: 'him',           label: '关于他', icon: '👤', file: 'HIM.md' },
 ]
 const active = ref('consciousness')
 
