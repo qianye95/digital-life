@@ -355,7 +355,10 @@ class EmployeeConsoleAPIService:
             html = html.replace("</head>", config_script + "</head>", 1)
         else:
             html = config_script + html
-        return web.Response(text=html, content_type="text/html")
+        return web.Response(
+            text=html, content_type="text/html",
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
 
     async def _redirect_to_default_employee(self, request: web.Request) -> web.Response:
         raise web.HTTPFound(f"{request.path.rstrip('/')}/{_default_employee_id()}/")

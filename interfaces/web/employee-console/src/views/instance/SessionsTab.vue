@@ -192,7 +192,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { Refresh, ArrowDown, ArrowUp, View, Document } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
@@ -252,7 +252,7 @@ async function load() {
   if (!d.error) {
     wakes.value = Array.isArray(d.wakes) ? d.wakes : []
     totalWakes.value = Number(d.total) || wakes.value.length
-    // 自动选:route query.sid 优先,其次第一个
+    // 自动选:route query.wake_id(数字) 优先,其次第一个
     const qSid = route.query.wake_id || route.query.sid
     const initial = (qSid && wakes.value.find(w => String(w.id) === String(qSid)))
       || wakes.value[0]
@@ -261,6 +261,18 @@ async function load() {
     }
   }
 }
+
+// 跨 tab 跳过来时:组件已 mount 但 route.query 变了 —— 监听重选 wake
+watch(
+  () => route.query.wake_id || route.query.sid,
+  (newSid) => {
+    if (!newSid) return
+    const found = wakes.value.find(w => String(w.id) === String(newSid))
+    if (found && found.id !== selectedId.value) {
+      selectWake(found.id)
+    }
+  }
+)
 
 async function loadMore() {
   if (!hasMore.value || loadingMore.value) return
