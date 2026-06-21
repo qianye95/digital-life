@@ -144,9 +144,14 @@ def get_global_todos_db() -> sqlite.Connection:
     db.row_factory = sqlite.Row
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA foreign_keys=ON")
-    # 幂等迁移：老库没有 acceptance_criteria 列 → 补一次。新库由 schema 自动建。
+    # 幂等迁移：老库没有这些列 → 补一次。新库由 schema 自动建。
     try:
         db.execute("ALTER TABLE todos ADD COLUMN acceptance_criteria TEXT DEFAULT ''")
+    except Exception:
+        pass  # 列已存在
+    try:
+        # detail = 详情记忆(增删改)；rest 前编辑、sense_todos board 渲染时模型可见
+        db.execute("ALTER TABLE todos ADD COLUMN detail TEXT DEFAULT ''")
     except Exception:
         pass  # 列已存在
     db.executescript(_SCHEMA_SQL)

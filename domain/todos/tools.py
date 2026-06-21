@@ -53,10 +53,12 @@ def register_task_tools(
             linked = (args.get("linked_deliverable_id") or "").strip() or None
             task_type = (args.get("type") or "").strip()
             acceptance_criteria = (args.get("acceptance_criteria") or "").strip()
+            detail = (args.get("detail") or "").strip()
             result = create_task(
                 title, description, priority, deadline, tags,
                 status="planned", source=source, linked_deliverable_id=linked, type=task_type,
                 acceptance_criteria=acceptance_criteria,
+                detail=detail,
             )
             result["energy"] = round(snap.energy, 1)
             return _j(result)
@@ -81,8 +83,13 @@ def register_task_tools(
                 return _j({"ok": False, "reason": "todo_id 必填"})
             snap = consume_energy_fn(energy_cost_per_thought)
             acceptance_criteria = (args.get("acceptance_criteria") or "").strip() or None
+            # detail: 显式传 "detail" key 才覆盖;不传(None) → 不动现有值。
+            # 注意 '' 也会覆盖(用户主动清空 → 不该 None 化)
+            detail_raw = args.get("detail")
+            detail = detail_raw if detail_raw is not None else None
             result = update_task(task_id, title=title or None, description=description or None,
                                  acceptance_criteria=acceptance_criteria,
+                                 detail=detail,
                                  priority=priority if priority != "medium" else None,
                                  deadline=deadline, tags=tags if tags else None)
             result["energy"] = round(snap.energy, 1)
@@ -177,6 +184,18 @@ def register_task_tools(
                             "例如「输出 SPAC 标的可投清单 5 条 + 每条带 1-2 句 why」、"
                             "「脚本跑通且输出无报错」。"
                             "create 时务必填，update 可补；没写完成标准的待办容易被反复重启。"
+                        ),
+                    },
+                    "detail": {
+                        "type": "string",
+                        "description": (
+                            "详情记忆——增删改（非追加）。任意时刻可重写全文。"
+                            "用法场景：①rest 前给未来自己留「下次醒来先看 X / 现在 Y 进展到 Z」；"
+                            "②long-running 任务跨多轮记忆「上次卡在哪 / 谁负责什么」；"
+                            "③把不准遗忘的上下文固化下来。"
+                            "与 todo_note 的 append-only 笔记区别：detail 是「当前最新版」，"
+                            "update 时整个字段全量替换——传 '' 清空，传新文本覆盖旧版本。"
+                            "sense_todos 看板会渲染 detail 给模型看到。"
                         ),
                     },
                     "priority": {

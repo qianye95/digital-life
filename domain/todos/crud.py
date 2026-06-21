@@ -15,6 +15,7 @@ TASK_UPDATE_COLUMNS = {
     "title",
     "description",
     "acceptance_criteria",
+    "detail",  # 详情记忆(增删改,非 append-only)。rest 前编辑、sense_todos 渲染
     "priority",
     "deadline",
     "status",
@@ -50,6 +51,7 @@ def create_task(
     assignee_instance: Optional[str] = None,
     project_id: Optional[str] = None,
     acceptance_criteria: str = "",
+    detail: str = "",
 ) -> dict:
     """创建一条 todo。
 
@@ -58,11 +60,15 @@ def create_task(
       project_id: 关联项目（空=纯个人 todo）。None=不挂项目。
       source: 旧字段，向后兼容。若同时给了 project_id，project_id 优先。
       acceptance_criteria: 完成标准（什么样算 done）。明文写下做完什么样才能 close。
+      detail: 详情记忆 —— 增删改（非 append-only）。模型 rest 前可写，
+              sense_todos 时模型直接看见这个 todo 的"上下文记忆"。
+              与 todo_notes 子表的 append-only 笔记区别：detail 是"当前最新版"。
 
     schema 已经迁移到 global_todos.db.todos，列：
       - project_id（拆自旧 source='project:X'）
       - assignee_instance（新增 — 旧表没这列因为"实例即拥有的"假设）
       - acceptance_criteria（新增 — 强制每个 todo 写"什么算 done"）
+      - detail（新增 — 详情记忆；ALTER TABLE 兜底加列，老库容错）
     """
     if status not in VALID_STATUSES:
         return {"ok": False, "reason": f"无效状态 {status}"}
@@ -94,13 +100,18 @@ def create_task(
     assignee_kind = "instance" if assignee_instance else ""
     db = get_db()
     try:
+        # 先确保 detail 列存在(老库 ALTER TABLE 兜底;global_todos.get_global_todos_db 自动建,但防御性)
+        try:
+            db.execute("ALTER TABLE todos ADD COLUMN detail TEXT DEFAULT ''")
+        except Exception:
+            pass
         db.execute(
-            "INSERT INTO todos (id, title, description, acceptance_criteria, status, priority, "
+            "INSERT INTO todos (id, title, description, acceptance_criteria, detail, status, priority, "
             "deadline, tags, project_id, assignee_instance, assignee_kind, parent_id, "
             "linked_deliverable_id, type, has_workspace, source, origin_instance, "
             "created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)",
-            (tid, title, description, acceptance_criteria, status, priority, deadline,
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)",
+            (tid, title, description, acceptance_criteria, (detail or ""), status, priority, deadline,
              json.dumps(tags, ensure_ascii=False),
              project_id, assignee_instance, assignee_kind,
              linked_deliverable_id, type, 1 if _needs_workspace else 0,
@@ -117,6 +128,7 @@ def create_task(
 
     task = Task(id=tid, title=title, description=description,
                 acceptance_criteria=acceptance_criteria,
+                detail=(detail or ""),
                 priority=priority, status=status, deadline=deadline, tags=tags,
                 source=source, linked_deliverable_id=linked_deliverable_id, type=type,
                 project_id=project_id, assignee_instance=assignee_instance,

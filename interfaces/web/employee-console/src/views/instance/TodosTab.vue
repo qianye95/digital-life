@@ -36,7 +36,7 @@
               :model-value="t.status === 'done' || t.status === 'completed'"
               @change="() => toggle(t)"
             />
-            <div style="flex: 1;">
+            <div style="flex: 1; min-width: 0;">
               <div :class="{ 'todo-done': t.status === 'done' || t.status === 'completed' }">
                 {{ t.title || '(无标题)' }}
               </div>
@@ -46,8 +46,13 @@
                 <span v-if="t.deadline"> · 截止 {{ String(t.deadline).slice(0, 10) }}</span>
                 <span v-if="t.assignee_kind === 'human'"> · 人类</span>
               </div>
+              <!-- 详情记忆:行内简略 -->
+              <div v-if="t.detail" class="todo-detail mono">
+                📝 {{ String(t.detail).slice(0, 80) }}<span v-if="t.detail.length > 80">…</span>
+              </div>
             </div>
             <el-tag v-if="t.status" size="small" :type="statusTag(t.status)">{{ statusLabel(t.status) }}</el-tag>
+            <el-button size="small" plain @click="openEdit(t)">编辑</el-button>
             <el-button size="small" type="danger" plain @click="remove(t)">×</el-button>
           </div>
         </div>
@@ -57,13 +62,22 @@
       </div>
     </template>
 
-    <el-dialog v-model="dlg.open" title="新建待办" width="500px">
+    <!-- 新建 dialog（含 detail） -->
+    <el-dialog v-model="dlg.open" title="新建待办" width="560px">
       <el-form label-width="80px">
         <el-form-item label="标题" required>
           <el-input v-model="dlg.title" placeholder="任务标题" @keyup.enter="create" />
         </el-form-item>
         <el-form-item label="描述">
           <el-input v-model="dlg.description" type="textarea" :rows="2" />
+        </el-form-item>
+        <el-form-item label="详情">
+          <el-input
+            v-model="dlg.detail"
+            type="textarea"
+            :rows="4"
+            placeholder="详情记忆：这条待办的上下文 / 进展 / 卡点。可后续编辑（增删改）。"
+          />
         </el-form-item>
         <el-form-item label="优先级">
           <el-select v-model="dlg.priority" style="width: 100%;">
@@ -79,6 +93,40 @@
       <template #footer>
         <el-button @click="dlg.open = false">取消</el-button>
         <el-button type="primary" :loading="dlg.loading" @click="create">创建</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 编辑 dialog（detail 为主,可增删改;其他字段也支持） -->
+    <el-dialog v-model="editDlg.open" title="编辑待办" width="560px">
+      <el-form label-width="80px">
+        <el-form-item label="标题">
+          <el-input v-model="editDlg.title" />
+        </el-form-item>
+        <el-form-item label="描述">
+          <el-input v-model="editDlg.description" type="textarea" :rows="2" />
+        </el-form-item>
+        <el-form-item label="详情">
+          <el-input
+            v-model="editDlg.detail"
+            type="textarea"
+            :rows="8"
+            placeholder="详情记忆：填入会覆盖现有内容。留空保存 = 清空详情。"
+          />
+          <div class="brand-sub" style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
+            详情是整段覆盖（增删改,非追加）。模型 sense_todos 时会看到。
+          </div>
+        </el-form-item>
+        <el-form-item label="优先级">
+          <el-select v-model="editDlg.priority" style="width: 100%;">
+            <el-option label="高" value="high" />
+            <el-option label="中" value="medium" />
+            <el-option label="低" value="low" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="editDlg.open = false">取消</el-button>
+        <el-button type="primary" :loading="editDlg.loading" @click="saveEdit">保存</el-button>
       </template>
     </el-dialog>
   </div>
@@ -98,8 +146,14 @@ const loading = ref(false)
 const filterStatus = ref('all')
 
 const dlg = reactive({
-  open: false, loading: false, title: '', description: '',
+  open: false, loading: false, title: '', description: '', detail: '',
   priority: 'medium', source: '',
+})
+
+const editDlg = reactive({
+  open: false, loading: false,
+  id: '', title: '', description: '', detail: '',
+  priority: 'medium',
 })
 
 const allCount = computed(() => todos.value.length)
@@ -177,6 +231,7 @@ function openCreate() {
   dlg.open = true
   dlg.title = ''
   dlg.description = ''
+  dlg.detail = ''
   dlg.priority = 'medium'
   dlg.source = ''
 }
@@ -188,6 +243,7 @@ async function create() {
     const body = {
       title: dlg.title,
       description: dlg.description,
+      detail: dlg.detail,
       priority: dlg.priority,
     }
     if (dlg.source) body.source = dlg.source
@@ -199,6 +255,37 @@ async function create() {
     dlg.open = false
     await load()
   } finally { dlg.loading = false }
+}
+
+function openEdit(t) {
+  editDlg.open = true
+  editDlg.id = t.id
+  editDlg.title = t.title || ''
+  editDlg.description = t.description || ''
+  editDlg.detail = t.detail || ''
+  editDlg.priority = t.priority || 'medium'
+}
+
+async function saveEdit() {
+  if (!editDlg.id) return
+  editDlg.loading = true
+  try {
+    // detail 显式传(即使 '' 也要发,覆盖语义)
+    const body = {
+      title: editDlg.title,
+      description: editDlg.description,
+      detail: editDlg.detail,
+      priority: editDlg.priority,
+    }
+    const d = await instanceApi(iid.value).updateTodo(editDlg.id, body)
+    if (d.error) {
+      ElMessage.error(d.error)
+      return
+    }
+    ElMessage.success('已保存')
+    editDlg.open = false
+    await load()
+  } finally { editDlg.loading = false }
 }
 
 async function toggle(t) {
@@ -238,6 +325,14 @@ onMounted(load)
 }
 .todo-row:last-child { border: none; }
 .todo-done { text-decoration: line-through; opacity: 0.5; }
+.todo-detail {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--neon-cyan);
+  opacity: 0.85;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .group-section { margin-bottom: var(--space-5); }
 .group-title {
   font-family: var(--font-display);

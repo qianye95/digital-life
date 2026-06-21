@@ -216,6 +216,12 @@ def _render_todo_lines(item: dict, now_dt: Any) -> list[str]:
     if task.description:
         lines.append(f"  · {_truncate(task.description, 100)}")
 
+    # 行 2.5：详情记忆(如有)——模型每次 sense_todos 都能看到的"上下文记忆"。
+    # 这是 rest 前可以编辑的整段字段(增删改,非 append-only),区别于 todo_note。
+    # 列空 / 纯空白不渲染。truncate 200 字防 board 超长。
+    if getattr(task, "detail", "") and task.detail.strip():
+        lines.append(f"  📝 {_truncate(task.detail, 200)}")
+
     # 行 3：完成标准（缺失要 ⚠️）
     if task.acceptance_criteria:
         lines.append(f"  ✅ {_truncate(task.acceptance_criteria, 100)}")

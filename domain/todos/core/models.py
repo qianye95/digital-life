@@ -11,6 +11,11 @@ class Task:
     title: str = ""
     description: str = ""
     acceptance_criteria: str = ""
+    # 详情记忆：模型/真人在任意时刻可编辑（增删改，非 append-only）。
+    # 跟 todo_notes 子表的"append-only 笔记"区别：detail 是当前最新版本,
+    # 用于 rest 前"给未来自己留详情备注" / sense_todos 时模型直接看见的"上下文记忆"。
+    # rest 工具调 todo(action='update', todo_id, detail='...') 写入；sense_todos board 渲染
+    detail: str = ""
     status: str = "idea"
     priority: str = "medium"
     deadline: Optional[str] = None
@@ -60,11 +65,13 @@ def row_to_task(row) -> Task:
     parent_id = row["parent_id"] if "parent_id" in keys else ""
     has_workspace = bool(row["has_workspace"]) if "has_workspace" in keys else False
     acceptance_criteria = row["acceptance_criteria"] if "acceptance_criteria" in keys else ""
+    detail = row["detail"] if "detail" in keys else ""
     return Task(
         id=row["id"],
         title=row["title"],
         description=row["description"],
         acceptance_criteria=acceptance_criteria or "",
+        detail=detail or "",
         status=row["status"],
         priority=row["priority"],
         deadline=row["deadline"],
@@ -88,6 +95,7 @@ def task_to_dict(task: Task) -> dict:
         "title": task.title,
         "description": task.description,
         "acceptance_criteria": task.acceptance_criteria,
+        "detail": task.detail,
         "status": task.status,
         "priority": task.priority,
         "deadline": task.deadline,
