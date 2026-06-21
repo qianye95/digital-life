@@ -12,10 +12,8 @@ platforms: []
 
 ## 触发时机
 
-- **晚 21:00** `routine/evening_review` 必跑(强约束)
-- **早 08:00** `routine/morning_plan` 前 30 秒扫一眼(轻量)
-- **每次 rest 前** 轻量自检(2 分钟版)
-- **周日** 整合到 `weekly_review` 做深度合并(本 skill 升级版)
+- **每晚 23:00** `routine/night_dream` —— 强约束,日常化做这件事
+- 周日 23:00 night_dream 升级为周度整理(整合到 weekly_review 同一天的 dream 段)
 
 ## 第一原则:严格写入纪律
 

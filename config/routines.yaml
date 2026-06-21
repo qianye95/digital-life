@@ -60,11 +60,28 @@ routines:
   prompt_template: |
     🌙 坐下来,认真回望今天。
 
-    ⚠ 先跑 `skill_view memory_hygiene` —— 每天记忆整理纪律,必跑(扫 ⚠ 待清理项,按 skill 流程清完后才完成今天的记忆卫生)。
-
-    然后调 `skill_view self_review` 按完整复盘方法论走:归集今天的材料 → 五个真问题 → 写明日 jump-in(工作板 + update_context + add_lesson)。
+    调 `skill_view self_review` 按完整复盘方法论走:归集今天的材料 → 五个真问题 → 写明日 jump-in(工作板 + update_context + add_lesson)。
   recurrence: daily
   time: '21:00'
+- description: 凌晨前的"dream" — 睡眠式记忆整理。仅整理内部记忆,不响应外部消息、不开协作。
+  enabled: true
+  id: night_dream
+  name: 睡前 dream 整理
+  priority: 3
+  prompt_template: |
+    💭 该"做梦"了。
+
+    这是睡眠式**记忆整理**,不是复盘(evening_review 已做过)。类比人类睡眠中大脑整理白天的记忆。
+
+    调 `skill_view memory_hygiene` 按其日度 6 步整理流程逐项执行:
+    清意识流 status 段 → 合并 LESSONS 同主题 → 标 RULES 过期 → 收 SCRATCHPAD → 升级/删 INSIGHTS → 清 CONTEXT 24h 外。
+
+    整理完后追加一段 [整理] tag 到意识流做 audit trail。
+    然后 rest 到明早 morning_plan。
+
+    ⚠ dream 是"内部 wake":不 express_to_human、不开项目代码协作、不 consume heavy token。
+  recurrence: daily
+  time: '23:00'
 - description: 周度回顾：量化为模式、识别为洞察、决定为行动——每次回顾至少产出一个行为改变
   enabled: true
   id: weekly_review
