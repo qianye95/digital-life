@@ -253,7 +253,6 @@ class ConfigCenterWorkflow:
         return value is not None and str(value).strip() != ""
 
     @staticmethod
-    @staticmethod
     def _legacy_runtime_policy(env: dict[str, str], yaml_config: dict[str, Any]) -> dict[str, Any]:
         """Snapshot summary used by the status page. Mirrors fields that are
         actually consumed by the runtime (token gate, energy simulation,
@@ -416,14 +415,6 @@ class ConfigCenterWorkflow:
         if field.value_type == "boolean":
             return "true" if bool(value) else "false"
         return str(value).strip()
-
-    @staticmethod
-    def _is_configured(value: Any) -> bool:
-        if isinstance(value, bool):
-            return True
-        if isinstance(value, list):
-            return len(value) > 0
-        return value is not None and str(value).strip() != ""
 
     @staticmethod
     def _paths(employee_id: str | None) -> dict[str, str]:
