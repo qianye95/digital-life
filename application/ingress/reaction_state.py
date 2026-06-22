@@ -1,41 +1,33 @@
-"""Reaction 表情收条状态机 —— 跨三个调用点传递 msg_id ↔ reaction_id。
+"""Reaction 表情收条状态机 — 跨三个调用点传递 msg_id ↔ reaction_id。
 
-三态收条(Hermes 风格):
-  入站收到消息  → add_reaction ✅ (EYES)  → 存 reaction_id
-  wake 触发开始 → remove ✅ + add 🤔 (SETTINGS) → 更新 reaction_id
-  express_to_human 发送成功 → remove 🤔
+三态收条:
+  入站收到 → 加 ✅ (DONE)
+  wake 启动 LLM → 撤全部 ✅ + 加 🤔 (THINKING) ← 延迟到 wake 真跑时(不是 emit 后立即)
+  express_to_human 发送后 → 撤全部 🤔
 
-msg_id 是唯一 key(单条消息同一时刻只有一个收条状态)。
-三个调用点(handler 入站 / scheduler wake / action_tools send)互不传递 context,
-所以用 module-level dict 共享。
-
-为了不让 dict 无限增长,过期 entry 在 _try_set / register_* 时惰性清理(> 1h)。
+batch 多条消息:register/mark/clear 全部对 batch 内所有 msg_id 操作。
 """
 from __future__ import annotations
 
-import time
+import asyncio
 import logging
+import threading
+import time
 
 logger = logging.getLogger(__name__)
 
 # msg_id → {reaction_id, emoji, ts}
-# emoji = "DONE" | "THINKING" | None（None 表示已最终撤回,无活跃表情）
 _REACTIONS: dict[str, dict] = {}
-_EXPIRY_S = 3600  # 1 小时无更新就忘掉
-
-# 进程级 adapter 引用 (handler 入站时持有,后续 clear_on_reply 不需要重新拿)
-# 每个 instance 独立进程,所以这里是单 adapter,无需区分。
+_EXPIRY_S = 3600
 _ADAPTER = None
 
 
 def register_adapter(adapter) -> None:
-    """让本进程的 adapter 在 module 里有引用。由 server 启动 adapter 时调一次。"""
     global _ADAPTER
     _ADAPTER = adapter
 
 
 def _gc() -> None:
-    """惰性 GC: 清掉超过 _EXPIRY_S 没动的 entry。"""
     now = time.time()
     expired = [k for k, v in _REACTIONS.items() if now - v.get("ts", 0) > _EXPIRY_S]
     for k in expired:
@@ -43,125 +35,82 @@ def _gc() -> None:
 
 
 async def register_received(msg_id: str, adapter) -> None:
-    """入站收到消息 → 在飞书加 ✅ 表情,并把 reaction_id 存起来。
-
-    幂等:同一 msg_id 重复调用不会重复加(已存在则跳过)。
-    adapter 是 IngressAdapter(必须有 add_reaction 方法)。
-    """
-    if not msg_id or adapter is None:
+    """入站收到消息 → 飞书消息上加 ✅。幂等。"""
+    if not msg_id or adapter is None or not hasattr(adapter, "add_reaction"):
         return
-    if not hasattr(adapter, "add_reaction"):
-        return  # adapter 不支持 reaction(如 ClawBot 当前的私聊 bot)
     _gc()
     if msg_id in _REACTIONS:
-        return  # 已注册过(可能 30s batch 内同一原消息触发多次入站)
+        return
     try:
         rid = await adapter.add_reaction(msg_id, "DONE")
         if rid:
             _REACTIONS[msg_id] = {"reaction_id": rid, "emoji": "DONE", "ts": time.time()}
-            logger.debug("reaction ✅ set on %s (rid=%s)", msg_id[:16], rid[:8])
+            logger.debug("✅ set on %s", msg_id[:16])
     except Exception as exc:
         logger.debug("register_received failed: %s", exc)
 
 
-async def mark_processing(msg_id: str, adapter) -> None:
-    """wake 触发开始处理 → 撤掉 ✅ 加 🤔。
+async def mark_all_processing(adapter=None) -> None:
+    """撤掉所有 ✅ → 加 🤔。在 wake 真正启动 LLM 时调,不在 emit 后立即调。
 
-    必须给定 msg_id;若该 msg_id 没注册过(EYES 没成功),仍尝试加 🤔。
+    把所有当前 emoji=DONE 的 msg_id 切到 THINKING。
     """
-    if not msg_id or adapter is None or not hasattr(adapter, "add_reaction"):
+    ad = adapter or _ADAPTER
+    if ad is None or not hasattr(ad, "add_reaction"):
         return
     _gc()
-    existing = _REACTIONS.get(msg_id)
-    # 撤掉旧的(如果有)
-    if existing and existing.get("reaction_id") and existing.get("emoji") == "DONE":
-        try:
-            await adapter.remove_reaction(msg_id, existing["reaction_id"])
-        except Exception:
-            pass
-        existing["reaction_id"] = ""
-        existing["emoji"] = ""
-    # 加 🤔
-    try:
-        rid = await adapter.add_reaction(msg_id, "THINKING")
+    for msg_id, info in list(_REACTIONS.items()):
+        if info.get("emoji") != "DONE":
+            continue
+        # 撤 ✅
+        rid = info.get("reaction_id", "")
         if rid:
-            _REACTIONS[msg_id] = {"reaction_id": rid, "emoji": "THINKING", "ts": time.time()}
-            logger.debug("reaction 🤔 set on %s (rid=%s)", msg_id[:16], rid[:8])
-    except Exception as exc:
-        logger.debug("mark_processing failed: %s", exc)
+            try:
+                await ad.remove_reaction(msg_id, rid)
+            except Exception:
+                pass
+        # 加 🤔
+        try:
+            new_rid = await ad.add_reaction(msg_id, "THINKING")
+            if new_rid:
+                _REACTIONS[msg_id] = {"reaction_id": new_rid, "emoji": "THINKING", "ts": time.time()}
+                logger.debug("🤔 set on %s", msg_id[:16])
+        except Exception as exc:
+            logger.debug("mark_processing on %s failed: %s", msg_id[:16], exc)
 
 
-async def clear_on_reply(msg_id: str, adapter) -> None:
-    """express_to_human 发送成功 → 撤掉 🤔(消息本身已是回应)。
-
-    清理 _REACTIONS 中该 msg_id 的 entry(不再保留状态)。
-    """
-    if not msg_id or adapter is None or not hasattr(adapter, "remove_reaction"):
+async def clear_all_reactions(adapter=None) -> None:
+    """撤掉所有活跃表情(✅ 或 🤔)。express_to_human 发送成功后调。"""
+    ad = adapter or _ADAPTER
+    if ad is None or not hasattr(ad, "remove_reaction"):
         return
-    existing = _REACTIONS.pop(msg_id, None)
-    if not existing or not existing.get("reaction_id"):
-        return
-    try:
-        await adapter.remove_reaction(msg_id, existing["reaction_id"])
-        logger.debug("reaction cleared on %s (was %s)",
-                     msg_id[:16], existing.get("emoji"))
-    except Exception as exc:
-        logger.debug("clear_on_reply failed: %s", exc)
+    for msg_id in list(_REACTIONS.keys()):
+        info = _REACTIONS.pop(msg_id, None)
+        if info and info.get("reaction_id"):
+            try:
+                await ad.remove_reaction(msg_id, info["reaction_id"])
+                logger.debug("cleared %s on %s", info.get("emoji"), msg_id[:16])
+            except Exception as exc:
+                logger.debug("clear on %s failed: %s", msg_id[:16], exc)
 
 
-async def clear_current_reply() -> None:
-    """express_to_human 调用便捷函数:从 runtime_context 拿当前 reply_msg_id
-    + 本进程 adapter,撤掉 🤔。三态收条-态 3。
+# ── sync wrappers ──
 
-    失败静默(收条是反馈层,不影响主流程)。
-    """
+def mark_all_processing_sync() -> None:
     if _ADAPTER is None:
         return
-    try:
-        from domain.lifecycle.runtime_context import get_current_reply_msg_id
-        msg_id = get_current_reply_msg_id() or ""
-    except Exception:
-        return
-    if not msg_id:
-        return
-    await clear_on_reply(msg_id, _ADAPTER)
-
-
-# ── sync fire-and-forget wrappers ──────────────────────────────────────────
-# 调用方(handler 入站 / _emit_l4_human_event / express_to_human)有时是 sync 函数,
-# 不能直接 await。这些 wrappers 用一个 daemon 线程跑永不阻塞主流程。
-def mark_processing_sync(msg_id: str) -> None:
-    """sync 版 mark_processing —— 用于 _emit_l4_human_event 等 sync 调用点。
-
-    用 daemon thread 起一个 asyncio.run。失败静默。
-    """
-    if not msg_id or _ADAPTER is None:
-        return
-
     def _run():
         try:
-            import asyncio
-            asyncio.run(_mark_processing_runner(msg_id))
+            asyncio.run(mark_all_processing())
         except Exception as exc:
-            logger.debug("mark_processing_sync failed: %s", exc)
-
-    import threading
+            logger.debug("mark_all_processing_sync failed: %s", exc)
     threading.Thread(target=_run, daemon=True, name="reaction-mark").start()
 
 
-async def _mark_processing_runner(msg_id: str) -> None:
-    await mark_processing(msg_id, _ADAPTER)
-
-
-def clear_current_reply_sync() -> None:
-    """sync 版 clear_current_reply —— 用于 express_to_human 发送成功后撤 🤔。"""
-
+def clear_all_reactions_sync() -> None:
     def _run():
         try:
-            import asyncio
-            asyncio.run(clear_current_reply())
+            asyncio.run(clear_all_reactions())
         except Exception as exc:
-            logger.debug("clear_current_reply_sync failed: %s", exc)
-
-    import threading
+            logger.debug("clear_all_reactions_sync failed: %s", exc)
     threading.Thread(target=_run, daemon=True, name="reaction-clear").start()

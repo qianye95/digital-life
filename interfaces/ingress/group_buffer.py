@@ -176,8 +176,9 @@ class GroupMessageBuffer:
         for m in batch:
             sender = getattr(m, "sender_name", "") or getattr(m, "sender_id", "") or "?"
             text = getattr(m, "content", "") or getattr(m, "text", "")
+            msg_id = getattr(m, "message_id", "") or ""
             if text:
-                merged_texts.append({"sender": sender, "text": text[:500]})
+                merged_texts.append({"sender": sender, "text": text[:500], "msg_id": msg_id})
         try:
             latest = batch[-1]
             for field in ("content", "sender_name", "sender_id", "message_id"):

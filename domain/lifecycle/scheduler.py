@@ -460,6 +460,15 @@ def _wake_digital_life_inner_safe(
     except Exception:
         pass
 
+    # 三态收条-态 2: wake 真正启动 → 撤所有 ✅ 加 🤔
+    # 不在 emit_event 后立即调(那时还没真跑 LLM,切换太快),在 wake_inner 入口调。
+    if reason in ("message", "group_message"):
+        try:
+            from application.ingress.reaction_state import mark_all_processing_sync
+            mark_all_processing_sync()
+        except Exception:
+            pass
+
     # 记录心跳（维持时间戳，供自然醒等逻辑参考）
     try:
         record_heartbeat(

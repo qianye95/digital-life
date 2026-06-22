@@ -154,15 +154,22 @@ async def handle_message(*, adapter: IngressAdapter, msg: NormalizedMessage) -> 
         )
         return True
 
-    # 三态收条-态 1: 入站已收到 → 加 👀 表情(feedback loop:让用户即时感知消息被收到)
-    # 后续 wake 触发 → 撤 👀 加 ⚙️;express_to_human 发送成功 → 撤 ⚙️
-    # 仅对真人发的人类消息生效(bot 兄弟广播 / 自己 echo 已上面 return 排除)
-    if msg.message_id and not getattr(msg, "sender_is_bot", False):
+    # 三态收条-态 1: 入站已收到 → 加 ✅ 表情。
+    # batch 合并时:merged_texts 里每条消息都加 ✅。
+    # 后续 mark_processing 切 🤔,express_to_human 发送后全部撤。
+    if not getattr(msg, "sender_is_bot", False):
         try:
             from application.ingress.reaction_state import register_received
-            await register_received(msg.message_id, adapter)
+            # 最新一条
+            if msg.message_id:
+                await register_received(msg.message_id, adapter)
+            # batch 内其他条(marged_texts 带 msg_id)
+            for item in (getattr(msg, "merged_texts", None) or []):
+                mid = item.get("msg_id") if isinstance(item, dict) else ""
+                if mid and mid != msg.message_id:
+                    await register_received(mid, adapter)
         except Exception as _re:
-            logger.debug("register_received 👀 failed: %s", _re)
+            logger.debug("register_received failed: %s", _re)
 
     # Orchestration preflight
     orchestration_reply = _build_orchestration_reply(text)
@@ -825,14 +832,6 @@ def _emit_l4_human_event(
                 },
                 channel=f"gateway:{pf}:group",
             )
-            # 三态收条-态 2: emit 成功 + 即将 wake → 撤 👀 加 ⚙️
-            # msg_id 代表 batch 最新一条(merged_texts 里所有消息的 👀 仍各自由 register 时加的)
-            if msg_id and adapter is not None:
-                try:
-                    from application.ingress.reaction_state import mark_processing_sync
-                    mark_processing_sync(msg_id)
-                except Exception as _pe:
-                    logger.debug("mark_processing ⚙️ failed: %s", _pe)
             logger.info("L4 group event emitted: chat_id=%s sender=%s @=%s", chat_id, sender_name, mentions_bot)
             # 记录入站消息到 conversation_log（之前在这里 return 漏写了，导致只有 out 没有 in）
             try:
@@ -882,13 +881,6 @@ def _emit_l4_human_event(
             },
             channel=f"gateway:{pf}:user",
         )
-        # 三态收条-态 2: 私聊 emit 成功 → 撤 👀 加 ⚙️
-        if msg_id and adapter is not None:
-            try:
-                from application.ingress.reaction_state import mark_processing_sync
-                mark_processing_sync(msg_id)
-            except Exception as _pe:
-                logger.debug("mark_processing ⚙️ failed (private): %s", _pe)
         logger.info("L4 human event emitted: nurture=%s", kinds)
         # 记录到对话日志 + 设置当前对话上下文
         try:
