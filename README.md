@@ -205,23 +205,10 @@ projects/{id}/      跨实例共享项目（project.yaml + todos.db + docs + mem
 控制台前端已预编译（`dist/`），开箱即用。改前端才需要 Node.js 20+：
 
 ```bash
-cd interfaces/web/employee-console
-npm install
-npm run build    # 重新编译 dist/
-npm run dev      # 开发模式热更新
+cd interfaces/web/employee-console && npm install && npm run build
 ```
 
-模拟炒股等项目用了 akshare/numpy 等可选依赖：
-
-```bash
-pip install -e .[capabilities]
-```
-
-测试：
-
-```bash
-python3 -m pytest
-```
+测试：`python3 -m pytest`
 
 ## License
 

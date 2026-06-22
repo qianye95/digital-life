@@ -185,23 +185,10 @@ projects/{id}/      Cross-instance shared projects (project.yaml + todos.db + do
 Console frontend is pre-compiled (`dist/`), works out of the box. Modifying the frontend requires Node.js 20+:
 
 ```bash
-cd interfaces/web/employee-console
-npm install
-npm run build    # Rebuild dist/
-npm run dev      # Dev mode with hot reload
+cd interfaces/web/employee-console && npm install && npm run build
 ```
 
-Trading simulation and similar projects use optional deps (akshare/numpy):
-
-```bash
-pip install -e .[capabilities]
-```
-
-Tests:
-
-```bash
-python3 -m pytest
-```
+Tests: `python3 -m pytest`
 
 ## License
 
