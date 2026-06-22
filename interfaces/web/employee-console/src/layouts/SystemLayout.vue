@@ -139,7 +139,6 @@ const systemNav = [
   { path: '/system/projects', label: '项目', icon: Folder },
   { path: '/system/skills', label: '技能市场', icon: MagicStick },
   { path: '/system/events', label: '事件类型', icon: Bell },
-  { path: '/system/config', label: '通用配置', icon: Setting },
 ]
 
 const instanceNav = [
