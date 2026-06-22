@@ -12,7 +12,6 @@ from aiohttp import web
 from application.console import (
     EmployeeConsoleHttpIngress,
     EmployeeConsoleHttpInput,
-    ChannelConsoleWorkflow,
     ConfigCenterWorkflow,
     EventLogConsoleWorkflow,
     MonitorConsoleWorkflow,
@@ -58,7 +57,6 @@ class EmployeeConsoleAPIService:
         self.config = ConfigCenterWorkflow()
         self.sessions = SessionConsoleWorkflow()
         self.event_logs = EventLogConsoleWorkflow()
-        self.channels = ChannelConsoleWorkflow()
         self.prompts = PromptConsoleWorkflow()
         self.tasks = TaskConsoleWorkflow()
 
@@ -223,13 +221,6 @@ class EmployeeConsoleAPIService:
     async def _handle_console_update_config(self, request: web.Request) -> web.Response:
         data = await self._input(request)
         return self._response(self.config.update_config(dict(data.body), data.path_params.get("employee_id")))
-
-    async def _handle_console_channels(self, request: web.Request) -> web.Response:
-        return self._response(self.channels.channels())
-
-    async def _handle_console_update_channels(self, request: web.Request) -> web.Response:
-        data = await self._input(request)
-        return self._response(self.channels.update_channels(dict(data.body)))
 
     async def _handle_console_prompts(self, request: web.Request) -> web.Response:
         data = await self._input(request)
@@ -1147,8 +1138,6 @@ def _add_console_api_routes(app: web.Application, api_prefix: str, service: Empl
     app.router.add_get(f"{api_prefix}/nurture-log", service._handle_console_nurture_log)
     app.router.add_get(f"{api_prefix}/config", service._handle_console_config)
     app.router.add_patch(f"{api_prefix}/config", service._handle_console_update_config)
-    app.router.add_get(f"{api_prefix}/channels", service._handle_console_channels)
-    app.router.add_patch(f"{api_prefix}/channels", service._handle_console_update_channels)
     app.router.add_get(f"{api_prefix}/prompts", service._handle_console_prompts)
     app.router.add_get(f"{api_prefix}/event-types", service._handle_console_event_types)
     app.router.add_patch(f"{api_prefix}/prompts/{{name}}", service._handle_console_update_prompt)
