@@ -127,26 +127,32 @@ cd digital-life
 pip install -e .
 ```
 
-### 运行
+### 1. 初始化（可选，建议）
+
+```bash
+digital-life init
+```
+
+自动生成 zero + alpha 两个示范实例（含模拟炒股项目）。也可跳过，稍后在前端手动建实例。
+
+### 2. 运行
 
 ```bash
 digital-life start
 ```
 
-默认起在 http://localhost:8642。首次没有实例，前端打开后自己建。
+默认起在 http://localhost:8642。
 
-想快速体验，可先跑 `digital-life init` 生成 zero + alpha 两个示范实例（含龙虾模拟炒股项目），再 `start`。
-
-### 配置
+### 3. 配置
 
 浏览器打开 `http://localhost:8642`，进实例 → Config：
 
-- **模型**：填 API Key + Base URL（默认 GLM，换别的改这三项）
+- **模型**：填 API Key + Base URL（默认 GLM，换别的只改这三项）
 - **飞书**：填 App ID + App Secret。飞书应用的权限和事件配置见[飞书配置指南](docs/operations/feishu-setup.md)
 
-也支持微信通道：Overview → 扫码登录。仅私聊，不支持多实例协作。
+也支持微信通道：Overview → 扫码登录。仅私聊，不支持群协作，配置就是扫码。
 
-### 进阶
+### 4. 进阶
 
 项目 / 待办 / 事件 / 多 Agent 协作等，见 [如何玩转数字生命](docs/showcase/how-to-play.zh.md)。
 

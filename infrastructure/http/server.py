@@ -441,7 +441,7 @@ def _patch_instance_metadata(instance_uuid: str, updates: dict) -> None:
 
 
 def _ensure_default_project() -> None:
-    """首次启动防护：没有项目时自动 seed「龙虾模拟炒股」项目。
+    """首次启动防护：没有项目时自动 seed「模拟炒股」项目。
 
     新人 clone + 跑起来就有一个完整 demo 场景可看：
     zero + alpha 协作执行量化策略（trader/strategist/architect 岗位分工）。
@@ -476,11 +476,11 @@ def _ensure_default_project() -> None:
     project_dir.mkdir(parents=True, exist_ok=True)
     (project_dir / "data").mkdir(exist_ok=True)
 
-    # 构造完整 project.yaml —— 来源：龙虾模拟炒股任务说明书（用户提供的 docx）
+    # 构造完整 project.yaml —— 来源：模拟炒股任务说明书（用户提供的 docx）
     project_data = {
         "project": {
             "id": default_pid,
-            "name": "龙虾模拟炒股挑战",
+            "name": "模拟炒股挑战",
             "description": (
                 "获得 10 万元虚拟启动资金，在 A 股市场进行模拟投资。"
                 "目标是通过自主决策、自律盯盘、自我复盘，将资金增值到 100 万元（+900%）。"
@@ -572,7 +572,7 @@ async def run_master_gateway() -> None:
     """
     # start 不依赖实例存在 —— 可以空跑,用户在前端自行建实例。
     # init 命令只是"快速建默认 zero+alpha"的捷径,不是 start 的前置条件。
-    # 首次启动防护:没有项目时,自动 seed 默认「龙虾模拟炒股」项目。
+    # 首次启动防护:没有项目时,自动 seed 默认「模拟炒股」项目。
     try:
         _ensure_default_project()
     except Exception as exc:
