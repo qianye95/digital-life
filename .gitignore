@@ -132,9 +132,9 @@ venv/
 .local-tools/
 /dist/
 /build/
-# 前端构建产物（每个组件自己的 dist/ 都不入 git）
-interfaces/web/employee-console/dist/
+# 前端构建产物默认不入 git；唯一例外：employee-console 的 dist 入库，clone 即用
 interfaces/**/dist/
+!interfaces/web/employee-console/dist/
 *.log
 *.tmp
 *.swp
