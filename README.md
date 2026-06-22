@@ -121,89 +121,46 @@ zero → zhp：
 
 ## 快速开始
 
-### 环境依赖
-
-| 依赖 | 版本 | 用途 |
-|---|---|---|
-| **Python** | 3.11+ | 主运行时（master + 每实例子进程） |
-| Node.js + npm | 20+ | **可选** — 仅当要修改控制台前端时；项目已 ship 编译产物 |
-| 飞书自建应用 | 任意 | 主消息入口 |
-| 微信 ClawBot / iLink 接入 | 可选 | 第二消息通道（控制台扫码自动开通） |
-| LLM API Key + URL | 任意有效 | 默认走智谱 GLM；其他 OpenAI 兼容 API 也可配（详见[模型支持](#模型支持)） |
-
-应用依赖（`pip install -e .` 自动装）：
-- **核心**：`aiohttp`（HTTP server）`lark-oapi`（飞书 WebSocket 长连接）`pyyaml` / `python-dotenv`（配置）`aio-pika`（事件总线内部 queue）
-- **存储**：`sqlite3`（Python 自带，每个实例一份独立 DB）
-- **前端**：`echarts` / `vue` / `element-plus`（仅 `interfaces/web/employee-console`，编译进 `dist/` 已 ship）
-
-### 安装
+### 1. 下载
 
 ```bash
+git clone https://github.com/InquisiMind/digital-life.git
 cd digital-life
-pip install -e .       # 注册 digital-life 命令 + 装应用依赖
+pip install -e .       # 注册 digital-life 命令 + 装依赖
 ```
 
-### 三种初始化路径（任选其一）
+依赖：Python 3.11+。Node.js 仅当你要改前端时才需要（项目已 ship 编译产物）。
 
-> **关于密钥存放位置**：所有模型 / 通道凭证都**每实例独立**，存在 `apps/<uuid>/config/secrets.env`。首次启动时如果你在全局 `config/secrets.env` 填了这些值，系统会**自动**把它们 bootstrap 给 zero 实例。其他实例的凭证在控制台 `/instance/<id>/config` 单独配置；**微信通道无需手填 env**，到 Overview 的「通道连接状态」卡片扫码登录即可，30 秒内凭证热加载生效。
-
-#### 路径 A：命令行（最快）
+### 2. 运行
 
 ```bash
-# 1. 复制配置模板
 cp config/secrets.example.env config/secrets.env
+# 编辑 secrets.env，只填两项：
+#   API_SERVER_KEY=任意字符串（控制台登录密码）
+#   LLM_API_KEY=你的 LLM key（默认智谱 GLM；也接受 DeepSeek/OpenAI 等兼容 key）
 
-# 2. 编辑 config/secrets.env，必填 4 项（首启 bootstrap 给 zero，覆盖一个模型 + 一个通道）：
-#    LLM_API_KEY=你的 LLM API Key（默认 GLM；也接受 DeepSeek/OpenAI 等 OpenAI 兼容 key）
-#    FEISHU_APP_ID=cli_xxx
-#    FEISHU_APP_SECRET=你的_app_secret
-#    API_SERVER_KEY=自定义控制台密码（任意字符串）
-
-# 3. 启动 —— 首次跑会自动 bootstrap zero + alpha 两个实例
-#    zero 带着你刚填的 LLM key + 飞书凭证；alpha 的凭证留空（控制台里再填）
 digital-life start
-
-# 4. 验证
-digital-life status    # 看端口 + 实例 UUID
-digital-life logs -f
-
-# 5. 配置其他实例 / 开通更多通道：
-#    打开 http://localhost:8642/system/instances → 找到实例 → 点「配置」
-#    · 在「模型」section 填 API Key + Base URL（每家厂商一份 key）
-#    · 在「飞书通道」section 填第二个飞书应用的 App ID + App Secret
-#    · 要微信：进 Overview → 通道连接状态卡片 → 点「扫码登录」用手机扫一下，30 秒内生效
-#    飞书凭证改动需控制台顶部「重启」生效；微信扫码后自动生效
 ```
 
-#### 路径 B：交互式脚本
+首次启动自动创建 `zero` + `alpha` 两个示范实例。`digital-life status` 看端口（默认 8642）和实例 UUID。
 
-```bash
-python scripts/init_instance.py
-# 会问：display_name / 飞书凭证 / GLM Key
-# 自动生成 apps/<uuid>/ + 写好 app.yaml + secrets.env
+### 3. 打开前端
 
-# 然后：digital-life start
-```
+浏览器打开 `http://localhost:8642`（或 `status` 命令显示的端口），用 `API_SERVER_KEY` 登录。这是两层控制台：全局台管实例 / 项目 / 技能市场；实例台管单个数字生命的全部配置与记忆。
 
-#### 路径 C：先跑起来，控制台里填一切（最丝滑）
+### 4. 配置模型和通道
 
-```bash
-# 1. config/secrets.env 只填 GLM_API_KEY + API_SERVER_KEY
-# 2. digital-life start —— 实例起来了，但还没飞书凭证
-# 3. 打开 http://localhost:8642/instance/<zero-id>/config
-#    在 messenger section 填 App ID + App Secret，在 model section 确认 GLM Key
-# 4. 控制台顶部「重启」生效
-```
+进入任意实例（如 zero）→「Config」
 
-### 验证
+- **模型**：填 API Key + 模型名 + Base URL（已预填 GLM 默认值，换别的厂商改这三项即可）
+- **飞书**：填 App ID + App Secret。飞书自建应用需配置权限和事件，详见[通道接入指南](docs/operations/instances.md#通道接入指南)
+- **微信**：进入 Overview → 通道状态卡 →「扫码登录」→ 手机扫码确认，30 秒自动生效
 
-```bash
-digital-life status    # 看端口和实例 UUID
-digital-life logs -f   # 实时日志
-```
+填好后点控制台顶部「重启」生效（微信扫码的通道无需重启，热加载自动起）。Overview 页面通道状态卡显示 `✓ connected` 即接入成功。
 
-- 控制台：`http://localhost:8642/system`（霓虹深空主题，全局台 + 实例台两层）
-- 飞书测试：在群里 `@机器人` 发一条消息，几十秒内看到回复
+### 5. 进阶玩法
+
+项目 / 待办 / 事件机制 / 多 Agent 协作 / 记忆体系等，见 [如何玩转数字生命](docs/showcase/how-to-play.zh.md)。
 
 ---
 

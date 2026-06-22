@@ -106,81 +106,46 @@ This is Life Engineering.
 
 ## Quick Start
 
-### Prerequisites
-
-| Dependency | Version | Purpose |
-|---|---|---|
-| **Python** | 3.11+ | Main runtime (master + per-instance worker processes) |
-| Node.js + npm | 20+ | **Optional** — only when modifying the console frontend; pre-built `dist/` is shipped |
-| Feishu (Lark) self-built app | any | Primary message ingress |
-| WeChat ClawBot / iLink access | optional | Second message channel (auto-onboarded via QR scan in console) |
-| LLM API Key + URL | any valid | Defaults to Zhipu GLM; other OpenAI-compatible APIs also supported (see [Model Support](#model-support)) |
-
-### Install
+### 1. Clone
 
 ```bash
+git clone https://github.com/InquisiMind/digital-life.git
 cd digital-life
-pip install -e .       # Registers `digital-life` CLI + installs dependencies
+pip install -e .
 ```
 
-### Three Setup Paths (pick one)
+Requires: Python 3.11+. Node.js only needed if you're modifying the frontend (pre-built `dist/` is shipped).
 
-> **Where keys live**: All model / channel credentials are **per-instance**, stored in `apps/<uuid>/config/secrets.env`. On first boot, if you fill these in the global `config/secrets.env`, the system **auto-bootstraps** them into the zero instance. Other instances are configured separately via the console at `/instance/<id>/config`. **WeChat credentials never need manual env editing**: open Overview → channel status card → scan QR, the token is hot-loaded within 30 seconds.
-
-#### Path A: CLI (fastest)
+### 2. Run
 
 ```bash
 cp config/secrets.example.env config/secrets.env
-# Edit config/secrets.env — 4 required fields (auto-assigned to zero on first boot,
-# covers one model + one channel):
-#   LLM_API_KEY=<your key — defaults to GLM; also accepts DeepSeek/OpenAI etc.>
-#   FEISHU_APP_ID=cli_xxx
-#   FEISHU_APP_SECRET=<your secret>
-#   API_SERVER_KEY=<any string as console password>
+# Edit secrets.env — fill only two fields:
+#   API_SERVER_KEY=<any string, your console password>
+#   LLM_API_KEY=<your LLM key (defaults to GLM; accepts DeepSeek/OpenAI-compatible keys)>
 
-digital-life start    # Auto-bootstraps zero + alpha. zero gets your credentials;
-                      # alpha left blank (configure in console later)
-digital-life status
-digital-life logs -f
-
-# Configure other instances / onboard more channels:
-# Open http://localhost:8642/system/instances → instance → "Config"
-#   · "Model" section: fill API Key + Base URL (one key per vendor)
-#   · "Feishu" section: fill second Feishu app's App ID + App Secret
-#   · For WeChat: Overview → channel connection card → "Scan to login"
-#     (scan with phone, channel goes live within 30s)
-# Feishu credential changes require console top-bar "Restart"; WeChat QR scan hot-loads
+digital-life start
 ```
 
-#### Path B: Interactive script
+First boot auto-creates `zero` + `alpha` demo instances. `digital-life status` shows port (default 8642) and instance UUIDs.
 
-```bash
-python scripts/init_instance.py
-# Asks: display_name / Feishu credentials / GLM Key
-# Auto-generates apps/<uuid>/ + writes app.yaml + secrets.env
+### 3. Open Console
 
-# Then: digital-life start
-```
+Open `http://localhost:8642` in browser, log in with `API_SERVER_KEY`. Two-layer console: global console manages instances / projects / skills; instance console manages a single digital life's full config and memory.
 
-#### Path C: Start first, configure via console (smoothest)
+### 4. Configure Model & Channels
 
-```bash
-# 1. Only fill GLM_API_KEY + API_SERVER_KEY in config/secrets.env
-# 2. digital-life start (instances up, no Feishu yet)
-# 3. Open http://localhost:8642/instance/<zero-id>/config
-#    Fill App ID + App Secret in messenger section, confirm GLM Key in model section
-# 4. Click "Restart" in console top bar
-```
+Go to any instance (e.g. zero) → "Config"
 
-### Verify
+- **Model**: fill API Key + model name + Base URL (GLM defaults pre-filled; switch vendor by changing these three)
+- **Feishu**: fill App ID + App Secret. Feishu app requires permission scopes and event subscription setup — see [Channel Setup Guide](docs/operations/instances.md#通道接入指南)
+- **WeChat**: go to Overview → channel status card → "Scan to Login" → scan with WeChat → confirm. Live within 30 seconds (hot-reload, no restart needed)
 
-```bash
-digital-life status    # Check port and instance UUIDs
-digital-life logs -f   # Live log stream
-```
+After filling, click "Restart" in the console top bar (WeChat channels are hot-loaded, no restart). Overview channel status card shows `✓ connected` when the channel is live.
 
-- Console: `http://localhost:8642/system` (Neon-on-Dark theme, two-layer: global console + per-instance)
-- Feishu test: `@bot` in a group chat — response within 30 seconds
+### 5. Advanced
+
+Projects / Todos / Events / Multi-Agent collaboration / Memory system design — see [How to Play Digital Life](docs/showcase/how-to-play.zh.md).
 
 ---
 
