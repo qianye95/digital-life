@@ -344,10 +344,7 @@ class FeishuAdapter(IngressAdapter):
         self._handlers.append(handler)
 
     def _ensure_group_buffer(self) -> None:
-        """懒创建群消息 buffer。flush 在 daemon thread 跑独立 loop, 不需 loop 引用。
-
-        offset 通过 app.yaml.group_chat.batch_offset_s 配置(fallback 默认 0)。
-        """
+        """懒创建群消息 buffer。flush 在 daemon thread 跑独立 loop。"""
         if self._group_buffer is not None:
             return
         from interfaces.ingress.group_buffer import GroupMessageBuffer
@@ -359,7 +356,28 @@ class FeishuAdapter(IngressAdapter):
                 except Exception as exc:
                     logger.exception("group_buffer dispatch handler error: %s", exc)
 
-        self._group_buffer = GroupMessageBuffer(_dispatch_all)
+        def _is_priority(msg) -> bool:
+            """快通道判定:@  bot 或 正文含 attention_keywords。
+
+            只对群聊生效(私聊不进 buffer)。判定逻辑跟 handler.py
+            _classify_group_urgency 一致,但 buffer 这一层提前算。
+            """
+            if getattr(msg, "mentions_bot", False):
+                return True
+            text = (getattr(msg, "content", "") or "").lower()
+            if not text:
+                return False
+            try:
+                from application.ingress.handler import _load_group_chat_config
+                cfg = _load_group_chat_config() or {}
+                for kw in (cfg.get("attention_keywords") or []):
+                    if kw and str(kw).lower() in text:
+                        return True
+            except Exception:
+                pass
+            return False
+
+        self._group_buffer = GroupMessageBuffer(_dispatch_all, is_priority=_is_priority)
 
     # -- Internals -----------------------------------------------------------
 
