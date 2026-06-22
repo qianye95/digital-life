@@ -346,7 +346,7 @@ def get_instance_app_config_path(instance_id: str | None = None) -> Path:
 def get_instance_env_path(instance_id: str | None = None) -> Path:
     """Return the instance secrets env file: apps/{uuid}/config/secrets.env
 
-    关键：实际文件在 config/secrets.env（不在 data/.env）——config/secrets.env 是
+    实际文件在 apps/<id>/config/secrets.env（不在 data/.env）——这是
     infrastructure/ai/config.py:60 / digital-life init / 各处 worker loader 共同
     认定的事实源。之前这里误返 data/.env，导致 ConfigCenter 写 GLM_API_KEY /
     FEISHU_APP_SECRET 等凭证时落到不存在的路径 → 改了不生效。
@@ -364,11 +364,6 @@ def get_instance_env_path(instance_id: str | None = None) -> Path:
 def get_global_config_dir() -> Path:
     """Return the global config directory: config/"""
     return get_project_root() / "config"
-
-
-def get_global_secrets_path() -> Path:
-    """Return the global secrets env file: config/secrets.env"""
-    return get_global_config_dir() / "secrets.env"
 
 
 def get_global_event_types_path() -> Path:
@@ -495,7 +490,6 @@ __all__ = [
     "get_global_default_config_path",
     "get_global_event_types_path",
     "get_global_routines_path",
-    "get_global_secrets_path",
     "get_instance_config_dir",
     "get_instance_config_path",
     "get_instance_app_config_path",

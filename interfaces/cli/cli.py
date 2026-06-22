@@ -24,7 +24,6 @@ META_FILE = RUN_DIR / "digital-life.json"
 LOG_FILE = LOG_DIR / "digital-life.log"
 LOCAL_CONFIG = CONFIG_DIR / "local.yaml"
 DEFAULT_CONFIG = CONFIG_DIR / "default.yaml"
-SECRETS_ENV = CONFIG_DIR / "secrets.env"
 
 
 def _is_running(pid: int) -> bool:
@@ -372,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command")
 
     start = subparsers.add_parser("start", help="Start the digital life runtime")
-    # default=None:不传时 server 用 config/secrets.env 的 API_SERVER_PORT(=8642)
+    # default=None: 不传时走代码默认 8642;可 shell export API_SERVER_PORT 覆盖
     # 固定端口,避免端口漂移导致的浏览器/cache/文档对不上 bug
     # 传 'auto' 仍可显式找空闲端口(开发场景); 数字显式锁定
     start.add_argument("--api-port", default=None, help="API server port (默认 8642 走 config); 'auto' 找空闲或显式数字")

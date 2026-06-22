@@ -36,5 +36,5 @@ digital-life init --display-name "MyBot"
 
 ## 实例隐私
 
-实例目录不入 git。`config/secrets.env` 内含飞书 `FEISHU_APP_SECRET`、`GLM_API_KEY`
-等敏感凭据，不应公开。如需团队协作，可手工同步或用加密通道分发。
+实例目录不入 git。`apps/<id>/config/secrets.env` 内含飞书 `FEISHU_APP_SECRET`、`GLM_API_KEY`
+等敏感凭据,不应公开。如需团队协作,可手工同步或用加密通道分发。

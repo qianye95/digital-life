@@ -22,10 +22,10 @@ logger = logging.getLogger("gateway")
 
 
 def _instance_feishu_credentials(instance_id: str) -> tuple[str, str]:
-    """从 apps/<id>/config/app.yaml + config/secrets.env 读 messenger 凭证。
+    """从 apps/<id>/config/app.yaml + apps/<id>/config/secrets.env 读 messenger 凭证。
 
     app_id 从 app.yaml 的 messenger.app_id 读（非敏感）。
-    app_secret 从 config/secrets.env 读（敏感）——这里直接读文件，
+    app_secret 从实例 secrets.env 读（敏感）——这里直接读文件，
     不依赖 load_runtime_dotenv（那个函数需要 ContextVar 已设置）。
     """
     import yaml
@@ -342,7 +342,7 @@ def ensure_default_instances() -> list[tuple[str, str]]:
             "tagline": "策略师 / 架构师",
             "accent_color": "#00f0ff",
             "sort_order": 1,
-            "feishu_app_id": feishu_app_id,  # 用 global secrets.env 配的第一个飞书应用
+            "feishu_app_id": feishu_app_id,  # bootstrap 兜底用启动 shell export 的 FEISHU_APP_ID（可选）
             "feishu_app_secret": feishu_app_secret,
         },
         {
@@ -389,33 +389,6 @@ def ensure_default_instances() -> list[tuple[str, str]]:
 
     if not bootstrapped_uuids:
         return []
-
-    # 把 secrets.env 的 DIGITAL_LIFE_INSTANCE_ID 自动指向第一个实例（zero）
-    cur_iid = os.environ.get("DIGITAL_LIFE_INSTANCE_ID", "").strip()
-    if not cur_iid:
-        first_uuid = bootstrapped_uuids[0]
-        try:
-            from infrastructure.config import get_global_secrets_path
-            secrets_path = get_global_secrets_path()
-            if secrets_path.exists():
-                content = secrets_path.read_text(encoding="utf-8")
-                import re as _re
-                updated = _re.sub(
-                    r"(?m)^DIGITAL_LIFE_INSTANCE_ID=.*\n",
-                    f"DIGITAL_LIFE_INSTANCE_ID={first_uuid}\n",
-                    content,
-                )
-                updated = _re.sub(
-                    r"(?m)^DIGITAL_LIFE_DISPLAY_NAME=.*\n",
-                    "DIGITAL_LIFE_DISPLAY_NAME=zero\n",
-                    updated,
-                )
-                secrets_path.write_text(updated, encoding="utf-8")
-                os.environ["DIGITAL_LIFE_INSTANCE_ID"] = first_uuid
-                os.environ["DIGITAL_LIFE_DISPLAY_NAME"] = "zero"
-                logger.info("Auto-filled DIGITAL_LIFE_INSTANCE_ID=%s in %s", first_uuid, secrets_path.name)
-        except Exception as exc:
-            logger.warning("Auto-fill secrets.env INSTANCE_ID failed: %s", exc)
 
     return [(cfg["display_name"], uuid) for cfg, uuid in zip(default_instances, bootstrapped_uuids) if uuid]
 

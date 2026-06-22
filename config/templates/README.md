@@ -7,7 +7,7 @@
 - `persona/LIFE_PERSONA.md` — 系统人设 prompt（最重要，决定实例的性格和行为底色）
 - `profile/` — 个人资料（照片、声音等可选素材）
 - `config/app.yaml` — 实例启动配置（messenger.app_id / group_chat / skills）
-- `config/secrets.env` — 敏感凭证（FEISHU_APP_SECRET / GLM_API_KEY，不入 git）
+- `config/secrets.env` — 实例级敏感凭证（`apps/<id>/config/secrets.env` 中的相对路径：FEISHU_APP_SECRET / LLM_API_KEY，不入 git）
 - `skills/` — 实例专属 skill 配置（系统级 skill 在 `interfaces/skills/`）
 - `bootstrap/` — 实例启动时定制的注入点（hooks、自定义初始化代码）
 - `data/` — 运行时所有数据库和缓存（不入 git）
