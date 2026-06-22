@@ -27,6 +27,8 @@ dependencies = [
 # Capability tier——例：图像识别、语音、量化。非核心运行可装。
 capabilities = [
     "numpy>=1.26",
+    "pandas>=2.0",
+    "akshare>=1.12",
     "opencv-python>=4.9",
     "pillow>=10.0",
     "pyttsx3>=2.90",

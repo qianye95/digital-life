@@ -182,10 +182,25 @@ projects/{id}/      Cross-instance shared projects (project.yaml + todos.db + do
 - [docs/design/digital-life-system-design.md](docs/design/digital-life-system-design.md) — Main system design doc
 - [docs/operations/feishu-setup.md](docs/operations/feishu-setup.md) — Feishu setup guide
 
+Console frontend is pre-compiled (`dist/`), works out of the box. Modifying the frontend requires Node.js 20+:
+
 ```bash
-python3 -m pytest                                            # Tests
-npm --prefix interfaces/web/employee-console run dev         # Frontend dev mode
-npm --prefix interfaces/web/employee-console run build       # Rebuild console
+cd interfaces/web/employee-console
+npm install
+npm run build    # Rebuild dist/
+npm run dev      # Dev mode with hot reload
+```
+
+Trading simulation and similar projects use optional deps (akshare/numpy):
+
+```bash
+pip install -e .[capabilities]
+```
+
+Tests:
+
+```bash
+python3 -m pytest
 ```
 
 ## License

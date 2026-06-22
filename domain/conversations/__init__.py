@@ -38,8 +38,8 @@ def record_inbound_message(
     """
     from domain.messages import record_inbound
     # 平台前缀: feishu → lark, 其它用平台名自身
-    from infrastructure.config import get_current_event_platform
     try:
+        from domain.lifecycle.runtime_context import get_current_event_platform
         _pf = get_current_event_platform()
     except Exception:
         _pf = ""

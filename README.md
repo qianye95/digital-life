@@ -202,10 +202,25 @@ projects/{id}/      跨实例共享项目（project.yaml + todos.db + docs + mem
 - [docs/design/digital-life-system-design.md](docs/design/digital-life-system-design.md) — 系统设计主文档
 - [docs/operations/feishu-setup.md](docs/operations/feishu-setup.md) — 飞书配置指南
 
+控制台前端已预编译（`dist/`），开箱即用。改前端才需要 Node.js 20+：
+
 ```bash
-python3 -m pytest                                            # 测试
-npm --prefix interfaces/web/employee-console run dev         # 前端开发模式
-npm --prefix interfaces/web/employee-console run build       # 重 build 控制台
+cd interfaces/web/employee-console
+npm install
+npm run build    # 重新编译 dist/
+npm run dev      # 开发模式热更新
+```
+
+模拟炒股等项目用了 akshare/numpy 等可选依赖：
+
+```bash
+pip install -e .[capabilities]
+```
+
+测试：
+
+```bash
+python3 -m pytest
 ```
 
 ## License
