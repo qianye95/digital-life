@@ -345,9 +345,25 @@ def _logs(args: argparse.Namespace) -> int:
 
 
 def _init(args: argparse.Namespace) -> int:
-    """Bootstrap a new Digital Life instance."""
-    from infrastructure.bootstrap.instance import init_instance
-    init_instance(args.display_name)
+    """Bootstrap new Digital Life instances.
+
+    无 --display-name → bootstrap 默认 zero + alpha（experience pack,体验用）
+    有 --display-name <name> → 建 1 个自定义实例
+    """
+    if args.display_name:
+        from infrastructure.bootstrap.instance import init_instance
+        init_instance(args.display_name)
+        print(f"✓ Instance '{args.display_name}' bootstrapped.")
+        print("  下一步: digital-life start")
+    else:
+        # 默认 bootstrap zero + alpha
+        from infrastructure.http.server import ensure_default_instances
+        created = ensure_default_instances()
+        if created:
+            print(f"✓ 已 bootstrap {len(created)} 个实例: {', '.join(n for n, _ in created)}")
+            print("  下一步: digital-life start")
+        else:
+            print("✓ 实例已存在,无需重新 bootstrap。要建新实例用 --display-name <name>")
     return 0
 
 
@@ -383,8 +399,9 @@ def main(argv: list[str] | None = None) -> int:
     logs.add_argument("-f", "--follow", action="store_true")
     logs.set_defaults(func=_logs)
 
-    init_cmd = subparsers.add_parser("init", help="Bootstrap a new Digital Life instance")
-    init_cmd.add_argument("--display-name", required=True, help="Instance display name (e.g. 'Zero', '小助手')")
+    init_cmd = subparsers.add_parser("init", help="Bootstrap new Digital Life instances")
+    init_cmd.add_argument("--display-name", default=None,
+                         help="Custom instance name. 不传则 bootstrap 默认 zero + alpha")
     init_cmd.set_defaults(func=_init)
 
     args = parser.parse_args(argv)

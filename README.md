@@ -121,43 +121,34 @@ zero → zhp：
 
 ## 快速开始
 
-### 1. 下载
-
 ```bash
 git clone https://github.com/InquisiMind/digital-life.git
 cd digital-life
 pip install -e .
 ```
 
-依赖（`pip install -e .` 自动装）：aiohttp / httpx / lark-oapi / PyYAML / prometheus_client 等。Python 3.11+。
-
-### 2. 运行
+### 运行
 
 ```bash
 digital-life start
 ```
 
-首次启动检测到没有实例，自动 bootstrap zero + alpha 两个示范实例（带空白配置，等你到下一步在控制台里填）。
+默认起在 http://localhost:8642。首次没有实例，前端打开后自己建。
 
-`digital-life status` 看端口和实例 UUID（默认 http://localhost:8642）。
+想快速体验，可先跑 `digital-life init` 生成 zero + alpha 两个示范实例（含龙虾模拟炒股项目），再 `start`。
 
-### 3. 打开前端
+### 配置
 
-浏览器打开 `http://localhost:8642`，两层控制台：全局台管实例 / 项目 / 技能市场；实例台管单个数字生命的全部配置与记忆。
+浏览器打开 `http://localhost:8642`，进实例 → Config：
 
-### 4. 配置模型和通道
+- **模型**：填 API Key + Base URL（默认 GLM，换别的改这三项）
+- **飞书**：填 App ID + App Secret。飞书应用的权限和事件配置见[飞书配置指南](docs/operations/feishu-setup.md)
 
-进入任意实例 →「Config」
+也支持微信通道：Overview → 扫码登录。仅私聊，不支持多实例协作。
 
-- **模型**：填 API Key + 模型名 + Base URL（已预填 GLM 默认值，换别的厂商改这三项即可）
-- **飞书**：填 App ID + App Secret。飞书自建应用需配置权限和事件，详见[通道接入指南](docs/operations/instances.md#通道接入指南)
-- **微信**：进入 Overview → 通道状态卡 →「扫码登录」→ 手机扫码确认，30 秒自动生效
+### 进阶
 
-填好后点控制台顶部「重启」生效（微信扫码的通道无需重启，热加载自动起）。Overview 页面通道状态卡显示 `✓ connected` 即接入成功。
-
-### 5. 进阶玩法
-
-项目 / 待办 / 事件机制 / 多 Agent 协作 / 记忆体系等，见 [如何玩转数字生命](docs/showcase/how-to-play.zh.md)。
+项目 / 待办 / 事件 / 多 Agent 协作等，见 [如何玩转数字生命](docs/showcase/how-to-play.zh.md)。
 
 ---
 
@@ -188,59 +179,10 @@ projects/{id}/      跨实例共享项目（project.yaml + todos.db + docs + mem
 
 ---
 
-## 配置体系
-
-按概念两层切分，所有改动应在前端控制台完成：
-
-**全局台** `/system/*`：实例注册表（卡片上每个实例的通道连接状态） / 项目 / 技能市场 / 事件类型注册表 / 通用配置
-
-**实例台** `/instance/<id>/*`：
-- 模型（API Key + Base URL + 模型名 + Provider）
-- 通道（飞书 App ID + Secret / 微信扫码登录 Token）
-- 群聊行为（注意关键词 / Owner）
-- 任务策略（max_turns / reasoning_effort）
-- 技能订阅 / 记忆 / 待办 / 日程 / 会话 / 社交关系 / 人设
-
-实例元数据（avatar / accent_color / tagline / display_name）写在 `apps/<id>/config/app.yaml`。
-
-### 通道是实例的一等属性
-
-每个实例可以同时挂**多个**消息通道（飞书 + 微信已支持；扩展到钉钉 / 企微 / Telegram 只需新增 `IngressAdapter` 实现）。通道相关的三件事：
-
-1. **连接状态视觉化**：实例卡片右上角的微灯（绿 = connected，灰 = unconfigured）；进 Overview 看每个通道的连接状态 + identity 短码
-2. **凭证热加载**：实例进程每 30 秒扫一次 secrets.env；新通道凭证填好就自动起 adapter，不需要重启
-3. **微信扫码开通**：到 Overview 的「通道连接」点扫码登录按钮，弹窗里手机扫一下，30 秒内通道上线（无 env 操作）
-
-通道凭证（飞书 App Secret / 微信 Token）走 secrets.env；通道配置（域名 / 应用 ID / bot_id）走 app.yaml 的 `channels:` 段。详细字段差异 + **飞书 / 微信 / 后续通道接入完整指南**（含权限清单 / 事件订阅 / 回调方式）见 [docs/operations/instances.md](docs/operations/instances.md)。
-
-### 模型支持
-
-模型适配以智谱 **GLM**（4.5/4.6/5/5.2）为主线，思考链跨轮延续、5 档思考强度，是当前唯一在生产中**实测验证**过的家族。
-
-国内的 **DeepSeek、通义千问、Kimi（Moonshot K1.5）** 也都接 OpenAI 兼容 API —— 出站 `reasoning_content` 字段这几家思考模型同名，配 base_url + key 即可用。**但**各家族对"跨轮思考是否拼回"策略不同：DeepSeek-Reasoner 多轮强制不带历史 thinking（否则服务端 400），GLM / Kimi 则反之；系统按 family 自动选择，无需手动调。**OpenAI o1/o3/o4** 走专属推理分支（思考强度自动收敛为 low/medium/high）。Moonshot **moonshot-v1 系列不含思考能力**，作为通用对话模型也能跑，但没有跨轮思考链。
-
-**Claude 原生 API 目前不适配**（endpoint、tools schema、thinking block 都与 OpenAI 协议不兼容）。要接 Claude 必须经 LiteLLM 等 OpenAI 兼容代理转译 —— 这种方式能跑对话+工具，但 thinking 因协议层缺少 `signature` 字段会在多轮逐次牺牲。原生 Claude thinking 闭环是后续工作。
-
-接入新家族只需在 `infrastructure/ai/providers.py` 加 Provider 类，不动 `agent.py`。
-
----
-
-## 多实例协同
-
-多个数字生命可以在同一个消息群组内共存（飞书群、微信群、未来更多）：
-
-1. **飞书原生 fan-out**：飞书服务端把每条消息推给群内所有 bot —— 仅飞书通道有此原生特性
-2. **去中心化消息总线**：实例主动发言时把出站消息广播给同群的其他实例（peers），各自写入对方 messages.db + 触发 wake —— 这是**通道无关**的兜底机制，对所有 ingress 都成立
-3. **路由**：群消息按 @ 某个 bot / `channels.<name>.chat_ids` 精确匹配 / `app_id` 兜底逐级定位
-
-每个实例仍是独立 lifecycle（自己的 affair / 记忆 / 精力 / 人设），通过消息总线协同，不共享运行态。这就是上面那段"零（zero）+ 阿尔法（alpha）协作"对话的底层机制。
-
----
-
 ## 开发者文档
 
 - [AGENTS.md](AGENTS.md) — Agent 协作入口（含架构总览 + 开发流程指向）
-- [docs/operations/instances.md](docs/operations/instances.md) — 实例运维手册（含通道 / 模型详细配置）
+- [docs/operations/feishu-setup.md](docs/operations/feishu-setup.md) — 飞书配置指南
 - [docs/design/digital-life-system-design.md](docs/design/digital-life-system-design.md) — 系统设计主文档
 - 详细架构 / 开发流程文档位于仓库本地 `docs/architecture/` 与 `docs/development/`（未入 git，AGENTS.md 内有指向）
 

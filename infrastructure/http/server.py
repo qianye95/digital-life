@@ -305,18 +305,22 @@ def _instance_cron_loop(instance_id: str, stop_event: threading.Event) -> None:
 # ──────────────────────────────── Master 主进程模式 ────────────────────────────────
 
 
-def _ensure_default_instance() -> None:
-    """首次启动自动 bootstrap 两个数字生命实例：zero（策略师）+ alpha（交易员）。
+def _ensure_default_instance() -> list[tuple[str, str]]:
+    """deprecated 命名, 新代码用 ensure_default_instances()。"""
+    return ensure_default_instances()
 
-    体验：新人 clone 仓库后只需：
-      1. cp config/secrets.example.env config/secrets.env
-      2. 填 LLM_API_KEY + FEISHU_APP_ID/SECRET + API_SERVER_KEY
-      3. digital-life start
-    完全不用跑 scripts/init_instance.py —— 启动发现无实例时，自动创建两个
-    示范实例（zero 和 alpha），把 secrets.env 里已填的飞书凭证写进 zero，
-    alpha 留空（用户后续在控制台填飞书应用 2 的 token），跑通就在眼前。
 
-    多次启动 / 已有实例的情况：discover_instances 返回非空就不做事（幂等）。
+def ensure_default_instances() -> list[tuple[str, str]]:
+    """Bootstrap 默认 zero + alpha 两个示范实例(若无实例)。返 [(display_name, uuid), ...]。
+
+    解耦设计:不再由 run_master_gateway 自动调用;用户显式跑:
+      digital-life init           # bootstrap default zero + alpha
+      digital-life start          # 启动 gateway
+
+    多次调用幂等:已有实例时返 []。
+
+    仍会读环境变量 LLM_API_KEY / FEISHU_APP_ID / FEISHU_APP_SECRET,
+    若有就 bootstrap 给 zero 实例(便于 export 了 env 的用户省一步配置)。
     """
     from infrastructure.config import discover_active_instances
     try:
@@ -324,9 +328,9 @@ def _ensure_default_instance() -> None:
     except Exception:
         existing = []
     if existing:
-        return
+        return []
 
-    logger.info("No instance registered — auto-bootstrapping default zero + alpha instances...")
+    logger.info("No instance registered — bootstrapping default zero + alpha instances...")
 
     feishu_app_id = os.environ.get("FEISHU_APP_ID", "").strip()
     feishu_app_secret = os.environ.get("FEISHU_APP_SECRET", "").strip()
@@ -386,7 +390,7 @@ def _ensure_default_instance() -> None:
             continue
 
     if not bootstrapped_uuids:
-        return
+        return []
 
     # 把 secrets.env 的 DIGITAL_LIFE_INSTANCE_ID 自动指向第一个实例（zero）
     cur_iid = os.environ.get("DIGITAL_LIFE_INSTANCE_ID", "").strip()
@@ -414,6 +418,8 @@ def _ensure_default_instance() -> None:
                 logger.info("Auto-filled DIGITAL_LIFE_INSTANCE_ID=%s in %s", first_uuid, secrets_path.name)
         except Exception as exc:
             logger.warning("Auto-fill secrets.env INSTANCE_ID failed: %s", exc)
+
+    return [(cfg["display_name"], uuid) for cfg, uuid in zip(default_instances, bootstrapped_uuids) if uuid]
 
 
 def _patch_instance_metadata(instance_uuid: str, updates: dict) -> None:
@@ -564,13 +570,9 @@ async def run_master_gateway() -> None:
     InstanceSupervisor 读取 var/run/last_active.json，spawn 所有子进程，
     监视并在 crash 时有限次数内重启。
     """
-    # 首次启动防护:一个实例都没有时,自动 bootstrap 默认 zero 实例。
-    # 让新人 clone + 填好 secrets.env 后直接 `digital-life start` 就能跑通,
-    # 无需手动 `python scripts/init_instance.py`。
-    _ensure_default_instance()
-
+    # start 不依赖实例存在 —— 可以空跑,用户在前端自行建实例。
+    # init 命令只是"快速建默认 zero+alpha"的捷径,不是 start 的前置条件。
     # 首次启动防护:没有项目时,自动 seed 默认「龙虾模拟炒股」项目。
-    # 这是项目里默认的 demo 场景 (zero + alpha 多实例协作执行量化策略)。
     try:
         _ensure_default_project()
     except Exception as exc:
