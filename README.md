@@ -126,31 +126,28 @@ zero → zhp：
 ```bash
 git clone https://github.com/InquisiMind/digital-life.git
 cd digital-life
-pip install -e .       # 注册 digital-life 命令 + 装依赖
+pip install -e .
 ```
 
-依赖：Python 3.11+。Node.js 仅当你要改前端时才需要（项目已 ship 编译产物）。
+依赖（`pip install -e .` 自动装）：aiohttp / httpx / lark-oapi / PyYAML / prometheus_client 等。Python 3.11+。
 
 ### 2. 运行
 
 ```bash
-cp config/secrets.example.env config/secrets.env
-# 编辑 secrets.env，只填两项：
-#   API_SERVER_KEY=任意字符串（控制台登录密码）
-#   LLM_API_KEY=你的 LLM key（默认智谱 GLM；也接受 DeepSeek/OpenAI 等兼容 key）
-
 digital-life start
 ```
 
-首次启动自动创建 `zero` + `alpha` 两个示范实例。`digital-life status` 看端口（默认 8642）和实例 UUID。
+首次启动检测到没有实例，自动 bootstrap zero + alpha 两个示范实例（带空白配置，等你到下一步在控制台里填）。
+
+`digital-life status` 看端口和实例 UUID（默认 http://localhost:8642）。
 
 ### 3. 打开前端
 
-浏览器打开 `http://localhost:8642`（或 `status` 命令显示的端口），用 `API_SERVER_KEY` 登录。这是两层控制台：全局台管实例 / 项目 / 技能市场；实例台管单个数字生命的全部配置与记忆。
+浏览器打开 `http://localhost:8642`，两层控制台：全局台管实例 / 项目 / 技能市场；实例台管单个数字生命的全部配置与记忆。
 
 ### 4. 配置模型和通道
 
-进入任意实例（如 zero）→「Config」
+进入任意实例 →「Config」
 
 - **模型**：填 API Key + 模型名 + Base URL（已预填 GLM 默认值，换别的厂商改这三项即可）
 - **飞书**：填 App ID + App Secret。飞书自建应用需配置权限和事件，详见[通道接入指南](docs/operations/instances.md#通道接入指南)

@@ -114,28 +114,25 @@ cd digital-life
 pip install -e .
 ```
 
-Requires: Python 3.11+. Node.js only needed if you're modifying the frontend (pre-built `dist/` is shipped).
+Dependencies (auto-installed by `pip install -e .`): aiohttp / httpx / lark-oapi / PyYAML / prometheus_client etc. Python 3.11+.
 
 ### 2. Run
 
 ```bash
-cp config/secrets.example.env config/secrets.env
-# Edit secrets.env — fill only two fields:
-#   API_SERVER_KEY=<any string, your console password>
-#   LLM_API_KEY=<your LLM key (defaults to GLM; accepts DeepSeek/OpenAI-compatible keys)>
-
 digital-life start
 ```
 
-First boot auto-creates `zero` + `alpha` demo instances. `digital-life status` shows port (default 8642) and instance UUIDs.
+First boot detects no instances, auto-bootstraps `zero` + `alpha` demo instances (with empty config — you'll fill them in the console next step).
+
+`digital-life status` shows port and instance UUIDs (default http://localhost:8642).
 
 ### 3. Open Console
 
-Open `http://localhost:8642` in browser, log in with `API_SERVER_KEY`. Two-layer console: global console manages instances / projects / skills; instance console manages a single digital life's full config and memory.
+Open `http://localhost:8642` in browser. Two-layer console: global console manages instances / projects / skills; instance console manages a single digital life's full config and memory.
 
 ### 4. Configure Model & Channels
 
-Go to any instance (e.g. zero) → "Config"
+Go to any instance → "Config"
 
 - **Model**: fill API Key + model name + Base URL (GLM defaults pre-filled; switch vendor by changing these three)
 - **Feishu**: fill App ID + App Secret. Feishu app requires permission scopes and event subscription setup — see [Channel Setup Guide](docs/operations/instances.md#通道接入指南)
