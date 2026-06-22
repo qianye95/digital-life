@@ -13,9 +13,9 @@ from application.contracts import UseCaseResult
 from infrastructure.config import (
     get_app_persona_path,
     get_app_skills_dir,
+    get_instance_config_path,
+    get_instance_env_path,
     get_project_root,
-    get_runtime_config_path,
-    get_runtime_env_path,
     get_runtime_home,
     get_runtime_memories_dir,
     get_runtime_state_db_path,
@@ -135,8 +135,10 @@ class ConfigCenterWorkflow:
 
     def config(self, employee_id: str | None = None) -> UseCaseResult:
         try:
-            env = self._load_env()
-            yaml_config = self._load_yaml()
+            env_path = get_instance_env_path(employee_id)
+            yaml_path = get_instance_config_path(employee_id)
+            env = self._load_env(env_path)
+            yaml_config = self._load_yaml(yaml_path)
             sections = self._sections(env, yaml_config, employee_id)
             return UseCaseResult({
                 "sections": sections,
@@ -168,10 +170,14 @@ class ConfigCenterWorkflow:
                 elif field.source == "yaml" and field.path:
                     yaml_updates[field.path] = value
 
+            # 显式用 employee_id 定位实例文件,避免依赖 ContextVar(middleware 可能未覆盖
+            # 的内部调用方直调时会读到错实例)。
+            env_path = get_instance_env_path(employee_id)
+            yaml_path = get_instance_config_path(employee_id)
             if env_updates:
-                self._write_env_updates(env_updates)
+                self._write_env_updates(env_updates, env_path)
             if yaml_updates:
-                self._write_yaml_updates(yaml_updates)
+                self._write_yaml_updates(yaml_updates, yaml_path)
             return self.config(employee_id)
         except ValueError as exc:
             return UseCaseResult({"error": str(exc)}, 400)
@@ -284,8 +290,7 @@ class ConfigCenterWorkflow:
         }
 
     @staticmethod
-    def _load_env() -> dict[str, str]:
-        path = get_runtime_env_path()
+    def _load_env(path: Path) -> dict[str, str]:
         if not path.exists():
             return {}
         values: dict[str, str] = {}
@@ -298,8 +303,7 @@ class ConfigCenterWorkflow:
         return values
 
     @staticmethod
-    def _write_env_updates(updates: dict[str, str | None]) -> None:
-        path = get_runtime_env_path()
+    def _write_env_updates(updates: dict[str, str | None], path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
         # 反向别名：新字段写入时也保留老 key（向后兼容已有 secrets.env）。
@@ -341,17 +345,15 @@ class ConfigCenterWorkflow:
         path.write_text("\n".join(written).rstrip() + "\n", encoding="utf-8")
 
     @staticmethod
-    def _load_yaml() -> dict[str, Any]:
-        path = get_runtime_config_path()
+    def _load_yaml(path: Path) -> dict[str, Any]:
         if not path.exists():
             return {}
         return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
     @staticmethod
-    def _write_yaml_updates(updates: dict[str, Any]) -> None:
-        path = get_runtime_config_path()
+    def _write_yaml_updates(updates: dict[str, Any], path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        raw = ConfigCenterWorkflow._load_yaml()
+        raw = ConfigCenterWorkflow._load_yaml(path)
         for dotted, value in updates.items():
             ConfigCenterWorkflow._set_nested(raw, dotted, value)
         path.write_text(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True), encoding="utf-8")
@@ -421,8 +423,8 @@ class ConfigCenterWorkflow:
         return {
             "project_root": str(get_project_root()),
             "runtime_home": str(get_runtime_home()),
-            "config_path": str(get_runtime_config_path()),
-            "env_path": str(get_runtime_env_path()),
+            "config_path": str(get_instance_config_path(employee_id)),
+            "env_path": str(get_instance_env_path(employee_id)),
             "state_db": str(get_runtime_state_db_path()),
             "memories_dir": str(get_runtime_memories_dir()),
             "persona_path": str(get_app_persona_path(employee_id)),

@@ -2,15 +2,30 @@
   <div>
     <section class="page-hero">
       <div>
-        <h1 class="page-title">System Config</h1>
+        <h1 class="page-title">Runtime Config</h1>
         <p class="page-subtitle">
-          全局运行参数（token 上限 / 精力折算系数 / 心跳间隔）。多实例共享。
-          实例私有的飞书凭证 / 模型 / agent 请到「实例 → 配置」编辑。
+          运行时参数（token 上限 / 精力折算系数 / 心跳间隔），<strong>按实例独立</strong>——
+          下面的修改只会影响选中的实例。飞书凭证 / 模型 / agent 同样在「实例 → 配置」编辑。
         </p>
       </div>
-      <el-button @click="load">
-        <el-icon><Refresh /></el-icon> 刷新
-      </el-button>
+      <div style="display: flex; gap: 8px; align-items: center;">
+        <el-select
+          v-model="targetInstance"
+          placeholder="选择实例"
+          style="width: 180px;"
+          @change="load"
+        >
+          <el-option
+            v-for="inst in instances"
+            :key="inst.id"
+            :label="inst.display_name"
+            :value="inst.id"
+          />
+        </el-select>
+        <el-button @click="load">
+          <el-icon><Refresh /></el-icon> 刷新
+        </el-button>
+      </div>
     </section>
 
     <div v-if="loading" class="dev-placeholder"><span class="mono">loading…</span></div>
@@ -66,9 +81,9 @@ import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import { systemApi, instanceApi } from '@/api/client'
 
-// 只把这些 section 视为"全局"——其他 (employee/messenger) 留给实例页编辑
-// 全局通用配置 —— 只保留"多实例共享的常量"。model/飞书/agent.max_turns 之类
-// 是实例私有的，应在 /instance/<id>/config 编辑。
+// 只把这些 section 视为「runtime」（token/精力/心跳）。每个实例的 runtime 独立——
+// 没有跨实例共享的全局参数；下方面板下设的实例选择器决定写哪份 secrets.env。
+// model/飞书/agent.max_turns 也是实例私有的，在 /instance/<id>/config 编辑。
 const GLOBAL_SECTIONS = ['runtime']
 
 const instances = ref([])
@@ -136,7 +151,8 @@ async function save() {
   try {
     const d = await instanceApi(targetInstance.value).updateConfig(changes.value)
     if (d.error) return ElMessage.error(d.error)
-    ElMessage.success(`已写入 ${targetInstance.value.slice(0, 8)}… 的配置`)
+    const name = instances.value.find(i => i.id === targetInstance.value)?.display_name || targetInstance.value.slice(0, 8)
+    ElMessage.success(`已写入 ${name} 的运行时配置（实例级，仅在 ${name} 生效）`)
     await load()
   } finally {
     saving.value = false
