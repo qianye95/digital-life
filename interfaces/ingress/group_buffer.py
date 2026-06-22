@@ -105,20 +105,21 @@ class GroupMessageBuffer:
         return 0.0
 
     def _flush_run(self) -> None:
-        """daemon thread 主循环: offset sleep → window sleep → flush。每次 flush 用
-        asyncio.run 在临时 loop 跑,避免污染 lark_oapi blocking WS loop。"""
-        try:
-            offset = self.get_offset()
-            if offset > 0:
-                # 用 event.wait 让 stop 时能立刻 break
-                if self._stop_flag.wait(offset):
-                    return
-        except Exception:
-            pass
+        """daemon thread 主循环: 窗口 30s → random(0,10) 抖动 → flush。
+
+        累积窗口 30s 不变(收集消息)。
+        flush 延迟 random(0,10) 让多实例自然错峰(替代之前的静态 batch_offset_s)。
+        每次 flush 用 asyncio.run 在临时 loop 跑,避免污染 lark_oapi blocking WS loop。
+        """
+        import random
 
         while not self._stop_flag.is_set():
-            # 等 window_s 秒(stop 时立刻 break)
+            # 30s 累积窗口(stop 时立刻 break)
             if self._stop_flag.wait(self._window_s):
+                break
+            # random(0,10) 抖动 — 多实例自然错峰,期望响应延迟 0~10s
+            jitter = random.uniform(0, 10)
+            if self._stop_flag.wait(jitter):
                 break
             try:
                 asyncio.run(self._flush_once())
