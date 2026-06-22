@@ -1,69 +1,95 @@
-"""群消息合并窗口 + 每实例静态 offset —— 收口到 adapter。
+"""群消息合并窗口 — 双 timer 设计。
 
-设计意图:
-- 取代 domain/lifecycle/events.py 里 group_message 类的 30s debounce
-  (事件层只调度,不合并,单一职责)
-- 每实例独立 0~29s offset (app.yaml.group_chat.batch_offset_s)
-  防止多个 bot 同步吐 batch → 同步 wake → 群消息交错两份方案同时到
+慢 timer: 从首条消息进来 → 20s + random(0,10) = 20~30s。累积窗口,所有消息都吃。
+快 timer: 从 @ / 关键词消息进来 → random(0,5)。仅优先消息触发。
+两条并行,先到先 flush 全部,窗口归零,下一条消息重启循环。
 
-⚠️ 2026-06-21 重大 bug 修法:
-之前 _flush_loop 是 asyncio task,跑在调用 add 时所在的 event loop。但
-FeishuAdapter 把 lark_oapi WSClient 跑在子线程,子线程的 loop 用
-`loop.run_until_complete(_connect())` blocking — add 在该 blocking loop
-里被调,即便 create_task 了 _flush_loop,loop 永远 stuck 在 socket read
-不 yield 给该 task → flush 偶发跑不跑。
+每实例 fast timer 值 random(0,5) 各不同 → 多实例自然错峰。
 
-修法: 扔掉 asyncio task timing, 改 daemon thread + 异步 run coroutine。
-daemon thread 每 30s tick, 每次用独立 asyncio.run(_flush_once) 跑 handler。
-彻底脱离 lark WS 的 blocking loop。
+flush 在 daemon thread + asyncio.run,不依赖 lark WS blocking loop。
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import threading
 import time
 from typing import Any, Awaitable, Callable, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# 慢 timer: 固定窗 + random
+SLOW_BASE_S = 20
+SLOW_JITTER_S = 10
 
-# 窗口长度(秒)
-GROUP_BATCH_WINDOW_S = 30
+# 快 timer: 纯 random
+FAST_JITTER_S = 5
 
 
 class GroupMessageBuffer:
-    """pipeline: 收 → buffer → 30s + offset 吐 batch (1 个 NormalizedMessage)。
-
-    每 adapter 一个实例。flush 在 daemon thread 跑, 不依赖任何外部 loop。
-    """
+    """pipeline: 收 → buffer → 双 timer 先到先 flush。"""
 
     def __init__(
         self,
         handler: Callable[[Any], Awaitable[Any]],
         *,
-        window_s: int = GROUP_BATCH_WINDOW_S,
-        offset_s: Optional[float] = None,
+        slow_base: int = SLOW_BASE_S,
+        slow_jitter: int = SLOW_JITTER_S,
+        fast_jitter: int = FAST_JITTER_S,
+        is_priority: Optional[Callable[[Any], bool]] = None,
     ) -> None:
         self._handler = handler
-        self._window_s = window_s
-        self._offset_s = offset_s
-        # buffer 跨线程共享, threading.Lock 保护
+        self._slow_base = slow_base
+        self._slow_jitter = slow_jitter
+        self._fast_jitter = fast_jitter
+        self._is_priority = is_priority or (lambda m: bool(getattr(m, "mentions_bot", False)))
+
         self._buffer: List[Any] = []
-        self._buffer_lock = threading.Lock()
-        # stop flag 让 daemon thread 跳出循环
+        self._lock = threading.Lock()
         self._stop_flag = threading.Event()
+
+        # 窗口状态
+        self._window_deadline: float = 0.0    # 慢 timer 到期时间
+        self._fast_deadline: Optional[float] = None  # 快 timer 到期时间 (None=未触发)
+        self._flush_signal = threading.Event()  # add 唤醒 daemon
+
         self._flush_thread: Optional[threading.Thread] = None
         self._started = False
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        """兼容接口。flush 已不再依赖 loop timing, 这方法是 no-op。"""
+        """兼容接口。no-op。"""
         pass
 
     def add(self, msg: Any) -> None:
-        """加一条群消息。同步、线程安全。首次 add 启动 daemon thread。"""
-        with self._buffer_lock:
+        """加一条群消息。同步、线程安全。首条消息启动慢 timer,
+        如果是 @/关键词,同时启动快 timer (random(0, fast_jitter))。
+        """
+        with self._lock:
+            if not self._buffer:
+                # 窗口刚开:启动慢 timer
+                self._window_deadline = time.time() + self._slow_base + random.uniform(0, self._slow_jitter)
+                logger.debug(
+                    "GroupMessageBuffer window start, slow deadline in %.1fs",
+                    self._window_deadline - time.time(),
+                )
+
             self._buffer.append(msg)
+
+            # @ / 关键词 → 启动/刷新快 timer
+            try:
+                if self._is_priority(msg):
+                    self._fast_deadline = time.time() + random.uniform(0, self._fast_jitter)
+                    logger.debug(
+                        "GroupMessageBuffer priority msg (mentions_bot=%s), fast deadline in %.2fs",
+                        bool(getattr(msg, "mentions_bot", False)),
+                        max(0, (self._fast_deadline or 0) - time.time()),
+                    )
+            except Exception:
+                pass
+
+        # 唤醒 daemon thread
+        self._flush_signal.set()
         self._ensure_started()
 
     def _ensure_started(self) -> None:
@@ -77,58 +103,61 @@ class GroupMessageBuffer:
         )
         self._flush_thread.start()
 
-    def get_offset(self) -> float:
-        """offset 来源: 构造期显式 > env > app.yaml > 默认 0。"""
-        if self._offset_s is not None:
-            return float(self._offset_s)
-        try:
-            import os
-            v = os.getenv("DIGITAL_LIFE_GROUP_BATCH_OFFSET")
-            if v:
-                return float(v)
-        except Exception:
-            pass
-        try:
-            from infrastructure.config import get_app_instance_id, get_project_root
-            iid = get_app_instance_id() or ""
-            if iid:
-                import yaml as _yaml
-                cfg_path = get_project_root() / "apps" / iid / "config" / "app.yaml"
-                if cfg_path.exists():
-                    cfg = _yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-                    gc = cfg.get("group_chat") or {}
-                    v = gc.get("batch_offset_s")
-                    if v is not None:
-                        return float(v)
-        except Exception:
-            pass
-        return 0.0
-
     def _flush_run(self) -> None:
-        """daemon thread 主循环: 窗口 30s → random(0,10) 抖动 → flush。
-
-        累积窗口 30s 不变(收集消息)。
-        flush 延迟 random(0,10) 让多实例自然错峰(替代之前的静态 batch_offset_s)。
-        每次 flush 用 asyncio.run 在临时 loop 跑,避免污染 lark_oapi blocking WS loop。
-        """
-        import random
-
+        """daemon thread 主循环。窗口内 wait 到任意 timer 到期或 stop。"""
         while not self._stop_flag.is_set():
-            # 30s 累积窗口(stop 时立刻 break)
-            if self._stop_flag.wait(self._window_s):
+            # 等首条消息进入窗口
+            if self._stop_flag.wait(0.5):
                 break
-            # random(0,10) 抖动 — 多实例自然错峰,期望响应延迟 0~10s
-            jitter = random.uniform(0, 10)
-            if self._stop_flag.wait(jitter):
+            if not self._flush_signal.is_set():
+                continue
+            self._flush_signal.clear()
+
+            # 窗口内循环
+            while not self._stop_flag.is_set():
+                now = time.time()
+                with self._lock:
+                    slow_remaining = max(0.0, self._window_deadline - now)
+                    fast_dl = self._fast_deadline
+
+                # 没有窗口 (首条消息可能未到) 或 已 flush 后窗口归零
+                if slow_remaining <= 0:
+                    break
+
+                fast_remaining = max(0.0, fast_dl - now) if fast_dl else float("inf")
+                next_timeout = min(slow_remaining, fast_remaining)
+
+                if next_timeout <= 0:
+                    break
+
+                # 等 add 唤醒 (新消息可能刷新 fast deadline) 或超时
+                triggered = self._flush_signal.wait(timeout=next_timeout)
+                if triggered:
+                    self._flush_signal.clear()
+                    # 新消息进来,循环重新读 fast deadline
+                    continue
+                else:
+                    # 超时 = 到期 = flush
+                    break
+
+            if self._stop_flag.is_set():
                 break
+
+            # flush
             try:
                 asyncio.run(self._flush_once())
             except Exception as exc:
-                logger.warning("GroupMessageBuffer flush run failed: %s", exc)
+                logger.warning("GroupMessageBuffer flush failed: %s", exc)
+
+            # 窗口归零
+            with self._lock:
+                self._window_deadline = 0.0
+                self._fast_deadline = None
+            self._flush_signal.clear()
 
     async def _flush_once(self) -> None:
-        """把 buffer 里所有消息聚成单个 NormalizedMessage 一次调 handler。"""
-        with self._buffer_lock:
+        """flush 全部 buffer 成单个 NormalizedMessage。"""
+        with self._lock:
             if not self._buffer:
                 return
             batch = list(self._buffer)
@@ -142,7 +171,7 @@ class GroupMessageBuffer:
             await self._handler(base)
             return
 
-        # 多条合并:把所有 sender/text 收集, base 字段换成最新一条
+        # 合并:所有条目以 {sender, text} 收集, base 字段换成最新一条
         merged_texts = []
         for m in batch:
             sender = getattr(m, "sender_name", "") or getattr(m, "sender_id", "") or "?"
@@ -162,14 +191,17 @@ class GroupMessageBuffer:
             return
 
         logger.info(
-            "GroupMessageBuffer flushed batch: %d msgs, merged_texts=%d",
-            len(batch), len(merged_texts),
+            "GroupMessageBuffer flushed: %d msgs (priority=%s, merged=%d)",
+            len(batch),
+            any(self._is_priority(m) for m in batch),
+            len(merged_texts),
         )
         await self._handler(base)
 
     def stop(self) -> None:
-        """adapter stop 时停止 daemon thread + 吐最后一批。"""
+        """adapter stop 时停止 daemon thread + 吐残留。"""
         self._stop_flag.set()
+        self._flush_signal.set()  # 唤醒 daemon 让它退出
         try:
             asyncio.run(self._flush_once())
         except Exception as exc:
