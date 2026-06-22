@@ -6,7 +6,7 @@
   此处统一调用所有模块的 schema 初始化函数，幂等可重复调用。
 
 调用方：
-  - scripts/init_instance.py 实例初始化时
+  - digital-life init 实例初始化时
   - infrastructure/http/server.py:run_instance_gateway 进程启动时（兜底）
 
 涉及的 DB：

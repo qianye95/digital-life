@@ -361,10 +361,8 @@ def ensure_default_instances() -> list[tuple[str, str]]:
             from infrastructure.bootstrap.instance import init_instance
             inst_dir = init_instance(
                 cfg["display_name"],
-                interactive=False,
                 feishu_app_id=cfg["feishu_app_id"],
                 feishu_app_secret=cfg["feishu_app_secret"],
-                feishu_chat_ids=None,
             )
             instance_uuid = inst_dir.name
             bootstrapped_uuids.append(instance_uuid)

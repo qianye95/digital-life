@@ -10,12 +10,6 @@
 digital-life init --display-name "Zero"
 ```
 
-也可以直接运行脚本：
-
-```bash
-python scripts/init_instance.py --display-name "Zero"
-```
-
 创建过程会：
 
 - 生成 UUID 作为实例目录名：`apps/{uuid}/`

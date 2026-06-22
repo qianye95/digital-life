@@ -127,6 +127,17 @@ cd digital-life
 pip install -e .
 ```
 
+> ⚠ **控制台前端首次必须编译**：`interfaces/web/employee-console/dist/` 被 `.gitignore` 排除，
+> clone 后磁盘上没有产物，访问 `/system` 会返回 `503 frontend dist not built`。
+> 装好依赖后必须执行一次：
+>
+> ```bash
+> cd interfaces/web/employee-console
+> npm install && npm run build
+> ```
+>
+> 改了前端源码同样需要重跑 `npm run build`。
+
 ### 1. 初始化（可选，建议）
 
 ```bash

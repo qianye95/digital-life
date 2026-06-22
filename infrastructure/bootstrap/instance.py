@@ -5,14 +5,14 @@ Creates the full directory structure under a UUID-based directory,
 generates config/app.yaml + config/secrets.env, and initializes state DB.
 
 Usage:
-    # 交互式（推荐）:
-    python scripts/init_instance.py
+    # 命令行（推荐）:
+    digital-life init --display-name "Beta"
 
-    # 纯 CLI:
-    python scripts/init_instance.py --display-name "Beta" \\
-        --model glm-5.2 --glm-api-key "xxx" \\
-        --feishu-app-id "cli_xxx" --feishu-app-secret "xxx"
-
+    # 在 Python 代码中直接调用:
+    from infrastructure.bootstrap.instance import init_instance
+    init_instance("Beta",
+                  model="glm-5.2", glm_api_key="xxx",
+                  feishu_app_id="cli_xxx", feishu_app_secret="xxx")
 环节:
   1. 创建目录骨架 (persona / config / data)
   2. 拷人设模板 (LIFE_PERSONA.md)
@@ -30,7 +30,11 @@ import sys
 import uuid as _uuid
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+# parents[2] = 项目根（infrastructure/bootstrap/instance.py → .. → infrastructure/ → .. → 项目根）
+# 必须与 infrastructure/config/__init__.py 里的 get_project_root() 一致，否则实例会被
+# 错误地建到 infrastructure/apps/ 而非 <root>/apps/，master 网关 discover_active_instances()
+# 永远发现不了，前端实例列表空白。
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 # 默认技能列表（新实例标配）
