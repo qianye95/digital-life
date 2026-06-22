@@ -202,10 +202,15 @@ projects/{id}/      跨实例共享项目（project.yaml + todos.db + docs + mem
 - [docs/design/digital-life-system-design.md](docs/design/digital-life-system-design.md) — 系统设计主文档
 - [docs/operations/feishu-setup.md](docs/operations/feishu-setup.md) — 飞书配置指南
 
-控制台前端已预编译（`dist/`），开箱即用。改前端才需要 Node.js 20+：
+控制台前端已预编译并在 git 中（`interfaces/web/employee-console/dist/`），**不需要 Node.js**。
+
+如需修改前端，才需要：
 
 ```bash
-cd interfaces/web/employee-console && npm install && npm run build
+cd interfaces/web/employee-console
+npm install      # 安装前端依赖
+npm run build    # 重新编译 dist/
+npm run dev      # 开发模式热更新
 ```
 
 测试：`python3 -m pytest`

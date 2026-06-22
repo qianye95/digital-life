@@ -182,10 +182,15 @@ projects/{id}/      Cross-instance shared projects (project.yaml + todos.db + do
 - [docs/design/digital-life-system-design.md](docs/design/digital-life-system-design.md) — Main system design doc
 - [docs/operations/feishu-setup.md](docs/operations/feishu-setup.md) — Feishu setup guide
 
-Console frontend is pre-compiled (`dist/`), works out of the box. Modifying the frontend requires Node.js 20+:
+Console frontend is pre-compiled and included in git (`interfaces/web/employee-console/dist/`), **Node.js not required**.
+
+Only if you modify the frontend:
 
 ```bash
-cd interfaces/web/employee-console && npm install && npm run build
+cd interfaces/web/employee-console
+npm install      # Install frontend deps
+npm run build    # Rebuild dist/
+npm run dev      # Dev mode with hot reload
 ```
 
 Tests: `python3 -m pytest`
