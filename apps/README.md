@@ -16,10 +16,10 @@ apps/
 ## 创建新实例
 
 ```bash
-python scripts/init_instance.py --display-name "MyBot"
+digital-life init --display-name "MyBot"
 ```
 
-脚本会：
+会：
 1. 在 `apps/<new-uuid>/` 下生成目录
 2. 从 `config/templates/` 复制 README/persona/profile/skills 模板生成 `config/app.yaml`
 3. 初始化 `state.db` 全表 schema

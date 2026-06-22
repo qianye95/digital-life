@@ -112,6 +112,17 @@ cd digital-life
 pip install -e .
 ```
 
+> ⚠ **Build the console frontend on first run**: `interfaces/web/employee-console/dist/`
+> is excluded by `.gitignore`, so it is not part of the clone. Without it, `/system`
+> returns `503 frontend dist not built`. Run once after install:
+>
+> ```bash
+> cd interfaces/web/employee-console
+> npm install && npm run build
+> ```
+>
+> Re-run `npm run build` after editing frontend sources.
+
 ### Run
 
 ```bash
