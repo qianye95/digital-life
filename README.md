@@ -257,7 +257,7 @@ projects/{id}/      跨实例共享项目（project.yaml + todos.db + docs + mem
 2. **凭证热加载**：实例进程每 30 秒扫一次 secrets.env；新通道凭证填好就自动起 adapter，不需要重启
 3. **微信扫码开通**：到 Overview 的「通道连接」点扫码登录按钮，弹窗里手机扫一下，30 秒内通道上线（无 env 操作）
 
-通道凭证（飞书 App Secret / 微信 Token）走 secrets.env；通道配置（域名 / 应用 ID / bot_id）走 app.yaml 的 `channels:` 段。详细字段差异见 [docs/operations/instances.md](docs/operations/instances.md)。
+通道凭证（飞书 App Secret / 微信 Token）走 secrets.env；通道配置（域名 / 应用 ID / bot_id）走 app.yaml 的 `channels:` 段。详细字段差异 + **飞书 / 微信 / 后续通道接入完整指南**（含权限清单 / 事件订阅 / 回调方式）见 [docs/operations/instances.md](docs/operations/instances.md)。
 
 ### 模型支持
 
