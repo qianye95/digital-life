@@ -19,6 +19,8 @@ dependencies = [
     "prometheus_client>=0.20",
     # Feishu (Lark) ingress
     "lark-oapi>=1.4",
+    # WeChat QR code (扫码登录 PNG 生成)
+    "qrcode>=7.4",
 ]
 
 [project.optional-dependencies]
