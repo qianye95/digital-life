@@ -168,9 +168,8 @@ projects/{id}/      Cross-instance shared projects (project.yaml + todos.db + do
 ## Developer Docs
 
 - [AGENTS.md](AGENTS.md) — Agent collaboration entry point (includes architecture overview + dev workflow pointers)
-- [docs/operations/feishu-setup.md](docs/operations/feishu-setup.md) — Feishu setup guide
 - [docs/design/digital-life-system-design.md](docs/design/digital-life-system-design.md) — Main system design doc
-- Detailed architecture / development docs live in the local repo under `docs/architecture/` and `docs/development/` (not in git; AGENTS.md points to them)
+- [docs/operations/feishu-setup.md](docs/operations/feishu-setup.md) — Feishu setup guide
 
 ```bash
 python3 -m pytest                                            # Tests

@@ -188,9 +188,8 @@ projects/{id}/      跨实例共享项目（project.yaml + todos.db + docs + mem
 ## 开发者文档
 
 - [AGENTS.md](AGENTS.md) — Agent 协作入口（含架构总览 + 开发流程指向）
-- [docs/operations/feishu-setup.md](docs/operations/feishu-setup.md) — 飞书配置指南
 - [docs/design/digital-life-system-design.md](docs/design/digital-life-system-design.md) — 系统设计主文档
-- 详细架构 / 开发流程文档位于仓库本地 `docs/architecture/` 与 `docs/development/`（未入 git，AGENTS.md 内有指向）
+- [docs/operations/feishu-setup.md](docs/operations/feishu-setup.md) — 飞书配置指南
 
 ```bash
 python3 -m pytest                                            # 测试
