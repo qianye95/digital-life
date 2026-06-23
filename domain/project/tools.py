@@ -225,7 +225,11 @@ def register_project_tools(
                     if key in args and args[key]:
                         updates[key] = args[key].strip()
                 # project_id 透传给 update_deliverable 用于反向同步到 task
-                updates["project_id"] = pid
+                # ⚠ 2026-06-23 修复: 变量名错位(此处作用域内是 `project_id`, 不是 `pid`)。
+                # 历史 BUG 触发条件:模型调 project_todo(action="update", ...) → 抛 NameError
+                # → alpha 在规划原型阶段多次 update 失败(报错 "name 'pid' is not defined"
+                # 见 812 号 wake turn 7994)→ 整个 update 链全废,delivearable 状态永远停在 planned。
+                updates["project_id"] = project_id
                 ok = update_deliverable(db, deliverable_id, **updates)
                 db.close()
                 return _j({"ok": ok})
