@@ -1,12 +1,23 @@
 """精力状态管理 — VitalSnapshot + 持久化 + 养育记录。
 
 精力运作逻辑：
-- 恢复：随时间自动恢复（+ENERGY_RECOVERY_PER_HOUR），无论 RUNNING 还是 BLOCKED
-- 衰减：每次工具调用/模型访问消耗 ENERGY_COST_PER_CALL（由外部 consume_energy 触发）
-- 补充：仅管理台"加鸡腿"
+- 恢复：随时间自动恢复（默认 +25/h，env DIGITAL_LIFE_ENERGY_RECOVERY_PER_HOUR
+  可配）。BLOCKED 全速 RUN_RUNNING 减速到 30%（agent 边工作边慢补）。每个 cron
+  tick（默认 60s，全状态覆盖）写盘一次，用户/前端读 get_current_vitals()
+  拿到的永远是当前时刻事实值，不再 stale。
+- 衰减：每次工具调用/模型访问消耗精力（由外部 consume_energy 触发，agent
+  LLM call 后按真实 token 量扣）。
+- 补充：仅前端"加鸡腿"按钮（走 monitor.nurture_energy）。
+- 入站消息不再影响精力（不在 handler 里 apply_nurture）——精力只通过
+  consume_energy / nurture_energy 两个明确通道进出。
 
-重要设计：recovery 持久化时不更新 vitals.updated_at，保留其作为"最后真实事件时间"。
-这确保 initiative 检测能正确判断"离上次 session 结束多久了"。
+字段语义（拆字段解耦）：
+- `updated_at`: 恢复计时基准。_apply_recovery 算 elapsed_h 时用它作 anchor，
+  recovery 写回时不动它（保留"最后真实事件时刻"）。但 consume_energy /
+  apply_nurture 会更新它（消耗/投喂也是真实事件）。
+- `last_activity_at`: 主动性 idle baseline。initiative 系统算"距上次活动多久"
+  时用它；wake 时由 scheduler.touch_activity() 显式推进，不再用 UPDATE
+  vitals SET updated_at 这种 hack 偷渡。
 """
 
 from __future__ import annotations
@@ -30,6 +41,7 @@ CREATE TABLE IF NOT EXISTS vitals (
     id               INTEGER PRIMARY KEY CHECK (id = 1),
     energy           REAL NOT NULL DEFAULT 70.0,
     updated_at       TEXT NOT NULL,
+    last_activity_at TEXT,
     last_nurture     TEXT,
     meta_json        TEXT NOT NULL DEFAULT '{}'
 );
@@ -51,11 +63,17 @@ def init_vitals_db() -> None:
     _init_affairs_db()
     with _conn() as c:
         c.executescript(VITALS_SCHEMA)
+        # schema migration: 老库没有 last_activity_at 列时给它加上,回填 = updated_at
+        cols = {row[1] for row in c.execute("PRAGMA table_info(vitals)").fetchall()}
+        if "last_activity_at" not in cols:
+            c.execute("ALTER TABLE vitals ADD COLUMN last_activity_at TEXT")
+            c.execute("UPDATE vitals SET last_activity_at = updated_at WHERE id = 1")
         row = c.execute("SELECT id FROM vitals WHERE id = 1").fetchone()
         if not row:
+            now = now_iso()
             c.execute(
-                "INSERT INTO vitals (id, energy, updated_at) VALUES (1, 70.0, ?)",
-                (now_iso(),),
+                "INSERT INTO vitals (id, energy, updated_at, last_activity_at) VALUES (1, 70.0, ?, ?)",
+                (now, now),
             )
 
 
@@ -65,83 +83,122 @@ def init_vitals_db() -> None:
 class VitalSnapshot:
     energy: float
     updated_at: str
+    last_activity_at: Optional[str] = None
 
 
 # ---------------- core API ----------------
 
-def _apply_recovery(base: VitalSnapshot) -> VitalSnapshot:
-    """随时间恢复精力，无论 RUNNING 还是 BLOCKED。"""
-    from domain.vital.simulation.engine import ENERGY_RECOVERY_PER_HOUR
+def _apply_recovery(base: VitalSnapshot, state: str = "BLOCKED") -> VitalSnapshot:
+    """随时间恢复精力。state 决定 rate：BLOCKED 全速 / RUNNING 30% 减速。"""
+    from domain.vital.simulation.engine import (
+        ENERGY_RECOVERY_PER_HOUR,
+        ENERGY_RECOVERY_RUNNING_FACTOR,
+    )
 
+    factor = ENERGY_RECOVERY_RUNNING_FACTOR if state == "RUNNING" else 1.0
     now = now_dt()
     last = parse_iso(base.updated_at)
     elapsed_h = max(0.0, (now - last).total_seconds() / 3600.0)
-    new_energy = base.energy + ENERGY_RECOVERY_PER_HOUR * elapsed_h
+    new_energy = base.energy + ENERGY_RECOVERY_PER_HOUR * factor * elapsed_h
 
     return VitalSnapshot(
         energy=max(0, min(100, new_energy)),
-        updated_at=base.updated_at,  # 不更新 updated_at——保留"最后真实事件时间"
+        updated_at=base.updated_at,  # 不更新 updated_at——保留恢复计时锚
+        last_activity_at=base.last_activity_at,
     )
 
 
-def get_current_vitals() -> VitalSnapshot:
+def get_current_vitals(state: str = "BLOCKED", persist: bool = False) -> VitalSnapshot:
+    """读当前精力快照。
+
+    state:  "BLOCKED"（默认）/ "RUNNING" —— 决定 recovery rate。
+    persist: True 时把恢复后的 energy + 当前时间作为新 updated_at 落盘(锚推进)。
+            cron tick 应传 True(每次 tick 重置锚,防止 energy 重复累加)。
+            API 读路径默认 False(纯显示,不污染 DB,不在高频轮询时反复写盘)。
+    """
     init_vitals_db()
     with _conn() as c:
         row = c.execute("SELECT * FROM vitals WHERE id = 1").fetchone()
     if not row:
-        return VitalSnapshot(energy=70.0, updated_at=now_iso())
+        snap = VitalSnapshot(energy=70.0, updated_at=now_iso(), last_activity_at=now_iso())
+        if persist:
+            _persist_snapshot_for_tick(snap)
+        return snap
 
+    keys = row.keys()
     base = VitalSnapshot(
-        energy=row["energy"] if "energy" in row.keys() else 70.0,
+        energy=row["energy"] if "energy" in keys else 70.0,
         updated_at=row["updated_at"],
+        last_activity_at=row["last_activity_at"] if "last_activity_at" in keys else row["updated_at"],
     )
 
-    recovered = _apply_recovery(base)
+    recovered = _apply_recovery(base, state=state)
 
-    # 持久化恢复后的精力，但不更新 updated_at
-    if abs(recovered.energy - base.energy) > 0.01:
-        with _conn() as c:
-            c.execute("UPDATE vitals SET energy=? WHERE id=1", (recovered.energy,))
+    # tick 路径:落盘 energy 并推进 updated_at 到 now(下次 tick 从此计 elapsed)。
+    # 不动 last_activity_at(那是 initiative 的锚,只在 consume/nurture/touch 时推进)。
+    if persist and abs(recovered.energy - base.energy) > 0.01:
+        _persist_snapshot_for_tick(recovered)
 
     return recovered
 
 
+def _persist_snapshot_for_tick(snap: VitalSnapshot) -> None:
+    """tick 路径专用:推进 updated_at 到 now,不碰 last_activity_at。"""
+    with _conn() as c:
+        c.execute("UPDATE vitals SET energy=?, updated_at=? WHERE id=1",
+                  (snap.energy, now_iso()))
+
+
+def touch_activity() -> None:
+    """显式推进 last_activity_at——wake 时主动标记"刚活动"。
+
+    替代旧 scheduler.py:581-601 的 UPDATE vitals SET updated_at hack。
+    一行一事——以前那个 hack 被骂"绑在事件机制上"因为它偷偷改了 recovery 计时锚。
+    """
+    init_vitals_db()
+    with _conn() as c:
+        c.execute("UPDATE vitals SET last_activity_at=? WHERE id=1", (now_iso(),))
+
+
 def _persist_snapshot(snap: VitalSnapshot, last_nurture: Optional[str] = None) -> None:
-    """写入精力快照并更新 updated_at（仅在真实事件时调用）。"""
+    """写入精力快照并更新 updated_at + last_activity_at（仅在真实事件时调用）。"""
+    now = now_iso()
     with _conn() as c:
         if last_nurture:
             c.execute(
-                "UPDATE vitals SET energy=?, updated_at=?, last_nurture=? WHERE id=1",
-                (snap.energy, now_iso(), last_nurture),
+                "UPDATE vitals SET energy=?, updated_at=?, last_activity_at=?, last_nurture=? WHERE id=1",
+                (snap.energy, now, now, last_nurture),
             )
         else:
             c.execute(
-                "UPDATE vitals SET energy=?, updated_at=? WHERE id=1",
-                (snap.energy, now_iso()),
+                "UPDATE vitals SET energy=?, updated_at=?, last_activity_at=? WHERE id=1",
+                (snap.energy, now, now),
             )
 
 
 def apply_nurture(kind: str, deltas: Dict[str, float],
                   raw_text: str = "", source: str = "") -> VitalSnapshot:
-    """外部养育操作（管理台加鸡腿等）。更新 updated_at。"""
+    """外部养育操作（管理台加鸡腿等）。更新 updated_at + last_activity_at。"""
     init_vitals_db()
     current = get_current_vitals()
+    now = now_iso()
     new = VitalSnapshot(
         energy=max(0, min(100, current.energy + deltas.get("energy", 0))),
-        updated_at=now_iso(),
+        updated_at=now,
+        last_activity_at=now,
     )
     _persist_snapshot(new, last_nurture=kind)
 
     with _conn() as c:
         c.execute(
             "INSERT INTO nurture_log (at, kind, deltas_json, raw_text, source) VALUES (?, ?, ?, ?, ?)",
-            (now_iso(), kind, _json.dumps(deltas, ensure_ascii=False), raw_text, source),
+            (now, kind, _json.dumps(deltas, ensure_ascii=False), raw_text, source),
         )
     return new
 
 
 def consume_energy(amount: float, reason: str = "activity") -> VitalSnapshot:
-    """消耗精力（工具调用/模型访问）。更新 updated_at。"""
+    """消耗精力（工具调用/模型访问）。更新 updated_at + last_activity_at。"""
     return apply_nurture(kind=f"energy_cost:{reason}", deltas={"energy": -amount})
 
 
@@ -192,6 +249,7 @@ __all__ = [
     "VitalSnapshot",
     "init_vitals_db",
     "get_current_vitals",
+    "touch_activity",
     "apply_nurture",
     "consume_energy",
     "recent_nurture_log",

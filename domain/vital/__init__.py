@@ -8,6 +8,7 @@ from domain.vital.state import (
     get_current_vitals,
     init_vitals_db,
     recent_nurture_log,
+    touch_activity,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "get_current_vitals",
     "init_vitals_db",
     "recent_nurture_log",
+    "touch_activity",
 ]

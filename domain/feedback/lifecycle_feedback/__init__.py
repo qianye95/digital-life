@@ -7,12 +7,6 @@ Hermes lifecycle modules.
 from __future__ import annotations
 
 from domain.core.models import LifecycleLayer, LifecycleSourceSlice
-from .human_interaction import (
-    NURTURE_KINDS,
-    PATTERNS,
-    merge_deltas,
-    parse_message,
-)
 from .event_audit import feedback_from_event_audit
 from .run_results import (
     feedback_from_blocked_execution,
@@ -55,20 +49,11 @@ LIFECYCLE_FEEDBACK_SLICES: tuple[LifecycleSourceSlice, ...] = (
         responsibility="Vital threshold crossings, nurture logs, and body-state feedback signals.",
         adapter_boundary="Vitals produce feedback signals; orchestration decides whether to wake.",
     ),
-    LifecycleSourceSlice(
-        source_module="nurture",
-        layer=LifecycleLayer.FEEDBACK,
-        target_package="domain.feedback.lifecycle_feedback.human_interaction",
-        responsibility="Human interaction deltas, relationship feedback, and inbound interaction audit.",
-        adapter_boundary="Gateway emits interaction feedback before orchestration handoff.",
-    ),
 )
 
 
 __all__ = [
     "LIFECYCLE_FEEDBACK_SLICES",
-    "NURTURE_KINDS",
-    "PATTERNS",
     "feedback_from_blocked_execution",
     "feedback_from_event_audit",
     "feedback_from_proactive_report",
@@ -76,6 +61,4 @@ __all__ = [
     "feedback_from_runtime_result",
     "feedback_from_session_summary",
     "feedback_from_vital_signal",
-    "parse_message",
-    "merge_deltas",
 ]

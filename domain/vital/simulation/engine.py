@@ -34,10 +34,13 @@ ENERGY_SEGMENTS = [
 # ── 精力常量 ──
 
 ENERGY_MAX = 100
-# 每小时恢复（RUNNING 和 BLOCKED 统一）。默认 25 —— 4 小时不动可从 0 恢复到 100，
-# 一夜休眠基本回满血。可通过 env DIGITAL_LIFE_ENERGY_RECOVERY_PER_HOUR 覆盖
-# 默认值（_resolve_energy_token_constants）。
+# 每小时恢复（BLOCKED 全速 / RUNNING 减速）。默认 25 —— BLOCKED 状态下 4 小时
+# 不动可从 0 恢复到 100，一夜休眠基本回满血。可通过 env
+# DIGITAL_LIFE_ENERGY_RECOVERY_PER_HOUR 覆盖默认值（_resolve_energy_token_constants）。
 ENERGY_RECOVERY_PER_HOUR = 25.0
+# RUNNING（agent 活跃）时恢复减速系数——agent 边工作边慢补，但不补为零。
+# 0.3 = 30% rate（7.5/h at 默认 25）。这个系数是产品魔数，不可配（写死在代码里）。
+ENERGY_RECOVERY_RUNNING_FACTOR = 0.3
 ENERGY_COST_PER_CALL = 0.2          # 每次工具调用/模型访问的"动作成本"（不与 token 挂钩）
 
 # 精力-token 耦合（设计文档 15.4）：LLM call 走真实 token usage 消耗精力，
@@ -129,10 +132,16 @@ class SimulationEngine:
                 from infrastructure.config import get_runtime_state_db_path
                 db_path = get_runtime_state_db_path()
             db = sqlite3.connect(str(db_path))
-            r = db.execute("SELECT updated_at FROM vitals WHERE id=1").fetchone()
+            # 优先读 last_activity_at（vital-refactor 后的 initiative idle 锚）；
+            # 老库 migration 会自动加该列并回填 = updated_at，但健壮起见 fallback。
+            r = db.execute(
+                "SELECT last_activity_at, updated_at FROM vitals WHERE id=1"
+            ).fetchone()
             db.close()
             if r:
-                self._last_activity_at = parse_iso(r[0])
+                # state.py 的 init_vitals_db 会自动 ALTER + 回填 last_activity_at
+                val = r[0] or r[1]
+                self._last_activity_at = parse_iso(val) if val else None
         except Exception:
             pass
 
@@ -148,7 +157,15 @@ class SimulationEngine:
             save_vitals(self._vitals)
 
     def _v(self) -> Dict[str, float]:
-        self._load()
+        """读当前 vitals snapshot,给 check_energy_events 比段位用。
+
+        走 domain.vital.state.get_current_vitals() —— 这是事实路径(已按 elapsed
+        + rate 算过恢复)。曾经走 affairs.runtime.get_vitals(),但后者是废弃的
+        DECAY=-40/h 反方向实现,会污染段位判断。
+        """
+        from domain.vital.state import get_current_vitals
+        snap = get_current_vitals()
+        self._vitals = {"energy": snap.energy}
         return self._vitals
 
     # ── 状态查询 ──
@@ -193,17 +210,11 @@ class SimulationEngine:
         return v["energy"]
 
     def sync_last_activity_at(self) -> None:
-        """从 DB 重读 vitals.updated_at 到内存。
+        """从 DB 重读 last_activity_at 到内存。
 
-        scheduler.py 每次 wake 都 UPDATE vitals.updated_at（重置 initiative idle
-        timer，注释见 scheduler.py:_touch_vitals_on_wake），但本类是 module-level
-        单例的内存状态——DB 改了，内存的 _last_activity_at 不会自动同步。
-        没有消耗精力的唤醒（纯 timer / routine）走不动 consume_energy，于是
-        initiative 计时器从昨晚一直累计到今天早上，导致早起和晨间 routine 挤压、
-        第一件事、initiative 重复触发。
-
-        解决：scheduler 触发 wake 那段 UPDATE 之后调一次本方法，强制内存与 DB
-        一致；下一轮 check_energy_events 的 elapsed_h 才会从 wake 时刻算起。
+        vital-refactor 后:scheduler.wake 改成 touch_activity()(显式更新
+        last_activity_at)→ 紧接调本方法同步内存。本类的 _last_activity_at 是
+        check_energy_events 里 initiative idle 计时的内存锚。
         """
         try:
             import sqlite3
@@ -215,9 +226,13 @@ class SimulationEngine:
             db_path = Path(override) if override else get_runtime_state_db_path()
             db = sqlite3.connect(str(db_path))
             try:
-                r = db.execute("SELECT updated_at FROM vitals WHERE id=1").fetchone()
-                if r and r[0]:
-                    self._last_activity_at = parse_iso(r[0])
+                # 优先 last_activity_at(refactor 后的锚),fallback updated_at
+                r = db.execute(
+                    "SELECT last_activity_at, updated_at FROM vitals WHERE id=1"
+                ).fetchone()
+                if r:
+                    val = r[0] or r[1]
+                    self._last_activity_at = parse_iso(val) if val else None
             finally:
                 db.close()
         except Exception as exc:
@@ -225,9 +240,21 @@ class SimulationEngine:
 
     # ── 时间推进 ──
 
-    def tick(self) -> Dict[str, Any]:
+    def tick(self, state: str = "BLOCKED") -> Dict[str, Any]:
+        """每隔 cron_tick 调用一次,推进恢复 + 检测衍生事件。
+
+        state: "BLOCKED"（默认,全速恢复） / "RUNNING"（30% 恢复）。
+
+        重要:recovery 计算走 domain.vital.state.get_current_vitals(state=...,
+        persist=True),而不是 affairs.runtime.get_vitals() —— 后者写的是"每小時
+        -40 衰减"方向跟设计相反,是历史残留。state.py 的 _apply_recovery 才是
+        事实路径。
+        """
+        from domain.vital.state import get_current_vitals
         from .energy_events import check_energy_events
-        check_energy_events(self)
+
+        get_current_vitals(state=state, persist=True)  # 推进恢复 + 推进 updated_at
+        check_energy_events(self)                       # 段位变化 → vital_threshold
         return {"vitals": self._v()}
 
 

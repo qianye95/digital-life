@@ -756,12 +756,16 @@ def _emit_l4_human_event(
 ) -> int:
     """发出人类消息事件——消息入口的最后一步。
     流程：
-      1. 解析消息内容（parse_message），提取 nurture kind（如 chat/technical）
-      2. 应用精力滋养（apply_nurture），更新 vitals 表
-      3. 群聊 → emit_event("group_message", channel="gateway:lark:group")
-      4. 私聊 → emit_event("message", channel="gateway:lark:user")
+      1. 群聊 → emit_event("group_message", channel="gateway:lark:group")
+      2. 私聊 → emit_event("message", channel="gateway:lark:user")
 
     返回 event_id（-1 表示失败）。
+
+    注：精力系统不挂消息入站钩子。前置版本的 apply_nurture(parse_message(text))
+    实际只对 play 类关键词扣 -2 energy 而已,而且 NURTURE_KINDS 表设计本身就不
+    是为了影响 energy（目标维度是 satiety/mood/bond,这些维度未实现）,所以本
+    调用是个伪调用。精力只通过两个通道影响：consume_energy(agent LLM call）
+    和 nurture_energy(前端加鸡腿）。
     """
     # 平台前缀（source/channel 用）：feishu → lark, 其它 → platform 本身
     pf = "lark" if platform == "feishu" else platform
@@ -773,20 +777,6 @@ def _emit_l4_human_event(
     # 旧 unified_contacts 体系是无中生有的复杂度。
     try:
         from domain.lifecycle.events import emit_event
-        from domain.feedback.lifecycle_feedback.human_interaction import merge_deltas as _merge_deltas, parse_message
-        from domain.vital import apply_nurture
-        from domain.lifecycle.clock import now_iso
-
-        kinds = parse_message(text) or ["chat"]
-        primary_kind = kinds[0]
-        deltas = _merge_deltas(kinds)
-
-        apply_nurture(
-            kind=primary_kind,
-            deltas=deltas,
-            raw_text=text[:500],
-            source=f"gateway:{pf}",
-        )
 
         if is_group:
             # 标注发送者岗位（如果在某个项目中）

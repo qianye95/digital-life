@@ -578,25 +578,18 @@ def _wake_digital_life_inner_safe(
         # 没配置时用 999 给足空间，让长任务不被切断（保持与历史行为一致）。
         max_iterations = int(_cfg.get("agent", {}).get("max_turns") or 999)
 
-        # 先算一次 vitals：此时还是 BLOCKED，确保睡眠期间的精力恢复被持久化
-        # （否则改成 RUNNING 后 get_current_vitals 会用 RUNNING 衰减率，丢失恢复）
+        # 醒来即标记 last_activity_at（vital-refactor 后的字段拆分）。
+        #
+        # 旧版这里是一坨 hack：UPDATE vitals.updated_at + sync engine 内存。原因
+        # 是 updated_at 一个字段身兼两职（recovery 锚 + initiative idle 锚）。重构
+        # 后两者分开：updated_at 只由 tick/consume_energy/apply_nurture 推进
+        # （真实事件）；last_activity_at 才是 wake-time 主动标记"刚活动"的锚。
+        # engine 单例内存的 _last_activity_at 必须显式 sync 才能跟 DB 一致。
         try:
-            from domain.vital import get_current_vitals
-            from domain.lifecycle.affairs.runtime import _conn
-            from domain.lifecycle import clock as _clock
-            get_current_vitals()
-            # Touch vitals.updated_at so initiative idle timer resets on every wake.
-            with _conn() as c:
-                c.execute("UPDATE vitals SET updated_at = ? WHERE id = 1",
-                          (_clock.now_iso(),))
-            # Engine 是 module-level 单例，DB 改完内存 _last_activity_at 不会自动同步。
-            # 没 sync 的话 initiative 计时会从昨晚一直累计到今早，导致早起 + 晨间 routine
-            # 挤压、和第一件事重复触发。等价于"作息首个事件之后重新计时"——人类作息语义。
-            try:
-                from domain.vital.simulation import get_engine
-                get_engine().sync_last_activity_at()
-            except Exception:
-                pass
+            from domain.vital import touch_activity
+            touch_activity()
+            from domain.vital.simulation import get_engine
+            get_engine().sync_last_activity_at()
         except Exception:
             pass
 

@@ -150,6 +150,14 @@ def _run_l4_tick_inner(instance_id: str, log) -> None:
             # mid-session 注入已经在 emit_event 内 inline 完成（_signal_event_to_running_session），
             # 不再在这里单独 _inject_events——所有事件来源（人/bot/alarm）经过 emit 都会
             # 立即让 RUNNING 实例的信号队列看到。这里的职责只剩下"stale 检测"，已在上文完成。
+
+            # 但 vitals tick 要在 RUNNING 也跑——agent 长跑时精力也要保持鲜活（30% rate 慢补）
+            try:
+                from domain.vital.simulation import get_engine, reset_engine
+                reset_engine()
+                get_engine().tick(state="RUNNING")
+            except Exception as exc:
+                log.debug("L4: vitals tick (RUNNING) failed: %s", exc)
             return
 
         if not aff or aff.status != AffairStatus.BLOCKED.value:
@@ -168,9 +176,9 @@ def _run_l4_tick_inner(instance_id: str, log) -> None:
         try:
             from domain.vital.simulation import get_engine, reset_engine
             reset_engine()
-            get_engine().tick()
-        except Exception:
-            pass
+            get_engine().tick(state="BLOCKED")
+        except Exception as exc:
+            log.debug("L4: vitals tick (BLOCKED) failed: %s", exc)
 
         try:
             from domain.lifecycle.routine_scheduler import ensure_routine_events
