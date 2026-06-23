@@ -200,50 +200,41 @@ def _run_l4_tick_inner(instance_id: str, log) -> None:
         # ── 拉取事件队列 ─────────────────────────────────────────────────────
 
         from domain.lifecycle.events import pop_due_events
-        from domain.lifecycle.event_registry import get_event_type
 
         events = pop_due_events(limit=50)
         if not events:
             log.debug("L4: no due events — sleeping")
             return
 
+        # ⚠ 诊断日志[tick决策]：群消息穿透排查用。零行为变更。
+        log.info(
+            "TICK_POP instance=%s count=%d details=%s",
+            instance_id, len(events),
+            [(e.get("event_id"), e.get("kind"),
+              (e.get("payload") or {}).get("sender_name"),
+              (e.get("payload") or {}).get("chat_id"))
+             for e in events],
+        )
+
         # All events are equal — no special filtering. Let the trigger chain
         # and wake prompt decide how to present them.
 
         # ── 确定唤醒原因 ───────────────────────────────────────────────────────
-        # 同优先级 ties 的 tie-break：内容类事件优先（routine > message/group_message >
-        # awaiting_reply > timer > initiative > 其它）。否则会出现下面这种 BUG：
-        # 08:00 北京 morning_plan(routine) + timer 同时到期，pop_due_events 按 event_id
-        # ASC 返回 → events=[routine, timer]，严格 > 让 timer 赢 → wake reason = timer，
-        # build_wake_prompt 走 timer 模板而非 routine 的 prompt_template → morning_plan
-        # 的 "skill_view daily_planner" 等深度思考 skill 永远不注入。
-        # tie-break 表里的顺序就是"同优先级时哪种应该赢"。
-        _REASON_TIEBREAK = {
-            "routine": 0,
-            "group_message": 1,
-            "message": 2,
-            "awaiting_reply": 3,
-            "timer": 4,
-            "initiative": 5,
-        }
+        # 抽到 domain/lifecycle/wakeup_policy.choose_reason(refactor/emit-driven-wake)。
+        # cron tick 和 events.emit→_wake_or_inject 共用同一份优先级判断——
+        # "事件平权"的产品语义在这里落实(决策点只有一份)。
+        from domain.lifecycle.wakeup_policy import choose_reason
 
-        reason = "unknown"
-        top_priority = -1
-        top_tiebreak = 10 ** 9
-        for ev in events:
-            kind = ev.get("kind", "")
-            try:
-                td = get_event_type(kind)
-                pri = td.priority if td else 5
-            except Exception:
-                pri = 5
-            tb = _REASON_TIEBREAK.get(kind, 100)
-            if pri > top_priority or (pri == top_priority and tb < top_tiebreak):
-                top_priority = pri
-                top_tiebreak = tb
-                reason = kind
+        reason = choose_reason(events)
 
-        log.info("L4: waking — reason=%s pri=%d events=%d", reason, top_priority, len(events))
+        log.info("L4: waking — reason=%s events=%d", reason, len(events))
+        log.info(
+            "TICK_WAKE decision instance=%s reason=%s top_event=%s all_event_ids=%s",
+            instance_id, reason,
+            [(e.get("event_id"), e.get("kind"))
+             for e in events if e.get("kind") == reason][:3],
+            [e.get("event_id") for e in events],
+        )
 
         # ── Token 预算闸门（基础设施级硬保护）─────────────────────────────
         # 不管事件优先级高低、精力是否充分，"这个小时/今日还能烧 token 么"

@@ -13,71 +13,17 @@ from application.runtime_provider import console_runtime_adapter
 from infrastructure.config import get_runtime_config_path, get_runtime_memories_dir, get_runtime_state_db_path
 
 
-def _try_wake_for_nurture(event_id: int, label: str, amount: int, current_energy: int) -> None:
-    """Signal the nurture event to the model.
+def _unused_legacy_wake_worker_removed() -> None:
+    """Placeholder.
 
-    If the affair is BLOCKED, trigger an immediate wake.
-    If the affair is RUNNING, inject the event into the running session.
+    The old ``_try_wake_for_nurture`` helper was removed in
+    ``refactor/emit-driven-wake``: emit_event now also triggers wake decision
+    (or mid-session injection for RUNNING affairs). The webhook-style emit
+    architecture collapses all caller-side wake decisions into a single
+    canonical path.If you need instance context to be set (e.g. inside a
+    request handler thread), set it via ``set_instance_context`` /
+    ``set_current_instance_id`` before calling emit_event.
     """
-    import threading
-    try:
-        from domain.lifecycle.affairs.runtime import get_affair
-        from domain.orchestration.lifecycle_orchestration.bootstrap.runtime import _find_life_affair, ensure_life_affair
-        from domain.lifecycle.event_registry import get_event_type
-
-        affair_id = _find_life_affair()
-        if not affair_id:
-            affair_id = ensure_life_affair()
-        affair = get_affair(affair_id)
-        if not affair:
-            return
-
-        ev_type = get_event_type("nurture_energy")
-        summary = {
-            "event_id": event_id,
-            "kind": "nurture_energy",
-            "display_name": ev_type.display_name if ev_type else "加鸡腿",
-            "description": ev_type.description if ev_type else "",
-            "payload": {
-                "energy_added": amount,
-                "current_energy": current_energy,
-                "action_label": label,
-            },
-        }
-
-        if affair.status in ("BLOCKED", "PENDING"):
-            from domain.lifecycle.scheduler import wake_digital_life
-            from infrastructure.config import get_app_instance_id, set_current_instance_id, reset_current_instance_id
-            from domain.lifecycle.events import set_instance_context, reset_instance_context
-            import os as _os
-
-            # Capture the current instance id from ContextVar (set by request middleware).
-            # The spawned thread cannot rely on os.environ because cron concurrently
-            # mutates it. Pin instance via env var + both ContextVars inside the worker.
-            captured_iid = get_app_instance_id()
-
-            def _wake_worker(iid: str = captured_iid) -> None:
-                prev_env = _os.environ.get("DIGITAL_LIFE_INSTANCE_ID")
-                _os.environ["DIGITAL_LIFE_INSTANCE_ID"] = iid
-                tok_cfg = set_current_instance_id(iid)
-                tok_ev = set_instance_context(iid)
-                try:
-                    wake_digital_life(affair_id, "nurture_energy", "", [summary])
-                finally:
-                    reset_instance_context(tok_ev)
-                    reset_current_instance_id(tok_cfg)
-                    if prev_env is None:
-                        _os.environ.pop("DIGITAL_LIFE_INSTANCE_ID", None)
-                    else:
-                        _os.environ["DIGITAL_LIFE_INSTANCE_ID"] = prev_env
-
-            thread = threading.Thread(target=_wake_worker, daemon=True)
-            thread.start()
-        elif affair.status == "RUNNING":
-            from domain.lifecycle.session_events import signal_new_events
-            signal_new_events([summary])
-    except Exception:
-        pass
 
 
 class MonitorConsoleWorkflow:
@@ -1238,15 +1184,14 @@ class MonitorConsoleWorkflow:
             # 重载 engine 缓存，使 engine 读到最新的 vitals
             reset_engine()
 
-            # 发射 nurture_energy 事件（让 Agent 知道谁加了鸡腿）
+            # 发射 nurture_energy 事件（让 Agent 知道谁加了鸡腿）。
+            # emit_event 内部会自动尝试叫醒(BLOCKED→wake / RUNNING→mid-session inject),
+            # 不再需要 _try_wake_for_nurture 手动决策(refactor/emit-driven-wake)。
             event_id = emit_event("nurture_energy", {
                 "energy_added": int(amount),
                 "current_energy": current_energy,
                 "action_label": label,
             })
-
-            # Trigger wake if the affair is BLOCKED so the model responds immediately
-            _try_wake_for_nurture(event_id, label, amount, current_energy)
 
             return UseCaseResult({"ok": True, "energy": current_energy, "added": int(amount)})
         except Exception as exc:

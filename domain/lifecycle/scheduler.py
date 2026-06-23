@@ -415,6 +415,16 @@ def _wake_digital_life_inner_safe(
     *,
     instance_id: str = "",
 ) -> dict:
+    # ⚠ 诊断日志[wake入口]：群消息穿透排查用。零行为变更。
+    # 这里能看到 wake 收到的 pending_events 长度（实例下 _route_to_life / tick / fast-path 不同源）
+    _pct = len(pending_events) if isinstance(pending_events, list) else None
+    logger.info(
+        "WAKE_BEGIN affair=%r reason=%s instance=%s pending_events=%s "
+        "pending_event_ids=%s",
+        affair_id, reason, instance_id,
+        _pct if _pct is not None else "None",
+        [e.get("event_id") for e in pending_events] if isinstance(pending_events, list) else None,
+    )
 
     init_db()
 
@@ -495,6 +505,17 @@ def _wake_digital_life_inner_safe(
     # 构建唤醒 prompt（先构建，不更新状态——agent 失败时不留副作用）
     action_prompt, ref_context, covered_event_ids, task_prompt = build_wake_prompt(reason, extra=extra, pending_events=pending_events,
                                     sleep_minutes=sleep_minutes, status="BLOCKED")
+    _pe_n = len(pending_events) if isinstance(pending_events, list) else 0
+    _branch = (
+        "single_event_inline" if _pe_n == 1
+        else ("multi_event_list" if _pe_n >= 2 else "ZERO_EVENTS_pseudo_multi")
+    )
+    logger.info(
+        "WAKE_PROMPT_BUILT reason=%s sleep_minutes=%.1f pending_events=%d "
+        "branch=%s covered_event_ids=%s action_prompt_head=%r",
+        reason, sleep_minutes, _pe_n, _branch, list(covered_event_ids),
+        (action_prompt[:100] + "…") if len(action_prompt) > 100 else action_prompt,
+    )
     logger.info("Waking digital life: reason=%s, affair=%s", reason, affair_id)
 
     # 设置事务上下文
@@ -600,6 +621,10 @@ def _wake_digital_life_inner_safe(
         prev_sid = _check_continuation(instance_id)
         is_continuation = bool(prev_sid)
         session_id = prev_sid if is_continuation else make_wake_session_id(reason)
+        logger.info(
+            "WAKE_SESSION instance=%s session_id=%s is_continuation=%s",
+            instance_id, session_id, is_continuation,
+        )
         from infrastructure.config import set_current_session_id
         _session_id_token = set_current_session_id(session_id)
 
@@ -612,7 +637,10 @@ def _wake_digital_life_inner_safe(
                 from domain.lifecycle.events import consume_event
                 consume_event(eid, session_id=session_id)
                 auto_consumed_eids.append(eid)
-                logger.debug("Auto-consumed event %s at wake time", eid)
+                logger.info(
+                    "WAKE_AUTO_CONSUME event_id=%d session_id=%s caller=covered_event_ids",
+                    eid, session_id,
+                )
             except Exception:
                 pass
 

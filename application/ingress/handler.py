@@ -149,8 +149,9 @@ async def handle_message(*, adapter: IngressAdapter, msg: NormalizedMessage) -> 
     sibling_app_id = _sender_is_sibling_bot(msg.sender_id, msg.platform)
     if sibling_app_id:
         logger.info(
-            "Ingress ignore (sibling WS echo): app_id=%s — handled via shared chats.db",
-            sibling_app_id[:16],
+            "INGRESS_DROP reason=sibling_WS_echo app_id=%s chat=%r sender=%r — "
+            "已由 broadcast 路径处理，本侧不 emit、不 wake",
+            sibling_app_id[:16], msg.chat_id, msg.sender_id[:16],
         )
         return True
 
@@ -262,6 +263,17 @@ def _route_to_life(
     修法（2026-06-16）：合成入站 channel 字符串（lark:<group|dm>:<chat_id>），
     调 cancel_alarms_by_filter 精确按通道取消。
     """
+    # ⚠ 诊断日志[入口]：群消息穿透排查用。零行为变更。
+    # 入口 conocer 一到就把入站身份信息打出来，便于和 EMIT_*/POP_*/CONSUME_* 串起来。
+    logger.info(
+        "INGRESS_BEGIN instance_id=%r is_group=%s sender=%r(%r) chat_id=%r "
+        "mentions_bot=%s merged_count=%d platform=%s text_head=%r",
+        instance_id, is_group, sender_name, sender_id,
+        chat_id, mentions_bot,
+        len(merged_texts) if merged_texts else 0, platform,
+        (text[:60] + ("…" if len(text) > 60 else "")) if isinstance(text, str) else text,
+    )
+
     try:
         from domain.lifecycle.alarms import cancel_alarms_by_filter
 
@@ -302,6 +314,12 @@ def _route_to_life(
         platform=platform,
         merged_texts=merged_texts,
         adapter=adapter,
+    )
+    logger.info(
+        "EMIT_HUMAN_RESULT event_id=%d is_group=%s chat_id=%r "
+        "instance_id=%r outcome=%s",
+        event_id, is_group, chat_id, instance_id,
+        "ok" if event_id > 0 else "FAILED-or-merged",
     )
 
     try:
@@ -378,284 +396,21 @@ def _route_to_life(
     except Exception:
         pass
 
-    try:
-        from domain.lifecycle.affairs.runtime import get_affair
-        from domain.orchestration.lifecycle_orchestration.bootstrap.runtime import _find_life_affair, ensure_life_affair
-        from domain.lifecycle.scheduler import wake_digital_life
-
-        affair_id = _find_life_affair()
-        if not affair_id:
-            affair_id = ensure_life_affair()
-            logger.info("Auto-created life affair: %s", affair_id)
-
-        affair = get_affair(affair_id)
-        if affair and affair.status in ("BLOCKED", "PENDING"):
-            # 群消息 urgency 分流:soft 消息不立即触发 wake,让其进 30s 累积窗口
-            # (由 emit_event 内的 _apply_debounce 合并),下个 cron tick 自然触发。
-            # immediate 消息(@我 / 含 attention_keywords / owner 发言)走现有立即 wake。
-            # 私聊(message)永远 immediate,不分流。
-            if is_group:
-                urgency = _classify_group_urgency(text, mentions_bot, sender_name)
-                if urgency == "soft":
-                    logger.info("L4 group soft: deferred to 30s batch (sender=%s chat=%s)", sender_name, chat_id[:16] if chat_id else "?")
-                    return  # 不立即 wake,事件已入 events 表,debounce 会合并,cron 到期触发
-            # Pass the freshly emitted event directly so build_wake_prompt uses
-            # it instead of re-querying (which would catch stale unconsumed events).
-            if event_id > 0:
-                kind = "group_message" if is_group else "message"
-                from domain.lifecycle.event_registry import get_event_type
-                ev_type = get_event_type(kind)
-                # group_message mention 信息要传给 pending_ev，否则 wake prompt 的
-                # {mention_names} {mention_map} 模板渲染为空（即使 DB payload 完整）
-                _mention_names_str = "、".join(mention_names) if mention_names else ""
-                _mention_map_str = "、".join(mention_map) if mention_map else ""
-                pending_ev = {
-                    "event_id": event_id,
-                    "kind": kind,
-                    "display_name": ev_type.display_name if ev_type else kind,
-                    "description": ev_type.description if ev_type else "",
-                    "payload": {
-                        "text": text,
-                        "sender_name": sender_name,
-                        "sender_id": sender_id,
-                        "chat_name": chat_name,
-                        "chat_id": chat_id,
-                        "mentions_bot": mentions_bot,
-                        "mention_names": _mention_names_str,
-                        "mention_map": _mention_map_str,
-                    },
-                }
-                wake_args = (affair_id, kind, "", [pending_ev])
-            else:
-                wake_args = (affair_id, "message")
-            thread = threading.Thread(
-                target=wake_digital_life,
-                args=wake_args,
-                daemon=True,
-            )
-            thread.start()
-            logger.info("L4 direct wake triggered for affair %s", affair_id)
-        elif affair and affair.status == "RUNNING":
-            # Immediately inject the new event into the running session
-            # so the model sees it without waiting for the next cron tick.
-            # 同样:群消息 soft 不打断当前 wake(不然 alpha 广播每条都打断 zero 思路)
-            if is_group:
-                urgency = _classify_group_urgency(text, mentions_bot, sender_name)
-                if urgency == "soft":
-                    logger.info("L4 group soft on RUNNING: deferred (sender=%s chat=%s)", sender_name, chat_id[:16] if chat_id else "?")
-                    return
-            _inject_msg_to_running_session(
-                event_id=event_id,
-                text=text,
-                instance_id=instance_id,
-                is_group=is_group,
-                sender_name=sender_name,
-                chat_name=chat_name,
-                mentions_bot=mentions_bot,
-            )
-    except Exception as exc:
-        logger.warning("L4 direct wake failed: %s", exc)
+    # ⭐ refactor/emit-driven-wake 之后:emit 内部已经接管 wake 决策。
+    #    handler 不再看 affair 状态、不起线程、不做 urgency 分流——只 emit 完走人。
+    #    BLOCKED → _wake_or_inject 起线程叫醒(pop 全队列)
+    #    RUNNING → _wake_or_inject 调 signal_new_events(mid-session 注入)
+    #    失败 → 60s cron 兜底
+    # handler 不在这里调 get_affair / wake_digital_life / _inject_msg_to_running_session
+    # 任何一个——这些都在 events._wake_or_inject 内统一处理。
+    logger.info("INGRESS_END reason=emitted_handler_no_wake_decision")
+    return
 
 
-def _inject_msg_to_running_session(
-    *,
-    event_id: int,
-    text: str,
-    instance_id: str = "",
-    is_group: bool = False,
-    sender_name: str = "",
-    chat_name: str = "",
-    mentions_bot: bool = False,
-) -> None:
-    """立即将新消息事件注入到运行中会话的内存队列。
+# refactor/emit-driven-wake: _inject_msg_to_running_session / _mirror_inject_to_audit_turn
+# 已经搬到 domain/lifecycle/events.py(_inject_to_running_session / _mirror_inject_to_audit_turn)。
+# emit_event 在 affair==RUNNING 时自动调用,handler 不再自己决定何时 inject。
 
-    避免等待下一次 cron tick（最多 60s），否则短时间内的连续消息会被遗漏。
-    通过 session_events.signal_new_events() 写入内存队列，
-    check_before_send 拦截器会在模型下次调 express_to_human 时检测到。
-
-    同时持久化到当前 session 的 messages 表（role=user），让前端 sessions 列表
-    能看到这条 mid-session 注入的事件，避免对话历史缺失。
-    """
-    try:
-        from domain.lifecycle.session_events import signal_new_events
-        from domain.lifecycle.event_registry import get_event_type
-
-        kind = "group_message" if is_group else "message"
-        ev_type = get_event_type(kind)
-
-        # 组装完整 wake-prompt 文本（按当前 event_types.yaml 模板格式，模型 cross-wake 看到一致）
-        # 简化：直接拼核心字段
-        wf = (
-            f"## ── ↓ 当下事件 ↓ ──\n\n"
-            f"### 唤醒原因\n\n"
-            f"💬 {'群聊有新消息' if is_group else '新消息'}。\n"
-            + (f"{sender_name}：{text}\n" if is_group else f"{sender_name}：{text}\n")
-            + f"\n如需回应，必须用 `express_to_human` 工具发送。\n"
-            + f"── /当下事件 ──"
-        )
-
-        # 持久化为 user message（manager 线程不知道 session_id，需自己查最新的 running session）
-        try:
-            from infrastructure.ai.session_db import SessionDB
-            from infrastructure.config import get_current_session_id
-            cur_sid = get_current_session_id() or ""
-            if not cur_sid:
-                # ContextVar 未传过来（handler 线程场景），查最近未结束的 session
-                import sqlite3
-                from infrastructure.config import get_runtime_state_db_path
-                sdb_path = get_runtime_state_db_path()
-                if sdb_path.exists():
-                    conn = sqlite3.connect(str(sdb_path))
-                    try:
-                        row = conn.execute(
-                            "SELECT id FROM sessions WHERE ended_at IS NULL "
-                            "ORDER BY started_at DESC LIMIT 1"
-                        ).fetchone()
-                        if row:
-                            cur_sid = row[0]
-                    finally:
-                        conn.close()
-            if cur_sid:
-                sdb = SessionDB()
-                sdb.append_message(
-                    cur_sid, "user", wf,
-                    chat_id=chat_id if is_group else "",
-                )
-
-            # 同步镜像到 runtime_log.turn 表(前端 Transcript 视图的数据源)。
-            # 历史 BUG: 旁路注入只写 messages 表,Transcript 渲染 turn 表
-            # 看不到,但"完整详情"展开看的 messages/injections 能看到——
-            # 用户感觉"消息丢了一半"。
-            # 归属: 挂到当前在跑的 wake 的 turn 序列末尾(不另立占位 wake)。
-            # 没有在跑的 wake 时只 log,不写孤 turn(避免幽灵 turn BUG)。
-            try:
-                if cur_sid:
-                    _mirror_inject_to_audit_turn(
-                        instance_id=instance_id,
-                        text=wf,
-                        chat_id=chat_id if is_group else "",
-                    )
-            except Exception as exc:
-                logger.debug("mid-session inject audit mirror failed: %s", exc)
-        except Exception as exc:
-            logger.debug("mid-session inject DB persistence failed: %s", exc)
-
-        summary = {
-            "event_id": event_id,
-            "kind": kind,
-            "display_name": ev_type.display_name if ev_type else kind,
-            "description": ev_type.description if ev_type else "",
-            "payload": {
-                "text": text,
-                "sender_name": sender_name,
-                "chat_name": chat_name,
-                "mentions_bot": mentions_bot,
-            },
-        }
-        signal_new_events([summary], instance_id=instance_id)
-        logger.info(
-            "L4 direct: injected %s event %d to running session", kind, event_id
-        )
-        # 如果 session 正在 rest/sleep（emit_wait 后变 BLOCKED），
-        # mid-session 注入可能赶不上最后一轮。确保事件不会被丢：
-        # session 结束后 BLOCKED 时，cron 下次 tick 会消费 unconsumed events。
-        # 但为了即时性，这里也触发一次 wake_if_pending（不等 60s cron tick）。
-        try:
-            import threading as _th
-            def _delayed_wake_check():
-                import time as _time
-                _time.sleep(3)  # 等 session 把 rest 处理完
-                try:
-                    from domain.lifecycle.affairs.runtime import get_affair
-                    aff = get_affair(affair_id)
-                    if aff and aff.status.value in ("BLOCKED", "PENDING"):
-                        logger.info("mid-session inject: affair %s now BLOCKED, triggering wake for event %d",
-                                    affair_id[:8], event_id)
-                        from domain.lifecycle.scheduler import wake_digital_life
-                        wake_digital_life(
-                            instance_id=instance_id,
-                            trigger_reason=f"{kind}:delayed_after_inject",
-                            affair_id=affair_id,
-                        )
-                except Exception as exc:
-                    logger.debug("delayed wake check failed: %s", exc)
-            _th.Thread(target=_delayed_wake_check, daemon=True).start()
-        except Exception:
-            pass
-    except Exception as exc:
-        logger.debug("L4 direct: inject to running session failed: %s", exc)
-
-def _mirror_inject_to_audit_turn(*, instance_id: str, text: str, chat_id: str = "") -> None:
-    """把 mid-session 旁路注入消息镜像到 runtime_log.turn 表对应当前在跑的 wake。
-
-    Transcript 前端组件按 wake_id 拉取 turn 列表渲染。旁路注入只写 state.db.messages
-    时,Transcript 看不到——但 chat_stream injection 拉到了 messages.db,所以
-    "完整详情"看得到。两套数据源不一致导致用户感觉"消息丢了一半"。
-
-    本函数补一份 turn 表写入,让 Transcript 在当前在跑 wake 的序列末尾看到这条消息。
-
-    边界处理:
-      - 没有在跑的 wake(affair 刚好转 BLOCKED 的几毫秒空隙)→ 只 log,不写孤 turn
-      - 多实例隔离:按 instance_id 查 wake 表,确保不会写错别人实例的 wake
-      - llm_call_seq / position_in_call 取该 wake 已有 turn 的最大值 +1:
-        语义上"在上一个 LLM call 之间插入了一条 user 输入"
-        (而非开启新的 LLM call,所以 llm_call_seq 不递增)
-    """
-    if not instance_id:
-        return
-    try:
-        from infrastructure.persistence.instance import get_audit
-        audit = get_audit(instance_id)
-    except Exception:
-        return
-
-    try:
-        # 找当前实例最近的未结束 wake 且仍在时间窗内(避免僵尸 wake 污染:
-        # 进程被 SIGTERM 杀掉后,某些 wake.end_at 没写,长期 NULL 留在表里)
-        row = audit.fetchone(
-            "SELECT id, wake_seq FROM wake "
-            "WHERE instance_id = ? AND ended_at IS NULL "
-            "AND started_at >= ? "
-            "ORDER BY started_at DESC LIMIT 1",
-            (instance_id, time.time() - 3600),
-        )
-        if not row:
-            # 当前没有在跑的 wake —— 不写孤 turn 避免幽灵数据
-            logger.debug(
-                "mid-session inject: no active wake for %s, skip turn mirror",
-                instance_id[:8],
-            )
-            return
-
-        wake_id = row.get("id") or row["wake_seq"]
-        wake_seq = row["wake_seq"]
-
-        # 找该 wake 现有 turn 的最后一行,继承 llm_call_seq
-        last = audit.fetchone(
-            "SELECT llm_call_seq AS c, position_in_call AS p "
-            "FROM turn WHERE wake_id = ? "
-            "ORDER BY id DESC LIMIT 1",
-            (wake_id,),
-        )
-        last_call = (last or {}).get("c") or 0
-        last_pos = (last or {}).get("p") or 0
-        # position_in_call +1 表示插入到当前 call 的最新 tool 之后。
-        # 不递增 llm_call_seq(不属于新 LLM call,只是 mid-call 的 user 输入)
-        audit.append_turn(
-            wake_id=wake_id,
-            wake_seq=wake_seq,
-            llm_call_seq=last_call,
-            position_in_call=last_pos + 1,
-            role="user",
-            content=text,
-            chat_id=chat_id or None,
-        )
-        logger.debug(
-            "mid-session inject mirrored to turn (wake=%s/%s call=%s pos=%s)",
-            wake_id, wake_seq, last_call, last_pos + 1,
-        )
-    except Exception as exc:
-        logger.debug("mid-session inject audit mirror failed: %s", exc)
 
 
 
@@ -693,27 +448,18 @@ def _load_group_chat_config() -> dict:
         return {}
 
 
-def _classify_group_urgency(text: str, mentions_bot: bool, sender_name: str) -> str:
-    """群消息紧急度分级:immediate(立即响应) vs soft(30s 累积)。
+def _unused_classify_urgency_removed() -> None:
+    """Placeholder.
 
-    immediate 条件(任一命中):
-      - @ 本实例(飞书 mention)
-      - 正文含实例的 attention_keywords(如 zero 的 "zero/Zero/小零")
-      - 发送者是 owner_names(如 zhp)
-    其余(alpha 广播、其他群成员发言)→ soft,进 30s 累积窗口。
-    """
-    if mentions_bot:
-        return "immediate"
-    cfg = _load_group_chat_config()
-    keywords = cfg.get("attention_keywords") or []
-    if keywords and isinstance(text, str):
-        for kw in keywords:
-            if kw and kw in text:
-                return "immediate"
-    owner_names = cfg.get("owner_names") or []
-    if owner_names and sender_name in owner_names:
-        return "immediate"
-    return "soft"
+    refactor/emit-driven-wake 之后 handler 不再做 urgency 分流——延迟归
+    ``group_buffer``(消息系统层,慢 timer 20-30s / 快 timer 0-5s),叫醒
+    归 ``events._wake_or_inject``。这里曾经是 ``_classify_group_urgency``,
+    但已经无人调用:外部 ``feishu.py`` 直接复用 ``_load_group_chat_config``
+    读 keyword/owner list(它实际的判定逻辑在 group_buffer 的 ``_is_priority``
+    里实现),不影响。
+
+    若将来确实需要 emergency 内联分类,放在 ``wakeup_policy.py``
+    (它已经是事件→wake 的策略集散地)。"""
 
 
 def _sender_notes(sender_id: str, sender_name: str = "") -> str:
@@ -769,6 +515,19 @@ def _emit_l4_human_event(
     """
     # 平台前缀（source/channel 用）：feishu → lark, 其它 → platform 本身
     pf = "lark" if platform == "feishu" else platform
+
+    # 已废弃的精力入站钩子残留——前置版本会在这里调 apply_nurture(parse_message(text))
+    # 得到 kinds/deltas，但精力系统重构后这个调用被判定为"伪调用"删掉了。
+    # 历史 BUG：删除时只删了 parse 调用，没把 kinds/deltas 也清空 → emit_event
+    # payload 字段引用未定义变量 → NameError → 外层 except return -1 → 全部群消息
+    # event_id=-1（无事件、空 wake、channel 错位"多个事件同时触发了"假警报）。
+    # 14:12 wake #1220 / 15:06 / 15:08 复现链路就是这个 BUG 一路吃下去的。
+    kinds: list = []
+    deltas: dict = {}
+
+    # 同函数内还引用了 now_iso() —— 也被当时的清理一并移除了 import 但留下了引用。
+    # 不引入模块级 import 避免循环依赖，按需局部导入。
+    from domain.lifecycle.clock import now_iso
 
     # 身份统一层：sender_id 从 per-app open_id 转为跨实例稳定的 unified_id。
     # Phase 4:删除 resolve_unified_id 调用——平台视角的 open_id 自洽,永不跨实例

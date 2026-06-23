@@ -363,7 +363,17 @@ def _build_multi_event_base(
     """
     sorted_events = sorted(pending_events, key=_event_priority, reverse=True)
     if not sorted_events:
-        return "多个事件同时触发了。用 `sense_event_queue` 查看详情。", []
+        # ⚠ BUG D 修复：0 事件被误当多事件处理时，绝不能输出"多个事件同时触发了"
+        # —— 那是对模型的纯误导（#1220 整条链根因之一）。空队列意味着这轮 wake
+        # 没有任何事要做，给模型诚实信号："没事，可以 rest / 或感知下自己状态"。
+        # 注意：理论上不该走到这里——wake_digital_life 在 BUG B 修复后已经
+        # event_id<=0 时不再启动 wake。这里只是兜底防御性输出。
+        return (
+            "事件队列是空的，本轮没有需要你主动处理的事件。"
+            "如果刚发完消息发现什么都没发生，那是 wake 误触——你不需要处理任何事。"
+            "可以 `sense_vitals`/`sense_time` 看看状态，或直接 `rest`。",
+            [],
+        )
 
     lines: list[str] = ["有多个事件同时触发了，按优先级排列（仅标题，查看详情用 sense_event_detail）："]
     for ev in sorted_events:
