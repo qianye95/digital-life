@@ -34,11 +34,10 @@ ENERGY_SEGMENTS = [
 # ── 精力常量 ──
 
 ENERGY_MAX = 100
-# 每小时恢复（RUNNING 和 BLOCKED 统一）。默认 100 / 24 ≈ 4.17 —— 一整天完全
-# 不动可从 0 恢复到 100。这条和消耗系数共同保证「一天满跑 2000 万 token
-# 刚好耗光满血」「休息一天满血复活」两条产品语义。可通过 env
-# DIGITAL_LIFE_ENERGY_RECOVERY_PER_HOUR 覆盖默认值（_resolve_energy_token_constants）。
-ENERGY_RECOVERY_PER_HOUR = 100.0 / 24   # ≈ 4.17
+# 每小时恢复（RUNNING 和 BLOCKED 统一）。默认 25 —— 4 小时不动可从 0 恢复到 100，
+# 一夜休眠基本回满血。可通过 env DIGITAL_LIFE_ENERGY_RECOVERY_PER_HOUR 覆盖
+# 默认值（_resolve_energy_token_constants）。
+ENERGY_RECOVERY_PER_HOUR = 25.0
 ENERGY_COST_PER_CALL = 0.2          # 每次工具调用/模型访问的"动作成本"（不与 token 挂钩）
 
 # 精力-token 耦合（设计文档 15.4）：LLM call 走真实 token usage 消耗精力，

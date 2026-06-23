@@ -120,7 +120,7 @@ FIELDS: tuple[ConfigField, ...] = (
     ConfigField("DIGITAL_LIFE_ENERGY_PER_KTOKEN_OUTPUT", "输出 token 精力系数", "runtime", "env", "number",
         default=0.05, description="一天满跑 2000 万 token 耗尽 100 精力。"),
     ConfigField("DIGITAL_LIFE_ENERGY_RECOVERY_PER_HOUR", "每小时精力恢复", "runtime", "env", "number",
-        default=4.17, description="默认 100/24≈4.17 — 休息一天从 0 回满血。"),
+        default=25.0, description="默认 25 — 4 小时不动从 0 回满血。"),
 
     # ════════════ 任务策略 ════════════
     ConfigField("agent.max_turns", "最大执行轮数", "tasks", "yaml", "number", path="agent.max_turns", default=90),
