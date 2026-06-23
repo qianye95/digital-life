@@ -149,8 +149,9 @@ async def handle_message(*, adapter: IngressAdapter, msg: NormalizedMessage) -> 
     sibling_app_id = _sender_is_sibling_bot(msg.sender_id, msg.platform)
     if sibling_app_id:
         logger.info(
-            "Ingress ignore (sibling WS echo): app_id=%s — handled via shared chats.db",
-            sibling_app_id[:16],
+            "INGRESS_DROP reason=sibling_WS_echo app_id=%s chat=%r sender=%r — "
+            "已由 broadcast 路径处理，本侧不 emit、不 wake",
+            sibling_app_id[:16], msg.chat_id, msg.sender_id[:16],
         )
         return True
 
@@ -262,6 +263,17 @@ def _route_to_life(
     修法（2026-06-16）：合成入站 channel 字符串（lark:<group|dm>:<chat_id>），
     调 cancel_alarms_by_filter 精确按通道取消。
     """
+    # ⚠ 诊断日志[入口]：群消息穿透排查用。零行为变更。
+    # 入口 conocer 一到就把入站身份信息打出来，便于和 EMIT_*/POP_*/CONSUME_* 串起来。
+    logger.info(
+        "INGRESS_BEGIN instance_id=%r is_group=%s sender=%r(%r) chat_id=%r "
+        "mentions_bot=%s merged_count=%d platform=%s text_head=%r",
+        instance_id, is_group, sender_name, sender_id,
+        chat_id, mentions_bot,
+        len(merged_texts) if merged_texts else 0, platform,
+        (text[:60] + ("…" if len(text) > 60 else "")) if isinstance(text, str) else text,
+    )
+
     try:
         from domain.lifecycle.alarms import cancel_alarms_by_filter
 
@@ -302,6 +314,12 @@ def _route_to_life(
         platform=platform,
         merged_texts=merged_texts,
         adapter=adapter,
+    )
+    logger.info(
+        "EMIT_HUMAN_RESULT event_id=%d is_group=%s chat_id=%r "
+        "instance_id=%r outcome=%s",
+        event_id, is_group, chat_id, instance_id,
+        "ok" if event_id > 0 else "FAILED-or-merged",
     )
 
     try:
@@ -389,6 +407,12 @@ def _route_to_life(
             logger.info("Auto-created life affair: %s", affair_id)
 
         affair = get_affair(affair_id)
+        logger.info(
+            "ROUTE_AFFAIR affair_id=%r status=%s event_id=%d is_group=%s sender=%r chat=%r",
+            affair_id,
+            affair.status if affair else "NO_AFFAIR",
+            event_id, is_group, sender_name, chat_id,
+        )
         if affair and affair.status in ("BLOCKED", "PENDING"):
             # 群消息 urgency 分流:soft 消息不立即触发 wake,让其进 30s 累积窗口
             # (由 emit_event 内的 _apply_debounce 合并),下个 cron tick 自然触发。
@@ -397,7 +421,11 @@ def _route_to_life(
             if is_group:
                 urgency = _classify_group_urgency(text, mentions_bot, sender_name)
                 if urgency == "soft":
-                    logger.info("L4 group soft: deferred to 30s batch (sender=%s chat=%s)", sender_name, chat_id[:16] if chat_id else "?")
+                    logger.info(
+                        "ROUTE_BRANCH decision=group_soft_defer sender=%r chat=%r — 延迟到 cron tick",
+                        sender_name, chat_id,
+                    )
+                    logger.info("INGRESS_END reason=group_soft_defer")
                     return  # 不立即 wake,事件已入 events 表,debounce 会合并,cron 到期触发
             # Pass the freshly emitted event directly so build_wake_prompt uses
             # it instead of re-querying (which would catch stale unconsumed events).
@@ -426,15 +454,63 @@ def _route_to_life(
                     },
                 }
                 wake_args = (affair_id, kind, "", [pending_ev])
+                logger.info(
+                    "ROUTE_BRANCH decision=immediate_wake_with_event "
+                    "kind=%s event_id=%d pending_ev_count=1",
+                    kind, event_id,
+                )
             else:
-                wake_args = (affair_id, "message")
-            thread = threading.Thread(
-                target=wake_digital_life,
-                args=wake_args,
-                daemon=True,
-            )
+                # ⚠ 设计原则修正：emit 都失败了，绝不应该再启动一个"空 wake"。
+                # 历史 BUG：这里无论 event_id 多少都启动 wake(affair_id, "message")，
+                # 让 agent 醒来发现队列空 -> 在 _build_multi_event_base 拿到 0 事件
+                # 却照样输出"多个事件同时触发了"假警报 (#1220 整条链根因之一)。
+                # 现在改：emit 失败 → log + 直接 return，等下个 cron tick 自然重试或
+                # 由人类重发消息。空 wake 是纯 token 浪费 + 模型困惑。
+                logger.warning(
+                    "ROUTE_BRANCH ⚠ decision=DROP_NO_WAKE reason=emit_failed "
+                    "kind=%s event_id=%d chat=%r — 不启动 wake，等下个 cron tick 或人类重发",
+                    "group_message" if is_group else "message",
+                    event_id, chat_id,
+                )
+                logger.info("INGRESS_END reason=emit_failed_no_wake")
+                return
+            # ⚠ BUG C 修复：threading.Thread 不会自动继承 asyncio.to_thread 设置的
+            # ContextVar（instance_channel_var / current_instance_id）。历史症状：
+            # wake 后台线程里 POP_DUE channel_prefix='instance:zero'（默认值），
+            # 永远 pop 不到本实例的真实事件 → 0 事件假警报。
+            # 修法（对照 cron_lifecycle._bg_wake）：在子线程入口处重设这两个 ContextVar。
+            _captured_iid = instance_id
+            _captured_affair_id = affair_id
+            _captured_reason = "group_message" if is_group else "message"
+            _captured_pending = wake_args[3]
+
+            def _bg_wake_from_ingress() -> None:
+                if _captured_iid:
+                    os.environ["DIGITAL_LIFE_INSTANCE_ID"] = _captured_iid
+                    try:
+                        from infrastructure.config import set_current_instance_id
+                        set_current_instance_id(_captured_iid)
+                    except Exception:
+                        pass
+                    try:
+                        from domain.lifecycle.events import set_instance_context
+                        set_instance_context(_captured_iid)
+                    except Exception:
+                        pass
+                try:
+                    wake_digital_life(
+                        _captured_affair_id, _captured_reason, "",
+                        list(_captured_pending),
+                    )
+                except Exception as exc:
+                    logger.warning("ingress background wake_digital_life error: %s", exc)
+
+            thread = threading.Thread(target=_bg_wake_from_ingress, daemon=True)
             thread.start()
-            logger.info("L4 direct wake triggered for affair %s", affair_id)
+            logger.info(
+                "INGRESS_WAKE_DISPATCHED reason=BLOCKED-PENDING thread_started=True affair=%s",
+                affair_id,
+            )
         elif affair and affair.status == "RUNNING":
             # Immediately inject the new event into the running session
             # so the model sees it without waiting for the next cron tick.
@@ -443,7 +519,12 @@ def _route_to_life(
                 urgency = _classify_group_urgency(text, mentions_bot, sender_name)
                 if urgency == "soft":
                     logger.info("L4 group soft on RUNNING: deferred (sender=%s chat=%s)", sender_name, chat_id[:16] if chat_id else "?")
+                    logger.info("INGRESS_END reason=group_soft_running_defer")
                     return
+            logger.info(
+                "ROUTE_BRANCH decision=inject_running_session event_id=%d chat=%r",
+                event_id, chat_id,
+            )
             _inject_msg_to_running_session(
                 event_id=event_id,
                 text=text,
@@ -453,6 +534,7 @@ def _route_to_life(
                 chat_name=chat_name,
                 mentions_bot=mentions_bot,
             )
+            logger.info("INGRESS_END reason=inject_running_session")
     except Exception as exc:
         logger.warning("L4 direct wake failed: %s", exc)
 
@@ -562,21 +644,41 @@ def _inject_msg_to_running_session(
         # 但为了即时性，这里也触发一次 wake_if_pending（不等 60s cron tick）。
         try:
             import threading as _th
+            # ⚠ BUG C：同样要为子线程显式重设 ContextVar，并修正调用签名
+            # （历史版本用 instance_id=/trigger_reason= 等不属于 wake_digital_life
+            # 签名的 kwargs 直接 TypeError，wake 静默失败）。
+            _delayed_iid = instance_id
+            _delayed_affair_id = affair_id
+            _delayed_event_id = event_id
+            _delayed_kind = kind
+
             def _delayed_wake_check():
                 import time as _time
                 _time.sleep(3)  # 等 session 把 rest 处理完
                 try:
                     from domain.lifecycle.affairs.runtime import get_affair
-                    aff = get_affair(affair_id)
+                    aff = get_affair(_delayed_affair_id)
                     if aff and aff.status.value in ("BLOCKED", "PENDING"):
-                        logger.info("mid-session inject: affair %s now BLOCKED, triggering wake for event %d",
-                                    affair_id[:8], event_id)
-                        from domain.lifecycle.scheduler import wake_digital_life
-                        wake_digital_life(
-                            instance_id=instance_id,
-                            trigger_reason=f"{kind}:delayed_after_inject",
-                            affair_id=affair_id,
+                        # 子线程不继承 ContextVar，必须显式重设
+                        if _delayed_iid:
+                            try:
+                                from infrastructure.config import set_current_instance_id
+                                set_current_instance_id(_delayed_iid)
+                            except Exception:
+                                pass
+                            try:
+                                from domain.lifecycle.events import set_instance_context
+                                set_instance_context(_delayed_iid)
+                            except Exception:
+                                pass
+                        # wake_digital_life 自己会 pop_due_events；
+                        # 不传 pending_events，让它走标准事件队列取事件。
+                        logger.info(
+                            "mid-session inject: affair %s now BLOCKED, triggering wake for event %d",
+                            _delayed_affair_id[:8], _delayed_event_id,
                         )
+                        from domain.lifecycle.scheduler import wake_digital_life
+                        wake_digital_life(_delayed_affair_id, _delayed_kind)
                 except Exception as exc:
                     logger.debug("delayed wake check failed: %s", exc)
             _th.Thread(target=_delayed_wake_check, daemon=True).start()
@@ -769,6 +871,19 @@ def _emit_l4_human_event(
     """
     # 平台前缀（source/channel 用）：feishu → lark, 其它 → platform 本身
     pf = "lark" if platform == "feishu" else platform
+
+    # 已废弃的精力入站钩子残留——前置版本会在这里调 apply_nurture(parse_message(text))
+    # 得到 kinds/deltas，但精力系统重构后这个调用被判定为"伪调用"删掉了。
+    # 历史 BUG：删除时只删了 parse 调用，没把 kinds/deltas 也清空 → emit_event
+    # payload 字段引用未定义变量 → NameError → 外层 except return -1 → 全部群消息
+    # event_id=-1（无事件、空 wake、channel 错位"多个事件同时触发了"假警报）。
+    # 14:12 wake #1220 / 15:06 / 15:08 复现链路就是这个 BUG 一路吃下去的。
+    kinds: list = []
+    deltas: dict = {}
+
+    # 同函数内还引用了 now_iso() —— 也被当时的清理一并移除了 import 但留下了引用。
+    # 不引入模块级 import 避免循环依赖，按需局部导入。
+    from domain.lifecycle.clock import now_iso
 
     # 身份统一层：sender_id 从 per-app open_id 转为跨实例稳定的 unified_id。
     # Phase 4:删除 resolve_unified_id 调用——平台视角的 open_id 自洽,永不跨实例

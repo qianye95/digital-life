@@ -88,6 +88,19 @@ def _ensure_columns() -> None:
     _event_bus.ensure_columns()
 
 
+def _caller_summary() -> list[str]:
+    """返回 3 帧调用栈摘要（模块.函数:行），用于消费日志反向追踪是谁消费了事件。
+
+    纯诊断辅助，零行为变更；任何异常都吞掉（不能因为日志坏业务）。
+    """
+    import traceback
+    try:
+        frames = traceback.extract_stack()[-4:-1]  # 跳过本函数 + consume_event
+        return [f"{f.name}@{f.lineno}" for f in frames]
+    except Exception:
+        return ["?"]
+
+
 def _apply_debounce(kind: str, payload: Dict, fire_at: Optional[str]) -> Optional[int]:
     """防抖合并 — 窗口期内同类型事件合并为一条，避免事件风暴。
 
@@ -185,9 +198,11 @@ def _apply_debounce(kind: str, payload: Dict, fire_at: Optional[str]) -> Optiona
                 (json.dumps(merged, ensure_ascii=False), now_iso(),
                  existing_id, instance_channel + "%"),
             )
-            logger.debug(
-                "event %s debounced (policy=%s, count=%d, window=%ds)",
-                kind, policy, merged.get("_merged_count", 1), window,
+            logger.info(
+                "EMIT_DEBOUNCE_MERGED kind=%s event_id=%d policy=%s merged_count=%d "
+                "window_s=%d channel_prefix=%r",
+                kind, existing_id, policy, merged.get("_merged_count", 1), window,
+                instance_channel,
             )
             return existing_id
     except Exception as exc:
@@ -228,8 +243,27 @@ def emit_event(
 
     payload = payload or {}
 
+    # ⚠ 诊断日志[嵌入]：群消息穿透排查用。零行为变更，仅 INFO 级。
+    # 关键字段：chat_id / sender_name / chat_name / text 头部——足以回溯入站轨迹
+    # 而不爆量。text 截到 60 字以免长消息刷屏。
+    _diag_payload = {
+        k: (v[:60] if isinstance(v, str) and len(v) > 60 else v)
+        for k, v in payload.items()
+        if k in ("chat_id", "sender_name", "sender_id", "chat_name",
+                 "text", "mentions_bot", "_merged_count", "reason",
+                 "name", "schedule_id")
+    }
+    logger.info(
+        "EMIT_BEGIN kind=%s instance_channel=%r explicit_channel=%r payload_head=%r",
+        kind, instance_channel, channel, _diag_payload,
+    )
+
     merged_id = _apply_debounce(kind, payload, fire_at)
     if merged_id is not None:
+        logger.info(
+            "EMIT_END kind=%s result=debounced-merged return_event_id=%d",
+            kind, merged_id,
+        )
         return merged_id
 
     # Resolve final channel: explicit channel is prefixed with instance to isolate it
@@ -238,7 +272,21 @@ def emit_event(
     else:
         effective_channel = instance_channel
 
-    return _event_bus.emit_event(kind=kind, payload=payload, fire_at=fire_at, channel=effective_channel)
+    try:
+        new_id = _event_bus.emit_event(
+            kind=kind, payload=payload, fire_at=fire_at, channel=effective_channel,
+        )
+        logger.info(
+            "EMIT_END kind=%s result=inserted return_event_id=%d effective_channel=%r",
+            kind, new_id, effective_channel,
+        )
+        return new_id
+    except Exception as exc:
+        logger.error(
+            "EMIT_END kind=%s result=FAILED effective_channel=%r exc=%r",
+            kind, effective_channel, exc,
+        )
+        raise
 
 
 def pop_due_events(limit: int = 50) -> List[Dict]:
@@ -249,7 +297,13 @@ def pop_due_events(limit: int = 50) -> List[Dict]:
     按 event_id ASC 排序，确保先入先出。
     """
     channel_prefix = _get_instance_channel()
-    return _event_bus.pop_due_events(limit=limit, channel_prefix=channel_prefix)
+    events = _event_bus.pop_due_events(limit=limit, channel_prefix=channel_prefix)
+    logger.info(
+        "POP_DUE channel_prefix=%r limit=%d returned=%d kinds=%s",
+        channel_prefix, limit, len(events),
+        [e.get("kind") for e in events][:10],  # 只丢 kind 列表，前 10
+    )
+    return events
 
 
 def list_recent_events(
@@ -285,6 +339,13 @@ def consume_event(event_id: int, target_affair_id: Optional[str] = None, session
     from infrastructure.config import get_current_session_id
 
     sid = session_id or get_current_session_id() or None
+    logger.info(
+        "CONSUME event_id=%d target_affair=%r session_id=%r caller_stack_head=%s",
+        event_id, target_affair_id, sid,
+        # 拿一行 caller 上下文，方便辨认是 sense_event_detail / scheduler auto / eof cleanup
+        # 哪条路径消费的。栈太深只取 3 帧。
+        "; ".join(_caller_summary())[:160],
+    )
     _event_bus.consume_event(event_id=event_id, target_affair_id=target_affair_id, session_id=sid)
 
 
@@ -295,7 +356,12 @@ def unconsume_events(event_ids: list[int]) -> int:
     在下一轮 tick 重新被 pop 出来。返回实际回退的数量。
     """
     channel_prefix = _get_instance_channel()
-    return _event_bus.unconsume_events(event_ids=event_ids, channel_prefix=channel_prefix)
+    n = _event_bus.unconsume_events(event_ids=event_ids, channel_prefix=channel_prefix)
+    logger.info(
+        "UNCONSUME channel_prefix=%r requested=%d actual=%d ids=%s",
+        channel_prefix, len(event_ids), n, event_ids[:10],
+    )
+    return n
 
 
 def backoff_minutes_for(event: dict, *, base: float = 2.0, cap: float = 60.0) -> float:

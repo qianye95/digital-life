@@ -207,6 +207,16 @@ def _run_l4_tick_inner(instance_id: str, log) -> None:
             log.debug("L4: no due events — sleeping")
             return
 
+        # ⚠ 诊断日志[tick决策]：群消息穿透排查用。零行为变更。
+        log.info(
+            "TICK_POP instance=%s count=%d details=%s",
+            instance_id, len(events),
+            [(e.get("event_id"), e.get("kind"),
+              (e.get("payload") or {}).get("sender_name"),
+              (e.get("payload") or {}).get("chat_id"))
+             for e in events],
+        )
+
         # All events are equal — no special filtering. Let the trigger chain
         # and wake prompt decide how to present them.
 
@@ -244,6 +254,13 @@ def _run_l4_tick_inner(instance_id: str, log) -> None:
                 reason = kind
 
         log.info("L4: waking — reason=%s pri=%d events=%d", reason, top_priority, len(events))
+        log.info(
+            "TICK_WAKE decision instance=%s reason=%s top_event=%s all_event_ids=%s",
+            instance_id, reason,
+            [(e.get("event_id"), e.get("kind"))
+             for e in events if e.get("kind") == reason][:3],
+            [e.get("event_id") for e in events],
+        )
 
         # ── Token 预算闸门（基础设施级硬保护）─────────────────────────────
         # 不管事件优先级高低、精力是否充分，"这个小时/今日还能烧 token 么"

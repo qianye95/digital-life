@@ -257,20 +257,39 @@ def broadcast_outbound(
     }
 
     delivered = 0
+    logger.info(
+        "BROADCAST_HTTP_OUT from=%s chat=%r peer_count=%d text_head=%r msg_ref=%r",
+        from_instance_id[:8], chat_id, len(sub.peers),
+        (text[:60] + ("…" if len(text) > 60 else "")) if isinstance(text, str) else text,
+        msg_ref,
+    )
     for peer in sub.peers:
         if not peer.endpoint:
+            logger.info(
+                "BROADCAST_SKIP_PEER reason=no_endpoint from=%s peer=%s chat=%r",
+                from_instance_id[:8], peer.uuid[:8], chat_id,
+            )
             continue
         try:
             r = httpx.post(peer.endpoint, json=payload, timeout=timeout)
             if r.status_code == 200:
                 delivered += 1
+                logger.info(
+                    "BROADCAST_HTTP_OK from=%s → peer=%s chat=%r status=200",
+                    from_instance_id[:8], peer.uuid[:8], chat_id,
+                )
             else:
-                logger.warning("broadcast to %s (peer) %s: %d %s",
-                               peer.uuid[:8], peer.endpoint,
-                               r.status_code, r.text[:120])
+                logger.warning(
+                    "BROADCAST_HTTP_BAD_STATUS from=%s → peer=%s chat=%r endpoint=%s status=%d body=%r",
+                    from_instance_id[:8], peer.uuid[:8], chat_id,
+                    peer.endpoint, r.status_code, r.text[:120],
+                )
         except Exception as exc:
-            logger.warning("broadcast to %s failed (peer offline? %s): %s",
-                           peer.uuid[:8], peer.endpoint, exc)
+            logger.warning(
+                "BROADCAST_HTTP_EXC from=%s → peer=%s chat=%r endpoint=%s exc=%r",
+                from_instance_id[:8], peer.uuid[:8], chat_id,
+                peer.endpoint, exc,
+            )
     return delivered
 
 
@@ -368,9 +387,17 @@ def receive_broadcast(payload: dict) -> dict:
                 )
             except Exception as exc:
                 # 写库已经成功,emit 失败不影响下一次自然 cron tick 也能_log 这条消息
-                logger.warning("receive_broadcast: emit failed for peer %s: %s",
-                               peer_iid[:8], exc)
+                logger.warning(
+                    "BROADCAST_EMIT_FAILED peer=%s from=%s chat=%r exc=%r",
+                    peer_iid[:8], from_instance_id[:8], chat_id, exc,
+                )
                 errors.append(f"peer {peer_iid[:8]} emit failed: {exc}")
+            else:
+                logger.info(
+                    "BROADCAST_DELIVERED peer=%s from=%s chat=%r text_head=%r",
+                    peer_iid[:8], from_instance_id[:8], chat_id,
+                    text[:60],
+                )
 
             delivered += 1
         finally:
