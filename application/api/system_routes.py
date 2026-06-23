@@ -1042,15 +1042,23 @@ def _scan_project_files(project_dir: Path) -> list[dict[str, str]]:
 
 
 async def _handle_project_tasks(request: web.Request) -> web.Response:
-    """GET /api/system/projects/{pid}/tasks —— 项目下所有 todos/deliverables。"""
+    """GET /api/system/projects/{pid}/tasks —— 项目下所有 deliverables。
+
+    ⚠ 2026-06-23 修复: 历史 BUG 是 import list_project_tasks(它是
+    list_project_todos 的 alias,查 project_todos 表),但 zero 创建的规划
+    实际写入的是 **deliverables 表**(15 个 Phase 拆分)。结果就是前端项目
+    页面 COUNT=0,用户看不到任何"已规划好的"待办。
+    改成 list_deliverables,与 sense_project_todos 工具和 project_todo CRUD
+    的 create 路径对齐。
+    """
     pid = _safe_relative_name(request.match_info["pid"])
     if not pid:
         return web.json_response({"error": "invalid pid"}, status=400)
     try:
         from domain.project._infra import get_project_db
-        from domain.project.crud import list_project_tasks
+        from domain.project.crud import list_deliverables
         db = get_project_db(pid)
-        tasks = list_project_tasks(db)
+        tasks = list_deliverables(db)
     except Exception as exc:
         logger.exception("list project tasks failed")
         return web.json_response({"tasks": [], "error": str(exc)})
