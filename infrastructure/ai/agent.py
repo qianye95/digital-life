@@ -1042,6 +1042,20 @@ class AIAgent:
             assistant_msg, tool_msg = self._sys_tool_call("wake_signal", content)
             messages.append(assistant_msg)
             messages.append(tool_msg)
+            # ⚠ 关键 bug 修复(2026-06-23):mid-session 注入必须持久化到 session_db,
+            # 否则下一次 _chat 重新加载 messages 时,wake_signal 消失在历史里——
+            # 模型本轮 LLM call 看一眼,下一轮 LLM call 就忘了。
+            # 历史 BUG 现象:alpha 在 RUNNING 时收到人类的复杂任务,但只在
+            # 当前 LLM call 看到;后续 N 次 LLM call 都失去这条,直到偶然调
+            # sense_conversation 才在 messages.db 里翻到——导致 14 分钟黑箱。
+            # 修法:_append_message 写到 sessions 表(下一轮 _chat 重启 messages
+            # 时它还在)。chat_id 从 ev payload 取(让前端 Transcript 也按 chat 聚合)。
+            if self.session_id:
+                self._append_message(
+                    self.session_id, "tool", content,
+                    tool_name="wake_signal",
+                    chat_id=payload.get("chat_id", "") if isinstance(payload, dict) else "",
+                )
             if self.audit_ctx is not None:
                 try:
                     self.audit_ctx.recall("wake_signal", content)
