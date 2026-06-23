@@ -24,7 +24,6 @@ import sqlite3
 import threading
 import time
 import uuid as _uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -59,16 +58,24 @@ def messages_db_path(instance_id: str | None = None) -> Path:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 时间戳(safe 在脚本里被剥夺 Date.now 的 env 调用)— 本文件不依赖 ContextVar
+# 时间戳 — followup/messages-utc-and-flow-doc 后统一用 kvm 本地时区,跟 clock.py 对齐
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _now_iso() -> str:
-    """ISO8601 + UTC,带毫秒。三层一致(本地 / 广播 / 迁移)。
+    """本地 ISO8601(带毫秒),跟着 ``domain.lifecycle.clock`` 走。
 
-    用 ``datetime.utcnow().isoformat(timespec='milliseconds') + 'Z'`` 而非
-    import domain.lifecycle.clock —— 保持本模块单一职责 + 测试隔离。
+    历史版本用 ``datetime.now(timezone.utc)`` 存 UTC,跟 conversation_log /
+    events 表都用本地时区(+08:00)不一致——读各自表的人会混淆。
+    followup/messages-utc-and-flow-doc(2026-06-23)统一到本地。
+
+    本地时区由 ``domain.lifecycle.clock.LOCAL`` 提供,部署在 CST 机器上就是
+    +08:00。带毫秒保留(per-call ordering 用)。
+
+    保留模块内本地函数(而非直接调 clock.now_iso)的原因:本模块自己声明
+    不依赖 ContextVar,跟 events 那种带 _instance_channel_var 的模块解耦。
     """
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    from domain.lifecycle.clock import now_dt
+    return now_dt().isoformat(timespec="milliseconds")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
