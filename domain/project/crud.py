@@ -55,7 +55,23 @@ def create_deliverable(
     priority: str = "medium",
     assignee_instance: str = "",
     assignee_position: str = "",
+    *,
+    project_id: str = "",
+    acceptance_criteria: str = "",
 ) -> str:
+    """创建 deliverable —— 同时同步到 global todos.db.todos。
+
+    设计 6.5(项目：独立模块，消费待办): 项目 deliverable 必须在 global todos
+    表里有一条对应 todo。todo 通过 linked_deliverable_id 反查 deliverable,
+    通过 project_id 反查项目。deliverable 是项目侧的「交付物」记录(分配岗位、
+    责任归属),todo 是 agent 侧的「该做的事」记录(出现在 sense_todos 看板)。
+
+    历史 BUG(2026-06-23): create_deliverable 只写 deliverables 表,
+    不同步 global todos → zero 拆 16 个 P0-T9 deliverable 后 alpha
+    sense_todos 一条都看不到 → alpha 完全不知道有这些活儿等着它做。
+    导致 alpha 自己手调 todo create 复制了 Phase 1(9ca7ca4a), 跟 deliverable
+    a197be94 完全脱节, 两套数据。
+    """
     did = _new_id()
     now = _now_iso()
     db.execute(
@@ -65,6 +81,38 @@ def create_deliverable(
         (did, title, description, priority, assignee_instance, assignee_position, now, now),
     )
     db.commit()
+
+    # ⭐ 关键:同步到 global todos.db.todos(设计 6.5:项目模块消费待办)
+    if project_id:
+        try:
+            from domain.todos.crud import create_task
+            result = create_task(
+                title=title,
+                description=description,
+                priority=priority,
+                status="planned",
+                source="personal",  # 旧字段向后兼容;project_id 优先识别
+                linked_deliverable_id=did,
+                type="development" if assignee_position == "developer" else "",
+                assignee_instance=assignee_instance or None,
+                project_id=project_id,
+                acceptance_criteria=acceptance_criteria,
+                detail="",
+            )
+            logger.info(
+                "create_deliverable synced global todo for %s (deliverable=%s assignee=%s ok=%s)",
+                project_id, did[:8], (assignee_instance or "")[:8],
+                bool(result.get("ok")) if isinstance(result, dict) else "?",
+            )
+        except Exception as exc:
+            # 同步失败不应阻断 deliverable 创建本身(主操作已 commit)。
+            # 但需明显 log 让人觉察到——否则就会出现"todo 没建但没人知道"。
+            logger.warning(
+                "create_deliverable FAILED to sync global todo for deliverable %s "
+                "(project=%s): %s",
+                did[:8], project_id, exc,
+            )
+
     return did
 
 

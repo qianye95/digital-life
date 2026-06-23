@@ -202,6 +202,10 @@ def register_project_tools(
                     priority=(args.get("priority") or "medium").strip(),
                     assignee_instance=(args.get("assignee_instance") or "").strip(),
                     assignee_position=(args.get("assignee_position") or "").strip(),
+                    # 2026-06-23 修复:create_deliverable 同步建 global todo;
+                    # 不传 project_id 会跳过同步(即旧 BUG 行为)。
+                    project_id=project_id,
+                    acceptance_criteria=(args.get("acceptance_criteria") or "").strip(),
                 )
                 db.close()
                 return _j({"ok": True, "id": did})
@@ -280,9 +284,10 @@ def register_project_tools(
                     "title": {"type": "string", "description": "标题（create时必填）"},
                     "description": {"type": "string", "description": "描述"},
                     "priority": {"type": "string", "description": "优先级: low/medium/high/urgent"},
-                    "assignee_instance": {"type": "string", "description": "分配给哪个实例"},
+                    "assignee_instance": {"type": "string", "description": "分配给哪个实例。必填**完整 UUID**(如 c2a5c8e8-e700-44dd-aea3-00e04a661ab1),不要用名字简称(alpha/zero)。用 sense_projects 看项目 yaml 里 positions.assignees 拿到。所有 todos 通过 UUID 反查实例,简称查不到。"},
                     "assignee_position": {"type": "string", "description": "分配给哪个岗位"},
                     "status": {"type": "string", "description": "更新状态: planned/in_progress/done"},
+                    "acceptance_criteria": {"type": "string", "description": "完成标准（create 时强烈建议写,会同时同步到对应 todo 的 acceptance_criteria 给承担者看）"},
                 },
                 "required": ["action", "project_id"],
             },
