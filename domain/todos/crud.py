@@ -75,6 +75,13 @@ def create_task(
     if priority not in VALID_PRIORITIES:
         return {"ok": False, "reason": f"无效优先级 {priority}"}
 
+    # 2026-06-23 防御:source vs project_id 冲突时,project_id 优先。
+    # 历史 BUG:caller 传 source='personal' + project_id='shangcheng' 时,
+    # source='personal' 被原样写入 → 前端按 source 分组把项目待办错误归到"个人"段。
+    # 规则:只要给了 project_id,source 自动设为 'project:<project_id>'。
+    if project_id:
+        source = f"project:{project_id}"
+
     dup = _find_similar_task(title, description)
     if dup:
         return {"ok": False, "reason": f"已有相似任务「{dup.title}」(id={dup.id}, 状态={dup.status})，建议复用",

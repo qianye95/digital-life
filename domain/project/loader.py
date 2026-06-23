@@ -68,32 +68,52 @@ def load_project(project_id: str) -> ProjectConfig | None:
     with open(yaml_path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
 
-    proj = raw.get("project", {})
-    positions = []
-    for p in raw.get("positions", []):
-        positions.append(Position(
-            id=p.get("id", ""),
-            name=p.get("name", ""),
-            description=p.get("description", ""),
-            assignees=p.get("assignees", []),
-            responsibilities=p.get("responsibilities", []),
-        ))
-
     return ProjectConfig(
         id=proj.get("id", project_id),
         name=proj.get("name", project_id),
         description=proj.get("description", ""),
         status=proj.get("status", "active"),
-        manager=proj.get("manager", ""),
+        # 2026-06-23 防御:project.yaml 里写 "zero"/"alpha" 字面值常见错误。
+        # 把可识别的实例名自动转 UUID,sense_projects.get_position_for_instance
+        # 用 UUID 比对实例 id 就能正常匹配。
+        manager=_normalize_instance_ref(proj.get("manager", "")),
         # env override：每个部署可独立配置 chat。新部署不需要改 project.yaml。
         # 形如 PROJECT_{PID}_GROUP_CHAT_ID=oc_xxx 会覆盖该 project 的 group_chat_id。
         group_chat_id=_resolve_chat_id_with_env(project_id, proj.get("group_chat_id", "")),
-        positions=positions,
+        positions=[
+            Position(
+                id=p.get("id", ""),
+                name=p.get("name", ""),
+                description=p.get("description", ""),
+                assignees=[_normalize_instance_ref(a) for a in p.get("assignees", [])],
+                responsibilities=p.get("responsibilities", []),
+            )
+            for p in raw.get("positions", [])
+        ],
         goal=proj.get("goal", {}) or {},
         kpis=proj.get("kpis", []) or [],
         thesis=proj.get("thesis", []) or [],
         review_schedule=proj.get("review_schedule", {}) or {},
     )
+
+
+# 实例名 → UUID 映射。新增实例时往这里加。
+_INSTANCE_NAME_TO_IID = {
+    "zero": "c2a5c8e8-e4f5-4c69-be3e-aac49903081d",
+    "alpha": "5052c33a-e700-44dd-aea3-00e04a661ab1",
+}
+
+
+def _normalize_instance_ref(ref: str) -> str:
+    """把 project.yaml 里的 'zero'/'alpha' 之类的实例名字面值规范化为 UUID。
+
+    历史问题:早期的 yaml 会用名字(zero/alpha),但 sense_projects 等工具用
+    instance UUID 比对 Occupation.get_position_for_instance。名字和 UUID 不匹配 →
+    实例永远看不到自己"参与了"哪个项目。
+    """
+    if not ref:
+        return ""
+    return _INSTANCE_NAME_TO_IID.get(ref, ref)
 
 
 def _resolve_chat_id_with_env(project_id: str, default: str) -> str:

@@ -91,7 +91,9 @@ def create_deliverable(
                 description=description,
                 priority=priority,
                 status="planned",
-                source="personal",  # 旧字段向后兼容;project_id 优先识别
+                # 2026-06-23:create_task 内部会 normalize — 有 project_id 时 source 自动设为
+                # 'project:<pid>'。这里显式传 'project:...' 是为外层 source 字段语义清晰。
+                source=f"project:{project_id}",
                 linked_deliverable_id=did,
                 type="development" if assignee_position == "developer" else "",
                 assignee_instance=assignee_instance or None,
