@@ -854,6 +854,14 @@ def _wake_digital_life_inner_safe(
 
         agent_result = {}
         agent_error = None
+        # 仪表:agent.run_conversation 是否真正启动过。一旦启动过,
+        # auto_consumed_eids 的事件就已经 inline 进 prompt 被模型看见过了,
+        # 失败回退不该 unconsume —— 否则在 "agent 跑了 55 轮 LLM 然后崩溃"
+        # 这种场景下,事件被夺回 → 下次 wake 又 pop 出来 → 模型又看到了 → 又不
+        # 回应 → 又崩溃 → 又夺回 ... 形成事实上的死循环 (awaiting_reply
+        # 事件 1421 在 19:09-19:34 之间被复活 2 次, akka 1107 / 1109 两次 wake
+        # 都是它,实测)。
+        _agent_started = False
         # prev_history 策略：
         #   - continuation: 续用上轮 messages 表内容（已经包含上次 wake 注入的 slow_ctx），不再重复注入
         #   - 新 session: 拼装 slow_ctx (digest/consciousness/ref_context) + task_board + chat_stream
@@ -1021,7 +1029,9 @@ def _wake_digital_life_inner_safe(
 
         def _run_agent():
             nonlocal agent_result, agent_error
+            nonlocal _agent_started   # ← 关键仪表:agent 是否真正启动过
             try:
+                _agent_started = True   # 标记:从这一行起,事件已被 inline 进 prompt
                 agent_result = agent.run_conversation(
                     action_prompt,
                     system_message=system_for_agent,
@@ -1047,9 +1057,22 @@ def _wake_digital_life_inner_safe(
             logger.warning("Wake agent returned empty response — rolling back")
             summary["error"] = "empty_response"
             # 失败 → 事件放回队列 + 每个事件自带指数退避（设计文档 5.5/22.1：
-            # failure recovery 不是闹钟的事，是事件自己的事）。auto-consumed
-            # 的事件先 unconsume 回未消费态，然后所有 pending_events 统一推迟。
-            if auto_consumed_eids:
+            # failure recovery 不是闹钟的事，是事件自己的事）。
+            # ⚠ 2026-06-23 修正: 只有 agent **完全没启动过**(连第一个 LLM call 都没
+            # 发出去)才 unconsume。一旦 agent 启动过,事件就 inline 进 prompt
+            # 被模型看见了——不"已看见但没回应"不该夺回事件。
+            # 历史 BUG: 群消息 awaiting_reply 1421 被 alpha wake 1125
+            # 占用 14 分钟跑了 55 个 LLM call 然后崩溃 → unconsume →
+            # 下个 cron 又 pop 到 → 又触发 wake 1127 → 又跑偏 → 又崩溃 ...
+            # 同一条 awaiting_reply 被复活 2 次,造成"假警报"现象。
+            if _agent_started:
+                logger.info(
+                    "agent already started before failure — NOT unconsuming %d auto-consumed events "
+                    "(they were visible to the model in prompt). Will still apply delay_pending_events "
+                    "per-event exponential backoff.",
+                    len(auto_consumed_eids),
+                )
+            elif auto_consumed_eids:
                 try:
                     from domain.lifecycle.events import unconsume_events
                     unconsume_events(auto_consumed_eids)
@@ -1101,7 +1124,16 @@ def _wake_digital_life_inner_safe(
             logger.exception("Wake agent failed: %s", e)
 
         summary["error"] = str(e)
-        if auto_consumed_eids:
+        # ⚠ 2026-06-23 修正: empty_response 分支同样的 _agent_started 守卫——
+        # agent 已经跑过的失败不该 unconsume(事件已被模型看见)。详见 empty_response
+        # 分支注释里的 awaiting_reply 1421 BUG 复盘。
+        if _agent_started:
+            logger.info(
+                "agent already started before exception — NOT unconsuming %d auto-consumed events "
+                "(they were visible to the model in prompt).",
+                len(auto_consumed_eids),
+            )
+        elif auto_consumed_eids:
             try:
                 from domain.lifecycle.events import unconsume_events
                 unconsume_events(auto_consumed_eids)
