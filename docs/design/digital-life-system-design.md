@@ -166,7 +166,11 @@ Zero 也同时被"参与日会"的待办闹钟唤醒。它看到 Alpha 的汇报
 
 具体表现为三层设计：
 
-**事件平权**：人类消息不再是特权指令，而是被降维封装为一种"外部事件"。它和闹钟到点、精力恢复到探索阈值、作息时间到了一样，都是平等的事件，在同一个队列里按优先级排队。没有"人发了消息就得立即响应、没人发消息就得干等"的区别。
+**事件平权**：人类消息不再是特权指令，而是被降维封装为一种"外部事件"。它和闹钟到点、精力恢复到探索阈值、作息时间到了一样，都是平等的事件，在同一个队列里按优先级排队。语义上没有"人发了消息就高人一等"——所有事件都走同一个 emit 入口，承担同样的优先级仲裁、防抖合并、消费语义。
+
+> **refactor/emit-driven-wake(2026-06-23)修订**：早期文档曾写"没有『人发了消息就得立即响应』的区别"——这一句话的字面意思过强,与"消息要立即响应"的产品诉求冲突。修订后的真实设计是:**emit 入口本身接管"提交即触发叫醒"的职责**。任何外部系统(消息/定时器/精力/nurture/broadcast)只要 emit 事件到队列,事件队列自身立刻调 `_wake_or_inject(new_id)` 决定要不要叫醒(BLOCKED → 起线程 wake;RUNNING → mid-session 注入)。延迟/错峰由消息系统层(`group_buffer.py` 30s 慢 timer / 5s 快 timer)和事件层的防抖窗口控制,**不再由 cron 60s 节拍决定**。
+> 
+> 也就是说,"事件平权"指的是**所有事件来源共用一个 wake 决策通道**,不是"所有人都没有立即性"。任何事件 emit 出来,系统都会立刻尝试让 agent 处理它。
 
 **驱动力内化**：数字生命不再是"处理消息的机器"，而是"响应内外驱力的机体"。它因为精力恢复而自然醒来，因为闹钟响起而开工，因为人类的消息而响应外部刺激。运转内驱于自身目标、计划、精力节律，而非依附于外部触发。
 
@@ -217,7 +221,7 @@ Zero 也同时被"参与日会"的待办闹钟唤醒。它看到 Alpha 的汇报
 防打扰不是单一机制，而是**多层防护体系**：
 
 1. **事件产生时的防抖**：同类事件短时间合并
-2. **群消息紧急度分流**：@我 / 关键词 / 项目负责人 → 立即，其他 → 延迟
+2. ~~群消息紧急度分流~~（**refactor/emit-driven-wake 移除**）：旧设计让 handler 在收到群消息后做 immediate/soft 二级分流,soft 走 cron 延迟。重构后这一层全部由**消息系统层 `group_buffer.py`** 的双 timer(慢 30s / 快 5s)承担,@ / 关键词 / owner 走快 timer、其它走慢 timer。延迟归消息系统,叫醒归 emit 内部 `_wake_or_inject`,handler 不再做事件级别的二次分流。
 3. **单实例并发锁**：同一实例不会同时有两个会话
 4. **僵尸会话检测**：运行超 10 分钟强制终止
 5. **事件消费失败时的指数自退避**：失败一次事件自己推迟下次可见时间 2 分钟，再失败 4、8、16、32 分钟，封顶 60 分钟。详见 5.2 末尾。注意退避是事件队列自身的职责，**不是闹钟**——闹钟不为失败重试设任何 alarm。
@@ -722,7 +726,7 @@ global_todos.db 单点真相后，这些操作变成 O(1)：
 1. **到达**：飞书长连接推送消息，系统识别发送者（陌生人自动创建占位联系人）
 2. **归一化**：转为统一内部格式 `NormalizedMessage`。判断紧急度——私聊总是 immediate；群聊只有 @我 或含 attention_keywords / 群 owner 发言才算 immediate，否则进 20-40s 随机 debounce 窗口
 3. **入队 + 沉库**：写入该实例的 events 队列（参与唤醒仲裁）+ messages.db（持久化对话历史）。如果是实例 RUNNING，同时通过 `_inject_events_to_running_session` 把事件写进**内存 signalled_events 池**——让正在跑的会话能感知到（cron tick 没法直接 wake RUNNING 中的实例）
-4. **路由**：按当前实例状态处理——BLOCKED → 等下次 cron tick 拉起来 wake；RUNNING → 注入到当前 session 的 prompt（mid-session injection）；实例醒着但没在跑 → 同 BLOCKED 语义
+4. **路由**：~~按当前实例状态处理——BLOCKED → 等下次 cron tick 拉起来 wake；RUNNING → 注入到当前 session 的 prompt（mid-session injection）；实例醒着但没在跑 → 同 BLOCKED 语义~~ **(refactor/emit-driven-wake 修订)**：handler 不再看 affair 状态、不再分流。emit_event 内部统一接管——事务系统写完事件后立刻调 `_wake_or_inject(new_id)`，由它判断 affair 状态(BLOCKED→起线程 wake；RUNNING→signal 到内存池 mid-session)。**所有外部系统只 emit,叫醒决策只有一份代码**。
 
 **出站（数字生命 → 人类，`express_to_human` 工具的完整链路）**
 
@@ -1235,17 +1239,32 @@ digital-life start
 
 #### 外部消息唤醒链路
 
+**refactor/emit-driven-wake(2026-06-23)修订**：饮食结构变了——execute_event 不再"emit→等 cron tick",而是 emit 入口内部直接接管叫醒。延迟/错峰全部归消息系统的 `group_buffer.py` 双 timer(慢 30s / 快 5s)。
+
 ```
 飞书推消息
   → interfaces/ingress/feishu.py            # 归一化为 NormalizedMessage
-  → application/ingress/router.py          # 路由到对应实例
-  → application/ingress/handler.py         # 紧急度分类 / await_reply 取消 / emit 事件
-  → domain/lifecycle/events.py             # 事件入队（含防抖合并）
-  → cron_lifecycle 下个 tick 取出
-  → domain/lifecycle/scheduler.py          # 组装 wake prompt
-  → infrastructure/ai/agent.py             # LLM 调用
-  → interfaces/tools/*                     # 工具调用
+  → interfaces/ingress/group_buffer.py       # 慢 timer 30s / 快 timer 5s 错峰窗口
+  → application/ingress/router.py            # 路由到对应实例
+  → application/ingress/handler.py           # 归一化 + 去重黑名单 + sibling-echo + emit
+  → domain/lifecycle/events.emit_event       # 严格校验 kind → INSERT → _wake_or_inject
+                                                ├── BLOCKED + 无 wake 进度 → 起线程 wake
+                                                ├── RUNNING → mid-session signal_new_events
+                                                └── wake in progress → return(等下个 emit/cron)
+  → domain/lifecycle/scheduler.py            # 组装 wake prompt
+  → infrastructure/ai/agent.py               # LLM 调用
+  → interfaces/tools/*                       # 工具调用
+
+兜底路径(emit→wake 因 race / 进程崩 / 自退避复活漏抓时):
+  → infrastructure/scheduler/cron_lifecycle.py  # 60s tick pop_due_events
+                                                 # → 共用 wakeup_policy.choose_reason → wake
 ```
+
+核心改动总结(对比旧图):
+- handler 不再看 affair 状态、不再起 wake 线程、不再做 urgency 二级分流
+- emit_event 函数内部新增 `_wake_or_inject`
+- 延迟完全归 `group_buffer.py`(消息系统),与事件层解耦
+- 60s cron tick 从"主驱动"降为"兜底",作用是防止 emit→wake 漏抓
 
 #### 主动休息链路
 
