@@ -34,9 +34,10 @@ ENERGY_SEGMENTS = [
 # ── 精力常量 ──
 
 ENERGY_MAX = 100
-# 每小时恢复（RUNNING 和 BLOCKED 统一）。100 / 24 ≈ 4.17 —— 一整天完全不
-# 动可从 0 恢复到 100。这条和消耗系数共同保证「一天满跑 2000 万 token
-# 刚好耗光满血」「休息一天满血复活」两条产品语义。
+# 每小时恢复（RUNNING 和 BLOCKED 统一）。默认 100 / 24 ≈ 4.17 —— 一整天完全
+# 不动可从 0 恢复到 100。这条和消耗系数共同保证「一天满跑 2000 万 token
+# 刚好耗光满血」「休息一天满血复活」两条产品语义。可通过 env
+# DIGITAL_LIFE_ENERGY_RECOVERY_PER_HOUR 覆盖默认值（_resolve_energy_token_constants）。
 ENERGY_RECOVERY_PER_HOUR = 100.0 / 24   # ≈ 4.17
 ENERGY_COST_PER_CALL = 0.2          # 每次工具调用/模型访问的"动作成本"（不与 token 挂钩）
 
@@ -66,12 +67,11 @@ ENERGY_PER_KTOKEN_OUTPUT = 0.05
 
 
 def _resolve_energy_token_constants() -> None:
-    """从环境变量读 ENERGY_PER_KTOKEN_INPUT / OUTPUT（config_center 注入），覆盖默认值。
+    """从环境变量读 ENERGY_PER_KTOKEN_INPUT / OUTPUT / RECOVERY_PER_HOUR（config_center 注入），覆盖默认值。
 
-    现有 ENERGY_RECOVERY_PER_HOUR 也走同一套：模块顶部硬编码默认值，config
-    center 启动时如果有对应 env 就覆盖。这里抄同样模式。
+    模块顶部硬编码默认值，config center 启动时如果有对应 env 就覆盖。
     """
-    global ENERGY_PER_KTOKEN_INPUT, ENERGY_PER_KTOKEN_OUTPUT
+    global ENERGY_PER_KTOKEN_INPUT, ENERGY_PER_KTOKEN_OUTPUT, ENERGY_RECOVERY_PER_HOUR
     try:
         v_in = os.environ.get("DIGITAL_LIFE_ENERGY_PER_KTOKEN_INPUT")
         if v_in:
@@ -79,6 +79,9 @@ def _resolve_energy_token_constants() -> None:
         v_out = os.environ.get("DIGITAL_LIFE_ENERGY_PER_KTOKEN_OUTPUT")
         if v_out:
             ENERGY_PER_KTOKEN_OUTPUT = float(v_out)
+        v_rec = os.environ.get("DIGITAL_LIFE_ENERGY_RECOVERY_PER_HOUR")
+        if v_rec:
+            ENERGY_RECOVERY_PER_HOUR = float(v_rec)
     except (ValueError, TypeError):
         pass
 

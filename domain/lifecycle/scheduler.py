@@ -574,7 +574,9 @@ def _wake_digital_life_inner_safe(
         effort = str(_cfg.get("agent", {}).get("reasoning_effort", "")).strip()
         reasoning_config = parse_reasoning_effort(effort)
 
-        max_iterations = 999
+        # 来自实例 app.yaml 的 agent.max_turns（ConfigCenter「实例配置 → 任务策略」编辑）；
+        # 没配置时用 999 给足空间，让长任务不被切断（保持与历史行为一致）。
+        max_iterations = int(_cfg.get("agent", {}).get("max_turns") or 999)
 
         # 先算一次 vitals：此时还是 BLOCKED，确保睡眠期间的精力恢复被持久化
         # （否则改成 RUNNING 后 get_current_vitals 会用 RUNNING 衰减率，丢失恢复）
