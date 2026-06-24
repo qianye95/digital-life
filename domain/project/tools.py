@@ -415,9 +415,12 @@ def register_project_tools(
         schema={
             "name": "project_bootstrap",
             "description": (
-                "一次性创建新项目（含目录、project.yaml、初始 todo 树 和岗位分工）。"
+                "一次性创建新项目(含目录、project.yaml、初始 3 条骨架 todo 和岗位分工)。"
                 "Phase 4 (2026-06-24) 之后不再有项目本地 todos.db —— 初始 todo 树直接"
                 "写到 global_todos.db.todos,通过 project_id 反向关联回项目。"
+                "骨架 todo 包括:项目根(project_root) + 项目分工(task_breakdown, "
+                "分给 manager 自己消费 task_breakdown skill 拆解执行 todo) + 项目管理。"
+                "本工具不直接拆解执行 todo,那是 task_breakdown skill 的活。"
                 "positions 是岗位数组,每项含 id/name/assignees(list)/responsibilities(list)。"
                 "建议先 invoke_skill('project_bootstrap') 查看完整流程。"
             ),

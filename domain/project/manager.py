@@ -67,10 +67,10 @@ def create_project(project_id: str, name: str, description: str = "", manager: s
             root_tid = root_id["task"]["id"]
             bootstrap_id = create_task(
                 title="项目分工",
-                description=f"分析项目「{name}」目标，定义岗位分工、创建执行待办",
+                description=f"分析项目「{name}」目标，定义岗位分工、拆解执行待办(消费 task_breakdown skill)",
                 status="planned",
                 source=f"project:{project_id}",
-                type="project_bootstrap",
+                type="task_breakdown",
                 assignee_instance=manager,
                 project_id=project_id,
             )
