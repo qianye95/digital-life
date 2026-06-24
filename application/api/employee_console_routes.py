@@ -907,16 +907,11 @@ class EmployeeConsoleAPIService:
             return web.json_response({"error": str(exc)}, status=500)
 
     async def _handle_console_project_tasks(self, request: web.Request) -> web.Response:
-        """GET /projects/{pid}/tasks"""
+        """GET /projects/{pid}/tasks —— Phase 4:走 global_todos.db WHERE project_id=pid"""
         project_id = request.match_info.get("project_id", "")
         try:
-            from domain.project._infra import get_project_db
-            from domain.project.crud import list_project_tasks
-            db = get_project_db(project_id)
-            try:
-                items = list_project_tasks(db)
-            finally:
-                db.close()
+            from domain.project.crud import list_deliverables
+            items = list_deliverables(db=None, project_id=project_id)
             return web.json_response({"tasks": items})
         except Exception as exc:
             return web.json_response({"error": str(exc)}, status=500)
@@ -1018,41 +1013,38 @@ class EmployeeConsoleAPIService:
         })
 
     async def _handle_console_create_project_task(self, request: web.Request) -> web.Response:
-        """POST /projects/{pid}/tasks"""
+        """POST /projects/{pid}/tasks —— Phase 4:走 global_todos.create_task(以 deliverable 形态创建)"""
         project_id = request.match_info.get("project_id", "")
         data = await self._input(request)
         body = dict(data.body)
         title = str(body.get("title") or "").strip()
         if not title:
             return web.json_response({"ok": False, "reason": "title 必填"}, status=400)
-        from domain.project._infra import get_project_db
-        from domain.project.crud import create_project_task
-        db = get_project_db(project_id)
+        # Phase 4:跨 instance 写 — 前端创建的项目任务。不传 instance context,
+        # create_task 内部拿当前 ContextVar 兜底(空也没关系—— assignee_instance 显式传)。
         try:
-            tid = create_project_task(
-                db,
+            from domain.project.crud import create_deliverable
+            did = create_deliverable(
+                db=None,
                 title=title,
                 description=str(body.get("description") or ""),
-                parent_task_id=str(body.get("parent_task_id") or ""),
+                priority=str(body.get("priority") or "medium"),
                 assignee_instance=str(body.get("assignee_instance") or ""),
-                type=str(body.get("type") or ""),
+                assignee_position=str(body.get("assignee_position") or ""),
+                project_id=project_id,
+                acceptance_criteria=str(body.get("acceptance_criteria") or ""),
             )
-        finally:
-            db.close()
-        return web.json_response({"ok": True, "task_id": tid}, status=201)
+        except Exception as exc:
+            return web.json_response({"ok": False, "reason": str(exc)}, status=500)
+        return web.json_response({"ok": bool(did), "task_id": did}, status=201 if did else 500)
 
     async def _handle_console_update_project_task(self, request: web.Request) -> web.Response:
-        """PATCH /projects/{pid}/tasks/{tid}"""
+        """PATCH /projects/{pid}/tasks/{tid} —— Phase 4:走 update_deliverable(= update_task)"""
         project_id = request.match_info.get("project_id", "")
         task_id = request.match_info.get("task_id", "")
         data = await self._input(request)
-        from domain.project._infra import get_project_db
-        from domain.project.crud import update_project_task
-        db = get_project_db(project_id)
-        try:
-            ok = update_project_task(db, task_id, **dict(data.body))
-        finally:
-            db.close()
+        from domain.project.crud import update_deliverable
+        ok = update_deliverable(db=None, deliverable_id=task_id, project_id=project_id, **dict(data.body))
         return web.json_response({"ok": ok})
 
     async def _handle_console_create_instance(self, request: web.Request) -> web.Response:

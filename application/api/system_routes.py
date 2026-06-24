@@ -1002,12 +1002,10 @@ async def _handle_project_detail(request: web.Request) -> web.Response:
     summary["memory_dir"] = str(project_dir / "memory") if (project_dir / "memory").exists() else ""
     summary["files"] = _scan_project_files(project_dir)
 
-    # tasks 计数
+    # tasks 计数 — Phase 4:走 global_todos.db WHERE project_id=pid
     try:
-        from domain.project._infra import get_project_db
-        from domain.project.crud import list_project_tasks
-        db = get_project_db(pid)
-        tasks = list_project_tasks(db)
+        from domain.project.crud import list_deliverables
+        tasks = list_deliverables(db=None, project_id=pid)
         status_counts: dict[str, int] = {}
         for t in tasks:
             s = str(t.get("status") or "open")
@@ -1044,21 +1042,15 @@ def _scan_project_files(project_dir: Path) -> list[dict[str, str]]:
 async def _handle_project_tasks(request: web.Request) -> web.Response:
     """GET /api/system/projects/{pid}/tasks —— 项目下所有 deliverables。
 
-    ⚠ 2026-06-23 修复: 历史 BUG 是 import list_project_tasks(它是
-    list_project_todos 的 alias,查 project_todos 表),但 zero 创建的规划
-    实际写入的是 **deliverables 表**(15 个 Phase 拆分)。结果就是前端项目
-    页面 COUNT=0,用户看不到任何"已规划好的"待办。
-    改成 list_deliverables,与 sense_project_todos 工具和 project_todo CRUD
-    的 create 路径对齐。
+    Phase 4 (2026-06-24): list_deliverables 内部走 global_todos.db,
+    无项目本地 db。返回 WHERE project_id=pid AND linked_deliverable_id != '' 的 todo。
     """
     pid = _safe_relative_name(request.match_info["pid"])
     if not pid:
         return web.json_response({"error": "invalid pid"}, status=400)
     try:
-        from domain.project._infra import get_project_db
         from domain.project.crud import list_deliverables
-        db = get_project_db(pid)
-        tasks = list_deliverables(db)
+        tasks = list_deliverables(db=None, project_id=pid)
     except Exception as exc:
         logger.exception("list project tasks failed")
         return web.json_response({"tasks": [], "error": str(exc)})
@@ -1379,41 +1371,25 @@ async def _handle_delete_project(request: web.Request) -> web.Response:
 
 
 def _cancel_todos_for_deleted_project(pid: str) -> int:
-    """遍历所有 instance 的 todos.db，把 source='project:{pid}' 的 todos 设 cancelled。
+    """Phase 4:global_todos.db 是单一真相,直接 SQL UPDATE。
 
-    todos 在 apps/<id>/data/todos/todos.db。多实例可能都持有相关 todos。
+    旧版遍历每个 apps/<id>/data/todos/todos.db(实例 backup),Phase 4 后这些 backup 已删。
     """
-    apps_dir = get_project_root() / "apps"
-    if not apps_dir.is_dir():
+    try:
+        from infrastructure.persistence.global_todos import get_global_todos_db
+        db = get_global_todos_db()
+        cur = db.execute(
+            "UPDATE todos SET status = 'cancelled', updated_at = ? "
+            "WHERE project_id = ? AND status NOT IN ('cancelled','done','completed')",
+            (_now_iso(), pid),
+        )
+        cancelled = cur.rowcount
+        db.commit()
+        db.close()
+        return cancelled
+    except Exception:
+        logger.exception("cancel todos for deleted project failed")
         return 0
-    import sqlite3
-    source_pattern = f"project:{pid}"
-    cancelled_total = 0
-    for entry in apps_dir.iterdir():
-        if not entry.is_dir():
-            continue
-        todos_db = entry / "data" / "todos" / "todos.db"
-        if not todos_db.is_file():
-            continue
-        try:
-            conn = sqlite3.connect(str(todos_db))
-            try:
-                # 检查 schema 是否有 source + status 列
-                cols = {r[1] for r in conn.execute("PRAGMA table_info(todos)").fetchall()}
-                if "source" not in cols or "status" not in cols:
-                    continue
-                cur = conn.execute(
-                    "UPDATE todos SET status = 'cancelled', updated_at = ? "
-                    "WHERE source = ? AND status NOT IN ('cancelled','done','completed')",
-                    (_now_iso(), source_pattern),
-                )
-                cancelled_total += cur.rowcount
-                conn.commit()
-            finally:
-                conn.close()
-        except Exception:
-            logger.warning("cancel todos in %s failed", todos_db, exc_info=True)
-    return cancelled_total
 
 
 def _now_iso() -> str:
