@@ -68,6 +68,13 @@ def load_project(project_id: str) -> ProjectConfig | None:
     with open(yaml_path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
 
+    # ⚠ 2026-06-23 重构回归修复:之前把 `proj = raw.get("project", {})` 这行
+    # 误删,但下面 11 处 `proj.get(...)` 引用留着,导致 NameError "name 'proj' is not defined"
+    # → build_my_portfolio 失败 → sense_my_projects / sense_project_detail /
+    # sense_project_todos 全部报错 → zero daily_planner Phase 0 拉不了 portfolio。
+    # 已被 zero 6/24 报上来的 P0 系统 bug 报告指认。
+    proj = raw.get("project", {}) or {}
+
     return ProjectConfig(
         id=proj.get("id", project_id),
         name=proj.get("name", project_id),
