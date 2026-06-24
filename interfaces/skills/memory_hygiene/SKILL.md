@@ -254,27 +254,28 @@ a→d 都是对索引做**归类 / 清扫**(删噪音、合别名、清悬空、
 
 > 它和前四步是两类操作。前面是机械 CRUD,这一步是思考——类比你睡前回望今天,
 > 把零散印象综合成"对张三 / 对那只票 / 对那个策略,我现在什么结论"。
-> 碎片是证据(保留不动),profile 是从证据里长出来的理解。
+>
+> **为什么这一步重要**:联想命中实体时,系统现在**优先读它的 profile**(概念卡),
+> 碎片只作补充。所以 profile 的质量直接决定你下次想起一个实体时,读到的是
+> "提炼后的理解"还是"一堆散乱原始碎片"。消化就是给联想装上"结论层"。
 
 **工具**
-- 看碎片:`execute_code` 跑 `from domain.memory.memory.consciousness.entity_index import get_entity_summary; get_entity_summary("实体名")` —— 拿全量碎片,不被截断。
-  (`recall_entity` / `sense_entity` 也行,但只给最近几条且会截断,不适合"重读整个实体"。)
-- 写理解:`set_entity_profile(name, summary, facts, kind)` —— 写回后碎片不动。
+- 看碎片:`execute_code` 跑 `get_entity_summary("实体名")` —— 拿该实体的全量碎片 + 现有 profile,不被截断。
+  (`recall_entity` / `sense_entity` 也行,但只给最近几条且截断,不适合"重读整个实体"。)
+- 写理解:`set_entity_profile(name, summary, facts, kind)`。
+- 收碎片:`prune_fragments_for_entity(name, keep=N)` —— 留最近 N 条,其余清掉。keep 的值你定。
 
 **原则(只有这几条)**
-- 这是**整合**:消化 = 写 profile **+ 把碎片收干净**,两件事一起做。光写 profile 不收碎片不叫整合。
-- 消化完,一个实体应收敛成「一条 profile + 少量核心碎片」,下次联想它读到的是提炼后的理解,不被老碎片淹没。
-- 收多少**你定**:重要的(人/标的/策略)留几条最近核心当活跃底档;一次性事件、已被 profile 完全覆盖的,碎片基本 prune 掉。不强制清零,也不强制留几条——看你消化时这些碎片的 value 还在不在。
+- 这是**整合**:消化 = 写 profile **+ 收碎片**,两件事一起做。光写 profile 不收碎片不叫整合。
+- 消化完,一个实体应收敛成「一条 profile(主)+ 少量核心碎片(辅)」。因为联想以 profile 为主,
+  散在的老碎片信息已进 profile 就不必全留——留着是噪音,会占掉联想的碎片配额。
+- 收多少**你定**:重要的(人/标的/策略)留几条最近核心当活跃底档;
+  一次性事件、已被 profile 完全覆盖的,碎片基本可以 prune 掉甚至清掉。
+  不强制清零,也不强制留几条——看这些碎片的 value 还在不在。
 - profile 写**一次理解**(1-2 句 summary + 几条核心 facts),不是把碎片逐条翻译成 facts。升华,不是摘抄。
 - 已有 profile 的实体也要看——新碎片有没有带来增量认知?有就更到最新;旧 profile 已涵盖新碎片就没必要重写。
 - **消化顺序你自己挑**:碎片多但没 profile 的最该处理;高价值实体(人/标的/策略)优先于一次性事件。做不完的自然留到下次。
 - 别把运行时 status 类碎片当事实收进 facts;facts 优先取 lesson / rule 这类已沉淀过的。
-
-**工具**
-- 看碎片:`execute_code` 跑 `get_entity_summary("实体名")` —— 拿全量碎片,不被截断。
-  (`recall_entity` / `sense_entity` 也行,但只给最近几条且会截断,不适合"重读整个实体"。)
-- 写理解:`set_entity_profile(name, summary, facts, kind)`。
-- 收碎片:`prune_fragments_for_entity(name, keep=N)` —— 留最近 N 条,其余清掉。keep 的值你定。
 
 ### 8. 写 [整理] audit trail(必做)
 

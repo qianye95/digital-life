@@ -219,6 +219,12 @@ def query_entities_ranked(
 
     Ranking formula: recency * 0.35 + authority * 0.25 +
                      context_overlap * 0.25 + verification * 0.15
+
+    返回结构设计(2026): **profile 为主,碎片为辅**。
+    每个命中实体若有 profile→先返回一张「概念卡」(memory_type="profile",
+    snippet = summary + facts 合成);碎片仍按排名返回作补充细节。
+    这样联想时模型读到的是「对实体的理解」而非散乱碎片——与 memory_hygiene
+    的「消化碎片成 profile」步骤配套。没 profile 的实体退回纯碎片(不破坏旧行为)。
     """
     results = query_entities(entity_names)
     if not results:
@@ -252,11 +258,66 @@ def query_entities_ranked(
     scored.sort(key=lambda x: x[0], reverse=True)
     top = [mem for _, mem in scored[:limit]]
 
-    # Update last_accessed for returned memories
+    # Profile-first: 为每个有 profile 的命中实体生成一张概念卡,排在碎片前面。
+    # 默认把 1/3 的 limit 配额留给 profile(至少 1 张),其余给碎片。
+    profile_cards = _build_profile_cards(entity_names)
+    if profile_cards:
+        profile_quota = max(1, limit // 3)
+        # 若命中的 profile 数 < 配额,多出的配额让给碎片(top 已含 limit 条)
+        keep_fragments = max(0, limit - min(len(profile_cards), profile_quota))
+        top = profile_cards[:profile_quota] + top[:keep_fragments]
+        # 重新去重(按 _matched_entity 让同实体不同源不挤):profile 已代表该实体,
+        # 碎片里同实体的减一条避免重复占位。简单起见不强行去重,留观感。
+
+    # Update last_accessed for returned fragments (profile 卡不是真实 memory,跳过)
     for mem in top:
-        touch_last_accessed(str(mem.get("memory_id", "")))
+        mid = str(mem.get("memory_id", ""))
+        if mem.get("memory_type") != "profile" and mid:
+            touch_last_accessed(mid)
 
     return top
+
+
+def _build_profile_cards(entity_names: list[str]) -> list[dict[str, Any]]:
+    """为命中的实体生成「概念卡」(memory_type=profile),用于联想注入时优先展示。
+
+    无 profile 的实体跳过(调用方回退到纯碎片)。
+    """
+    if not entity_names:
+        return []
+    data = load_entity_index()
+    entities_dict = data.get("entities", {})
+    cards: list[dict[str, Any]] = []
+    for name in entity_names:
+        entity = entities_dict.get(name)
+        if not entity:
+            continue
+        profile = entity.get("profile")
+        if not profile:
+            continue
+        summary = str(profile.get("summary", "")).strip()
+        facts = profile.get("facts") or []
+        if not summary and not facts:
+            continue
+        parts = []
+        if summary:
+            parts.append(summary)
+        if facts:
+            joined = "; ".join(str(f) for f in facts if str(f).strip())
+            if joined:
+                parts.append(f"已知: {joined}")
+        snippet = " | ".join(parts) if parts else summary
+        cards.append({
+            "memory_type": "profile",
+            "memory_id": f"profile:{name}",
+            "snippet": snippet,
+            "timestamp": profile.get("last_updated"),
+            "linked_entities": [],
+            "verification_count": 0,
+            "_matched_entity": name,
+            "_entity_kind": entity.get("type"),
+        })
+    return cards
 
 
 def extract_entities_from_context(text: str) -> list[str]:

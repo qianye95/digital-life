@@ -1060,11 +1060,17 @@ def _handle_sense_entity(args: Dict[str, Any], **_) -> str:
     if not summary:
         return _j({"entity": entity_name, "memories": [], "note": "未找到该实体"})
 
-    memories = query_entities_ranked([entity_name], limit=10)
+    # profile 是该实体的「概念层」(summary + facts),联想也会优先读它,这里单独展示。
+    profile = summary.get("profile")
+    # query 现在会带一张 PROFILE 卡片在 memories 里(已被单独抽到 profile 字段),
+    # 从 memories 列表里把它去掉避免重复展示。
+    memories = [m for m in query_entities_ranked([entity_name], limit=10)
+                if m.get("memory_type") != "profile"]
     return _j({
         "entity": entity_name,
         "type": summary.get("type"),
         "aliases": summary.get("aliases", []),
+        "profile": profile,
         "memories": [
             {"type": m.get("memory_type"), "snippet": m.get("snippet", "")[:150],
              "timestamp": m.get("timestamp"), "verification_count": m.get("verification_count", 0)}

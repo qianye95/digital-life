@@ -1219,8 +1219,12 @@ class AIAgent:
                 snippet = str(mem.get("snippet", "")).strip().replace("\n", " ")
                 if len(snippet) > 200:
                     snippet = snippet[:100] + "…" + snippet[-100:]
-                # snippet 只截关键部分(避免长篇日记占满 faketool)
-                lines.append(f"- [{mtype}]{tag} {snippet}")
+                if mtype == "PROFILE":
+                    # profile = 对该实体的提炼理解(profile-first,替代散乱碎片)
+                    lines.append(f"- [{entity} · 概念] {snippet}")
+                else:
+                    # snippet 只截关键部分(避免长篇日记占满 faketool)
+                    lines.append(f"- [{mtype}]{tag} {snippet}")
             # 注解:多少实体命中 / 多少 memory 返回
             lines.append(f"(命中 {len(new_entities)} 实体: "
                          f"{', '.join(new_entities[:8])}"

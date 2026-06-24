@@ -240,7 +240,11 @@ def _build_memory_context(reason: str = "", extra: str = "", events_text: str = 
                             snippet = str(m.get("snippet", ""))[:150]
                             entity = str(m.get("_matched_entity", ""))
                             tag = f" [{entity}]" if entity else ""
-                            lines.append(f"- [{mtype}]{tag} {snippet}")
+                            if mtype == "PROFILE":
+                                # profile 卡 = 对该实体的提炼理解,优先于碎片展示
+                                lines.insert(1, f"- [{entity} · 概念] {snippet}")
+                            else:
+                                lines.append(f"- [{mtype}]{tag} {snippet}")
                         parts.append("\n".join(lines))
                         for m in memories:
                             mid = str(m.get("memory_id", ""))
