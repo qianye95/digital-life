@@ -415,8 +415,10 @@ def register_project_tools(
         schema={
             "name": "project_bootstrap",
             "description": (
-                "一次性创建新项目（含目录、project.yaml、todos.db 和岗位分工）。"
-                "positions 是岗位数组，每项含 id/name/assignees(list)/responsibilities(list)。"
+                "一次性创建新项目（含目录、project.yaml、初始 todo 树 和岗位分工）。"
+                "Phase 4 (2026-06-24) 之后不再有项目本地 todos.db —— 初始 todo 树直接"
+                "写到 global_todos.db.todos,通过 project_id 反向关联回项目。"
+                "positions 是岗位数组,每项含 id/name/assignees(list)/responsibilities(list)。"
                 "建议先 invoke_skill('project_bootstrap') 查看完整流程。"
             ),
             "parameters": {

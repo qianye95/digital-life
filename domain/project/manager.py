@@ -11,7 +11,11 @@ _PROJECTS_DIR = Path(__file__).resolve().parents[2] / "projects"
 
 
 def create_project(project_id: str, name: str, description: str = "", manager: str = "") -> bool:
-    """Create a new project: directory + project.yaml + todos.db."""
+    """Create a new project: directory + project.yaml + 初始 todo 树。
+
+    Phase 4 (2026-06-24) 之后:**不再建项目本地 todos.db**。
+    todo 全在 global_todos.db.todos,通过 project_id 反向关联回项目。
+    """
     proj_dir = _PROJECTS_DIR / project_id
     if proj_dir.exists():
         logger.warning("Project %s already exists", project_id)
@@ -40,8 +44,7 @@ def create_project(project_id: str, name: str, description: str = "", manager: s
 
     # Phase 4:不再创建 projects/<pid>/data/todos.db.deliverables 表。
     # 所有 todo 都在 global_todos.db,todo 通过 project_id 字段反向挂回到项目。
-    # 此处保留一个 mkdir(data 目录) 兼容老代码(比如 archive/read_text)。
-    (proj_dir / "data").mkdir(parents=True, exist_ok=True)
+    # (proj_dir / "data") 在前面 _create_dirs 已建好,这里无需再 mkdir。
 
     # 初始化默认待办树（写到 global_todos.db —— Phase 4 后这仍是单一真相）
     # 设计原则（2026-06-14 用户确认）：待办是独立 entity，关联项目+实例。
@@ -87,7 +90,9 @@ def create_project(project_id: str, name: str, description: str = "", manager: s
                 management_id.get("task", {}).get("id"),
             )
     except Exception as exc:
-        logger.warning("init_project_todo_tree failed for %s: %s", project_id, exc)
+        # Phase 4: init_project_todo_tree 这个老函数已内联到 try 块上方,
+        # 日志文案保留原词便于历史检索。
+        logger.warning("init default todo tree failed for %s: %s", project_id, exc)
 
     logger.info("Created project %s (%s)", project_id, name)
     return True

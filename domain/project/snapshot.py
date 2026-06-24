@@ -34,7 +34,7 @@ def build_my_portfolio(instance_id: str | None = None) -> List[Dict[str, Any]]:
         "deadline": ...,
         "deadline_remaining_days": int | None,
         "personal_todos": [...],     # from instance's tasks.db WHERE source=project_id
-        "project_deliverables": [...],# from projects/<pid>/data/...db WHERE assignee_instance=instance_id 鈥 OR 全部
+        "project_deliverables": [...],# Phase 4:from global_todos.db WHERE project_id=pid AND linked_deliverable_id != ''
         "siblings": [...]            # other instances in this project
       }
     """

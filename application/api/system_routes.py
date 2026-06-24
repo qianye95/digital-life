@@ -1336,11 +1336,12 @@ async def _handle_toggle_instance_active(request: web.Request) -> web.Response:
 async def _handle_delete_project(request: web.Request) -> web.Response:
     """DELETE /api/system/projects/{pid} —— 删除项目。
 
-    物理删除 projects/{pid}/ 目录（含 project.yaml + data/todos.db）。
-    同时遍历所有实例 todos.db，把 source='project:{pid}' 的 todos 全部
-    置为 cancelled（不删除，保留记录便于审计）。
+    物理删除 projects/{pid}/ 目录（含 project.yaml + deliverables 物理文件等）。
+    Phase 4 (2026-06-24) 后该目录不再含 todos.db —— 项目 todos 一直在
+    global_todos.db(`${pid}` 命名空间下)。删项目时给这些 todos 标 cancelled,
+    不删除 row（保留审计）。
 
-    若想归档而非删除，建议把 status 设为 archived（archive_project）。
+    若想归档而非删除,建议把 status 设为 archived（archive_project）。
     """
     pid = _safe_relative_name(request.match_info["pid"])
     if not pid:
