@@ -334,7 +334,7 @@ Zero 也同时被"参与日会"的待办闹钟唤醒。它看到 Alpha 的汇报
 - 别的实例转移给我的
 - 我认领的（unassigned pool 拿走）
 
-**数据位置（2026-06-14 重构后）**：所有 todos 数据存在 **`<repo>/data/global_todos.db`** 单一真相表。老的实例 `apps/{id}/data/todos/todos.db` 和项目 `projects/{pid}/data/todos.db.project_todos` 已迁移并保留作 backup。
+**数据位置（2026-06-14 重构后，2026-06-24 Phase 4 终结）**：所有 todos 数据存在 **`<repo>/data/global_todos.db`** 单一真相表。老的实例 `apps/{id}/data/todos/todos.db` 和项目 `projects/{pid}/data/todos.db`（deliverables + project_todos 两表）已**全部删除**(2026-06-24 Phase 4 完成),只保留历史备份在 `data/_backup_pre_merge_20260623/`。Phase 4 把项目 deliverables 表合并到 todos,通过 `project_id` + `linked_deliverable_id` 反向定位。
 
 **拆解**：用 `parent_id` 实现，父子待办在同一张表。拆解可选——简单 todo 不拆，复杂 todo 拆成子 todo，项目级复杂场景可走 SpecKit（生成 spec/plan/tasks.md）。
 
@@ -413,9 +413,11 @@ task_reminder 和 initiative 保持分开，它们的触发机制和提示词调
 
 **为什么要统一而不是保留分层？** 传统系统是"项目→任务→待办"线性层级，三层各有自己的表和接口。实证证明这种分层导致工具调用复杂度极高（模型面对 5 个工具：task/task_plan/task_note/todo/manage_work），最终放弃结构化能力、退回最简单的 markdown 文本。统一后模型只面对一套待办接口，复杂度按需增长（简单待办只填标题，复杂的才加维度），符合"渐进式复杂度"原则。
 
-**为什么待办要 global DB 而不是按实例/项目分库？**（2026-06-14 重构）历史包袱下，待办散在两个地方：
-- 实例的 `apps/{id}/data/todos/todos.db.todos`（个人待办）
-- 项目的 `projects/{pid}/data/todos.db.project_todos`（项目待办）
+**为什么待办要 global DB 而不是按实例/项目分库？**（2026-06-14 重构，2026-06-24 Phase 4 终结）
+历史包袱下，待办散在两个地方(Phase 4 已经全部统一到单一 global_todos.db):
+- ~~实例的 `apps/{id}/data/todos/todos.db.todos`(个人待办)~~ Phase 4 已删
+- ~~项目的 `projects/{pid}/data/todos.db.project_todos`(项目待办)~~ Phase 4 已删
+- ~~项目 `projects/{pid}/data/todos.db.deliverables`(交付物)~~ Phase 4 合并到 todos(`linked_deliverable_id != ''` 标识)
 
 这违反"待办是独立 entity、关联关系是属性"的核心原则。一旦你想做这些操作就要 ugly workaround：
 - **转移 todo**（一个 todo 从 zero 派给 alpha）→ 跨实例数据搬家
@@ -440,10 +442,10 @@ global_todos.db 单点真相后，这些操作变成 O(1)：
 - `project_id` 关联项目 yaml，但**不强 FK**——项目取消后 todo 仍可被 cancelled
 - `parent_id` 关联父子 todo（同表），仍可冗余
 
-**老的源库怎么办？** 迁移脚本把数据吸收后，源库保持不动：
-- `apps/{id}/data/todos/todos.db` → backup 退场，不入 git（被 `*.db` 规则 ignore）
-- `projects/{pid}/data/todos.db` → 保留作 deliverables 表（项目交付成果仍在项目 DB），todos 表老 table 退场
-- 迁移靠 `scripts/migrate_todos_to_global.py` 一次性跑（开了新实例后增量补跑也支持）
+**老的源库怎么办？** ~~迁移脚本把数据吸收后，源库保持不动~~ Phase 4 (2026-06-24) 全部已删:
+- ~~`apps/{id}/data/todos/todos.db` → backup 退场，不入 git~~ Phase 4 直接删
+- ~~`projects/{pid}/data/todos.db` → 保留作 deliverables 表~~ Phase 4 deliverables 合并到 todos,源库删
+- 迁移靠 `scripts/migrate_deliverables_to_global_todos.py`(Phase 4 新)— 一次性幂等,完整备份在 `data/_backup_pre_merge_20260623/`
 
 ---
 
@@ -611,7 +613,7 @@ global_todos.db 单点真相后，这些操作变成 O(1)：
 
 **项目级存储**（`projects/{pid}/`）：每个项目独立的目录。包括：
 - 项目配置（project.yaml）——目标、KPI、论断、角色分工、作息节奏
-- 项目数据库（data/todos.db）——**仅作 deliverables 表**（项目交付成果）；项目待办已迁出到 global_todos.db（通过 project_id 关联回项目，详见 6.8）
+- 项目数据库(data/todos.db)——Phase 4 已删,所有项目交付物合并到 global_todos.db.todos(`linked_deliverable_id != ''` 标识),通过 project_id 关联回项目
 - 成果产出物目录（deliverables/）
 - 知识文档目录（knowledge/documents/、docs/）
 - 共享代码（code/）
