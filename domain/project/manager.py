@@ -38,12 +38,12 @@ def create_project(project_id: str, name: str, description: str = "", manager: s
     with open(proj_dir / "project.yaml", "w", encoding="utf-8") as f:
         yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
 
-    # Initialize todos.db（仍需要建 deliverables 表，给项目级交付成果存处）
-    from ._infra import get_project_db
-    db = get_project_db(project_id)
-    db.close()
+    # Phase 4:不再创建 projects/<pid>/data/todos.db.deliverables 表。
+    # 所有 todo 都在 global_todos.db,todo 通过 project_id 字段反向挂回到项目。
+    # 此处保留一个 mkdir(data 目录) 兼容老代码(比如 archive/read_text)。
+    (proj_dir / "data").mkdir(parents=True, exist_ok=True)
 
-    # 初始化默认待办树（写到 global_todos.db，不是项目自己的 todos.db）
+    # 初始化默认待办树（写到 global_todos.db —— Phase 4 后这仍是单一真相）
     # 设计原则（2026-06-14 用户确认）：待办是独立 entity，关联项目+实例。
     # 项目创建时自动 seed 根待办 + "项目分工" 给 manager。后续项目分工可
     # 拆出更多子待办+分配给其他实例。

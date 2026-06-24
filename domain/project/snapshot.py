@@ -104,62 +104,54 @@ def build_my_portfolio(instance_id: str | None = None) -> List[Dict[str, Any]]:
 
 
 def _load_personal_todos(instance_id: str, project_id: str) -> list[dict]:
-    """读 instance 的 tasks.db tasks 表，WHERE source=project_id"""
+    """Phase 4:读 global_todos.db.assignee_instance=instance_id 且 project_id=pid 的 todo。"""
     try:
-        from infrastructure.config import get_runtime_home
-        runtime_home = get_runtime_home()
-        tasks_db_path = runtime_home / "tasks" / "tasks.db"
-        if not tasks_db_path.exists():
-            return []
-        conn = sqlite3.connect(str(tasks_db_path))
-        conn.row_factory = sqlite3.Row
-        try:
-            rows = conn.execute(
-                "SELECT id, title, status, priority, deadline, description, updated_at "
-                "FROM tasks WHERE source = ? ORDER BY status, updated_at DESC LIMIT 20",
-                (project_id,),
-            ).fetchall()
-            return [dict(r) for r in rows]
-        except sqlite3.Error:
-            return []
-        finally:
-            conn.close()
+        from domain.todos.crud import list_tasks
+        tasks = list_tasks(project_id=project_id, assignee_instance=instance_id)
+        # 取关键字段
+        return [
+            {
+                "id": t.get("id", ""),
+                "title": t.get("title", ""),
+                "status": t.get("status", ""),
+                "priority": t.get("priority", ""),
+                "deadline": t.get("deadline"),
+                "description": t.get("description", ""),
+                "updated_at": t.get("updated_at", ""),
+            }
+            for t in tasks[:20]
+        ]
     except Exception:
         return []
 
 
 def _load_project_deliverables(project_id: str, instance_id: str | None = None) -> list[dict]:
-    """读项目 deliverables 表，标出我的 / 别人的 / 无主的"""
+    """Phase 4:读 global_todos.db 的 deliverable 类 todo WHERE project_id=pid
+    AND linked_deliverable_id != ''。
+
+    deliverable 是一种特殊 todo(用 linked_deliverable_id 标识),不必走第二个表。
+    """
     try:
-        from domain.project._infra import get_project_db
-        db = get_project_db(project_id)
-        try:
-            # 给我相关的（assigned to me），或全部
-            if instance_id:
-                rows = db.execute(
-                    "SELECT id, title, status, priority, assignee_instance, assignee_position, "
-                    "description, updated_at FROM deliverables "
-                    "WHERE assignee_instance = ? OR assignee_instance = '' OR assignee_instance IS NULL "
-                    "ORDER BY "
-                    "CASE status WHEN 'in_progress' THEN 0 WHEN 'planned' THEN 1 ELSE 2 END, updated_at DESC "
-                    "LIMIT 25",
-                    (instance_id,),
-                ).fetchall()
-            else:
-                rows = db.execute(
-                    "SELECT id, title, status, priority, assignee_instance, assignee_position, "
-                    "description, updated_at FROM deliverables "
-                    "ORDER BY "
-                    "CASE status WHEN 'in_progress' THEN 0 WHEN 'planned' THEN 1 ELSE 2 END, updated_at DESC "
-                    "LIMIT 25",
-                ).fetchall()
-            out = []
-            for r in rows:
-                d = dict(r)
-                d["mine"] = bool((d.get("assignee_instance") or "") == instance_id)
-                out.append(d)
-            return out
-        finally:
-            db.close()
+        from domain.todos.crud import list_tasks
+        tasks = list_tasks(project_id=project_id)
+        # 只取 deliverable 类(linked_deliverable_id 非空)
+        delivs = [t for t in tasks if t.get("linked_deliverable_id")]
+        # 按 instance 过滤:我相关的(分给我或无主)
+        if instance_id:
+            delivs = [
+                t for t in delivs
+                if (t.get("assignee_instance") or "") in (instance_id, "", None)
+            ]
+        # 排序:in_progress > planned > 其它
+        status_order = {"in_progress": 0, "planned": 1}
+        delivs.sort(key=lambda t: (status_order.get(t.get("status", ""), 2), t.get("updated_at", "")))
+        delivs = delivs[:25]
+        # 给前端加 mine 标记
+        out = []
+        for t in delivs:
+            d = dict(t)
+            d["mine"] = bool((d.get("assignee_instance") or "") == (instance_id or ""))
+            out.append(d)
+        return out
     except Exception:
         return []

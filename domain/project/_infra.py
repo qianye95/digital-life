@@ -1,16 +1,22 @@
-"""Project infrastructure: todos.db connection and schema.
+"""Project infrastructure: 物理目录 + (legacy) DB 入口。
 
-命名对齐（用户要求 2026-06-14）：项目内所有 task 残留命名改为 todo。
-表 project_tasks → project_todos；字段 parent_task_id → parent_todo_id。
-脚本 ALTER old → new 做迁移，旧库自动改名继续用。
+Phase 4 (2026-06-24) 之后,**todos 不再写在项目 DB 里**。所有 todo 全在
+`data/global_todos.db.todos`,本项目依次通过 `linked_deliverable_id != ''`
+和 `project_id` 字段反向定位。
+
+`get_project_db(project_id)` 保留为 thin wrapper 转发到
+`global_todos.get_global_todos_db()`,让 老 caller 拿到一个能用的连接
+- 它读 `todos` 表(不是项目本地表)。老 caller 内部的 SQL(查 deliverables/
+project_todos)会抛 `no such table`,这是预期 — 让 caller 修。但拿连接本身不报错。
+
+物理文件目录 `deliverables_dir` (projects/<pid>/deliverables/) 是真实交付物
+文件存放,跟 todos 无关,保留。
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-
-from infrastructure.persistence import sqlite
 
 logger = logging.getLogger("digital_life.domain.project")
 
@@ -20,95 +26,34 @@ def _project_dir(project_id: str) -> Path:
 
 
 def _db_path(project_id: str) -> Path:
+    """旧项目 db 路径——Phase 4 后不再使用,保留作迁移历史查询。"""
     return _project_dir(project_id) / "data" / "todos.db"
 
 
-def get_project_db(project_id: str) -> sqlite.Connection:
-    """Return a connection to the project's todos.db. Auto-creates DB + tables.
+def get_project_db(project_id: str):
+    """⚠ Phase 4:转发到 global_todos.db。
 
-    含两张表：
-      deliverables — 项目级交付成果（已有，不动）
-      project_todos — 项目级待办树（v5 重命名：原 project_tasks，对齐
-        全局 task→todo 合并的命名约定）
+    旧 caller 期望拿到一个 connection 操作 'deliverables' / 'project_todos' 表,
+    Phase 4 后这些表都不存在了——global `todos` 表才是单一真相。
+
+    返回 global_todos.db 的连接,callers 应当迁移到 `crud.list_deliverables`
+    / `list_tasks(project_id=...)` 等 thin wrapper(它们已封装 global_db 路径)。
     """
-    db_path = _db_path(project_id)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite.connect(str(db_path))
-    db.row_factory = sqlite.Row
-    db.execute("PRAGMA journal_mode=WAL")
-    # 先迁移老家伙（如果 project_tasks 还在，改成 project_todos + 字段重命名）
-    # 必须在 CREATE TABLE IF NOT EXISTS project_todos 之前，否则_rename 会撞名
-    _migrate_legacy_project_tasks(db)
-    db.executescript("""
-        CREATE TABLE IF NOT EXISTS deliverables (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            description TEXT DEFAULT '',
-            status TEXT NOT NULL DEFAULT 'planned',
-            priority TEXT DEFAULT 'medium',
-            assignee_instance TEXT DEFAULT '',
-            assignee_position TEXT DEFAULT '',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_deliverables_status ON deliverables(status);
-        CREATE INDEX IF NOT EXISTS idx_deliverables_assignee ON deliverables(assignee_instance);
-
-        CREATE TABLE IF NOT EXISTS project_todos (
-            id TEXT PRIMARY KEY,
-            parent_todo_id TEXT DEFAULT '',
-            title TEXT NOT NULL,
-            description TEXT DEFAULT '',
-            status TEXT NOT NULL DEFAULT 'planned',
-            priority TEXT DEFAULT 'medium',
-            assignee_instance TEXT DEFAULT '',
-            assignee_kind TEXT DEFAULT '',
-            type TEXT DEFAULT '',
-            linked_deliverable_id TEXT DEFAULT '',
-            sort_order INTEGER DEFAULT 0,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_project_todos_parent ON project_todos(parent_todo_id);
-        CREATE INDEX IF NOT EXISTS idx_project_todos_status ON project_todos(status);
-        CREATE INDEX IF NOT EXISTS idx_project_todos_assignee ON project_todos(assignee_instance);
-    """)
-    return db
-
-
-def _migrate_legacy_project_tasks(db: sqlite.Connection) -> None:
-    """老库还叫 project_tasks / parent_task_id —— 检测到就迁移到新表名。
-
-    必须在 CREATE TABLE IF NOT EXISTS project_todos 之前调用，否则 RENAME 会撞名。
-    """
-    try:
-        rows = db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='project_tasks'"
-        ).fetchall()
-        if not rows:
-            return
-        # 同时清理老 index（RENAME 自动重建，但旧名还在；CREATE INDEX IF NOT EXISTS
-        # 在新表上会顺利建新的）
-        db.executescript("""
-            DROP INDEX IF EXISTS idx_project_tasks_parent;
-            DROP INDEX IF EXISTS idx_project_tasks_status;
-            DROP INDEX IF EXISTS idx_project_tasks_assignee;
-            ALTER TABLE project_tasks RENAME TO project_todos;
-            ALTER TABLE project_todos RENAME COLUMN parent_task_id TO parent_todo_id;
-        """)
-        logger.info("Migrated project_tasks → project_todos (column parent_task_id → parent_todo_id)")
-    except Exception as exc:
-        # 不致命——表可能已经在另一个 process 改过（multi-instance）
-        logger.debug("project_tasks migration skipped: %s", exc)
+    from infrastructure.persistence.global_todos import get_global_todos_db
+    return get_global_todos_db()
 
 
 def project_dir(project_id: str) -> Path:
+    """项目目录 projects/<pid>/。"""
     return _project_dir(project_id)
 
 
 def deliverables_dir(project_id: str) -> Path:
+    """物理交付物文件目录 projects/<pid>/deliverables/。
+
+    注意:这是**文件目录**,不是 todos 数据表。project_deliver 工具存
+    HTML / pdf / 报告等物理交付物用。Phase 4 不动这部分。
+    """
     p = _project_dir(project_id) / "deliverables"
     p.mkdir(parents=True, exist_ok=True)
     return p

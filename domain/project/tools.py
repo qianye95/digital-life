@@ -136,14 +136,12 @@ def register_project_tools(
             return _j({"ok": False, "reason": "project_id 必填"})
         try:
             from .loader import load_project
-            from ._infra import get_project_db
             cfg = load_project(project_id)
             if not cfg:
                 return _j({"ok": False, "reason": f"项目 {project_id} 不存在"})
-            db = get_project_db(project_id)
+            # Phase 4: list_deliverables 内部走 global_todos.db
             from .crud import list_deliverables
-            todos = list_deliverables(db)
-            db.close()
+            todos = list_deliverables(db=None, project_id=project_id)
             result = []
             for t in todos:
                 item = dict(t)
@@ -180,9 +178,9 @@ def register_project_tools(
         if not project_id:
             return _j({"ok": False, "reason": "project_id 必填"})
 
+        # Phase 4: crud 已是 thin wrapper 到 global_todos。db 参数不用传,
+        # 但保留 None 调用兼容。
         try:
-            from ._infra import get_project_db
-            db = get_project_db(project_id)
             from .crud import (
                 create_deliverable, get_deliverable, list_deliverables, update_deliverable,
             )
@@ -193,70 +191,55 @@ def register_project_tools(
             if action == "create":
                 title = (args.get("title") or "").strip()
                 if not title:
-                    db.close()
                     return _j({"ok": False, "reason": "title 必填"})
                 did = create_deliverable(
-                    db,
+                    db=None,
                     title=title,
                     description=(args.get("description") or "").strip(),
                     priority=(args.get("priority") or "medium").strip(),
                     assignee_instance=(args.get("assignee_instance") or "").strip(),
                     assignee_position=(args.get("assignee_position") or "").strip(),
-                    # 2026-06-23 修复:create_deliverable 同步建 global todo;
-                    # 不传 project_id 会跳过同步(即旧 BUG 行为)。
                     project_id=project_id,
                     acceptance_criteria=(args.get("acceptance_criteria") or "").strip(),
                 )
-                db.close()
                 return _j({"ok": True, "id": did})
 
             elif action == "list":
-                todos = list_deliverables(
-                    db,
-                    status=args.get("status"),
-                    assignee_instance=args.get("assignee_instance"),
-                )
-                db.close()
+                # Phase 4: list_deliverables 只走 project_id 过滤。
+                # status / assignee_instance 子筛选由 caller-side 处理(否则在 global 表全表查)
+                todos = list_deliverables(db=None, project_id=project_id)
+                # 可选过滤
+                status_filter = args.get("status")
+                assignee_filter = args.get("assignee_instance")
+                if status_filter:
+                    todos = [t for t in todos if t.get("status") == status_filter]
+                if assignee_filter:
+                    todos = [t for t in todos if t.get("assignee_instance") == assignee_filter]
                 return _j({"ok": True, "todos": todos})
 
             elif action == "update":
                 deliverable_id = (args.get("deliverable_id") or "").strip()
                 if not deliverable_id:
-                    db.close()
                     return _j({"ok": False, "reason": "deliverable_id 必填"})
                 updates = {}
                 for key in ("status", "assignee_instance", "assignee_position", "priority", "title"):
                     if key in args and args[key]:
                         updates[key] = args[key].strip()
-                # project_id 透传给 update_deliverable 用于反向同步到 task
-                # ⚠ 2026-06-23 修复: 变量名错位(此处作用域内是 `project_id`, 不是 `pid`)。
-                # 历史 BUG 触发条件:模型调 project_todo(action="update", ...) → 抛 NameError
-                # → alpha 在规划原型阶段多次 update 失败(报错 "name 'pid' is not defined"
-                # 见 812 号 wake turn 7994)→ 整个 update 链全废,delivearable 状态永远停在 planned。
-                updates["project_id"] = project_id
-                ok = update_deliverable(db, deliverable_id, **updates)
-                db.close()
+                ok = update_deliverable(db=None, deliverable_id=deliverable_id, project_id=project_id, **updates)
                 return _j({"ok": ok})
 
             elif action == "get":
                 deliverable_id = (args.get("deliverable_id") or "").strip()
                 if not deliverable_id:
-                    db.close()
                     return _j({"ok": False, "reason": "deliverable_id 必填"})
-                todo = get_deliverable(db, deliverable_id)
-                db.close()
+                todo = get_deliverable(db=None, deliverable_id=deliverable_id)
                 if not todo:
                     return _j({"ok": False, "reason": "deliverable 不存在"})
                 return _j({"ok": True, "deliverable": todo})
 
             else:
-                db.close()
                 return _j({"ok": False, "reason": f"未知 action: {action}"})
         except Exception as e:
-            try:
-                db.close()
-            except Exception:
-                pass
             return _j({"ok": False, "reason": str(e)})
 
     registry.register(
@@ -469,50 +452,37 @@ def register_project_tools(
 
     # ── task_from_deliverable ──
     def _handle_task_from_deliverable(args: Dict[str, Any], **_) -> str:
-        """Atomic: 把项目 deliverable 转成个人 task，更新 deliverable 状态为 in_progress。"""
+        """Phase 4 简化版:deliverable 就是 todo 本身,认领 = 单条 UPDATE。
+
+        旧逻辑:create task + 反向 update deliverable(两套表)。
+        Phase 4 后:只有 global_todos.db 一套表,deliverable_id == todo.id,
+        所以认领 = `update_task(deliv_id, status='in_progress', assignee_instance=mine)`。
+        """
         project_id = (args.get("project_id") or "").strip()
         deliverable_id = (args.get("deliverable_id") or "").strip()
         if not project_id or not deliverable_id:
             return _j({"ok": False, "reason": "project_id 和 deliverable_id 必填"})
 
         try:
-            from ._infra import get_project_db
             from .crud import get_deliverable, update_deliverable
+            d = get_deliverable(db=None, deliverable_id=deliverable_id)
+            if not d:
+                return _j({"ok": False, "reason": f"deliverable {deliverable_id} 不存在"})
 
-            pdb = get_project_db(project_id)
-            try:
-                d = get_deliverable(pdb, deliverable_id)
-                if not d:
-                    return _j({"ok": False, "reason": f"deliverable {deliverable_id} 不存在"})
+            my_iid = _get_my_instance_id()
+            current_assignee = (d.get("assignee_instance") or "").strip()
+            if current_assignee and my_iid and current_assignee != my_iid:
+                return _j({"ok": False, "reason": f"deliverable 已分配给 {current_assignee}"})
 
-                my_iid = _get_my_instance_id()
-                # 已被其他实例认领则拒绝
-                current_assignee = (d.get("assignee_instance") or "").strip()
-                if current_assignee and my_iid and current_assignee != my_iid:
-                    return _j({"ok": False, "reason": f"deliverable 已分配给 {current_assignee}"})
-
-                # 创建个人 task
-                from domain.todos.crud import create_task
-                source = f"project:{project_id}"
-                result = create_task(
-                    title=d["title"],
-                    description=d.get("description") or "",
-                    priority=d.get("priority") or "medium",
-                    status="planned",
-                    source=source,
-                    linked_deliverable_id=deliverable_id,
-                )
-                if not result.get("ok"):
-                    return _j(result)
-
-                # 标记 deliverable 为 in_progress（已认领）。
-                # 注意：此处自带 task 的新建（上面的 create_task），所以不需要反向同步。
-                update_deliverable(pdb, deliverable_id, status="in_progress",
-                                   assignee_instance=my_iid or current_assignee,
-                                   project_id=None)  # 显式不触发反向同步
-                return _j({"ok": True, "task": result["task"], "deliverable_id": deliverable_id})
-            finally:
-                pdb.close()
+            # 单条 UPDATE:认领 + 开始干活
+            ok = update_deliverable(
+                db=None,
+                deliverable_id=deliverable_id,
+                project_id=project_id,
+                status="in_progress",
+                assignee_instance=my_iid or current_assignee,
+            )
+            return _j({"ok": bool(ok), "deliverable_id": deliverable_id, "task": d})
         except Exception as e:
             return _j({"ok": False, "reason": str(e)})
 

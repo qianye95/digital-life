@@ -29,6 +29,9 @@ class Task:
     assignee_kind: str = ""
     parent_id: str = ""
     has_workspace: bool = False
+    # Phase 4 (2026-06-24):岗位名 architect/developer/trader(从 deliverables 合并过来),
+    # 跟 assignee_kind(instance/human/position) 不同语义。
+    assignee_position: str = ""
     created_at: str = ""
     updated_at: str = ""
 
@@ -66,6 +69,7 @@ def row_to_task(row) -> Task:
     has_workspace = bool(row["has_workspace"]) if "has_workspace" in keys else False
     acceptance_criteria = row["acceptance_criteria"] if "acceptance_criteria" in keys else ""
     detail = row["detail"] if "detail" in keys else ""
+    assignee_position = row["assignee_position"] if "assignee_position" in keys else ""
     return Task(
         id=row["id"],
         title=row["title"],
@@ -84,6 +88,7 @@ def row_to_task(row) -> Task:
         assignee_kind=assignee_kind or "",
         parent_id=parent_id or "",
         has_workspace=has_workspace,
+        assignee_position=assignee_position or "",
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -107,6 +112,7 @@ def task_to_dict(task: Task) -> dict:
         "project_id": task.project_id,
         "assignee_instance": task.assignee_instance,
         "assignee_kind": task.assignee_kind,
+        "assignee_position": task.assignee_position,
         "parent_id": task.parent_id,
         "has_workspace": task.has_workspace,
         "created_at": task.created_at,
