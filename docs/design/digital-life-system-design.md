@@ -1726,14 +1726,72 @@ score = recency × 0.35 + authority × 0.25 + context_overlap × 0.25 + verifica
 2. 类型区分（trading_wait 类 consciousness authority 只有 0.3）
 3. 显式废止（通过 `supersedes` 参数 ——未来特性）
 
-### F.4 双时态召回
+### F.4 双时态召回（profile-first）
 
-**Wake 时批次召回**：scheduler 构建 prompt 时 → strings 匹配已知实体 → `query_entities_ranked(limit=5)` → 注入 `[实体触发记忆]` 块。
-**Mid-session 快速联想**：AIAgent 每次 LLM 调用前 <5ms 扫描，注入一行 `[快速联想] 华能蒙电 / 回测框架`，model 自己判断要不要调 `recall_entity('name')` 拉详情。
+> **2026 升级**：联想命中实体时**优先读 profile（概念），碎片降为补充**。
+> 与 `memory_hygiene` 7.5e「消化碎片成概念」步骤配套——消化出 profile 的实体，
+> 下次联想读到的就是「对它的理解」而非散乱原始碎片。
 
-去重粒度：entity 级（同 session 同实体只注入一次）+ memory 级（同 memory_id 只注入一次）。
+**召回的单位是实体，不是碎片。** `query_entities_ranked` 命中实体后，返回内容按优先级拼装：
 
-### F.5 四条代谢流
+```
+命中实体 X（有 profile）
+  → [X · 概念] summary + facts 合成卡   ← 主，排在最前
+  → [type] 该实体碎片 top-N（无 profile 时退化为纯碎片）   ← 补充细节
+```
+
+| 实体状态 | 召回返回 |
+| --- | --- |
+| 有 profile + 有碎片 | 1 张概念卡 + 少量碎片补充（profile 配额 1/3，碎片配额 2/3） |
+| 有 profile + 碎片已清 | 仅 1 张概念卡（消化完成的理想态） |
+| 无 profile + 有碎片 | 纯碎片（旧行为，保持兼容） |
+| 无 profile + 无碎片 | 空（索引该实体已无信息，应被 7.5a 清掉） |
+
+**两个时态**：
+
+- **Wake 时批次召回**：`_build_memory_context()` 在 prompt 构建时，对 wake context 字符串匹配到的实体调 `query_entities_ranked(limit=5)`，注入 `## 实体触发记忆` 段——概念卡（`[实体·概念]`）在前，碎片在后。
+- **Mid-session 快速联想**：`AIAgent._inject_entity_recall()` 每次 LLM 调用前 <5ms 扫描对话，同结构注入 `[联想命中]`——概念 + 碎片。
+
+去重粒度：entity 级（同 session 同实体只注入一次）+ memory 级（同 memory_id 只注入一次）。`sense_entity` 工具主动查实体时，profile 单列字段展示，不重复挤进 memories 列表。
+
+### F.5 三层记忆模型 × 代谢流
+
+记忆不是一个平面，是**三层**，对应"日常产生 / 专门整理 / 召回使用"三个阶段：
+
+```
+碎片（fragments, memories[]）
+  ↑ 日常产生：add_lesson / record_thought / write_diary 写入时挂 entities
+  │
+  │ ← memory_hygiene 7.5e「消化」：读碎片，重新理解，写回 profile
+  ↓
+概念（profile: summary + facts）
+  ↑ 每个 dream 滚动更新；已有 profile 的也看有无增量
+  │
+  │ ← 召回时 profile-first（F.4），碎片降为补充
+  ↓
+被使用（注入 wake prompt / mid-session 联想）
+```
+
+**晋升 / 淘汰机制**（这套保证记忆有价值、整洁）：
+
+| 机制 | 方向 | 触发 | 方式 |
+| --- | --- | --- | --- |
+| **碎片 → 概念晋升** | 碎片升 profile | 每晚 dream（memory_hygiene 7.5e） | 模型读碎片综合理解，`set_entity_profile` 写回 |
+| **概念更新** | profile 自更新 | 每晚 dream | 新碎片带来增量认知时刷新 summary/facts |
+| **碎片淘汰** | 碎片 prune | dream 消化后 | 消化出 profile 的实体，老碎片信息已进 profile → `prune_fragments_for_entity` 收敛到少量核心 |
+| **概念回退** | profile → 碎片 | 无（profile 不会自动降解为碎片） | profile 只会被覆盖更新，不丢弃；想改正就在下次 dream 重写 |
+| **噪音实体淘汰** | 整个实体删除 | dream 7.5a | 单条碎片、无类型、无别名的弱实体直接删 |
+
+**工程与模型的分工**（这是设计原则，不是规定流程）：
+
+- **工程（确定性）**：召回复用 profile-first 的 `query_entities_ranked`；`index_health_check` 报告哪些实体缺 profile / 高碎片；`prune_fragments_for_entity` 提供机械裁剪。
+- **模型（判断）**：dream 时自己挑消化谁（碎片多无 profile 优先、高价值实体优先）；自己判断碎片 value 还在不在、留几条；升华成 profile 而非摘抄。
+
+> 给模型**原则和工具**（碎片是底档 / profile 是结论 / 已有 profile 也更新 / 碎片消化后收干净），**不规定死流程**——消化顺序、留多少碎片由模型每次判断。
+
+### F.6 四条旁路代谢流（profile 之外）
+
+> 上面 F.5 是实体记忆（碎片↔profile）的主代谢线。下面是**文件型记忆**的旁路代谢——RULES / LESSONS / SCRATCHPAD 等仍按原有节奏治理。
 
 | 时机 | 做什么 | 触发点 |
 | --- | --- | --- |
@@ -1742,9 +1800,9 @@ score = recency × 0.35 + authority × 0.25 + context_overlap × 0.25 + verifica
 | **日记整合**（晚间自动） | `write_diary()` 在 21:00 后自动调 `consolidate_day_diary()`，整合碎片日记 + 意识残留 + session 摘要 + 实体热力图 | evening_review routine |
 | **Lesson → Rule 晋升**（周度） | weekly_review Phase 2.5 合并相似；Phase 3 晋升标准：被验证 2+ 次 + "每次应遵守的" + 违反有损失。降级：连续两周未触发 / 每次违反但无后果 / 措辞模糊 | weekly_review routine |
 
-读法：「**写入瞬间就拦重、晚间合并碎片、周末沉淀规则**」——三层节奏对应人脑"顿悟 → 笔记 → 反思 → 沉淀"的完整链路。
+读法：「**写入瞬间就拦重、晚间合并碎片、周末沉淀规则**」——三层节奏对应人脑"顿悟 → 笔记 → 反思 → 沉淀"的完整链路。加上 F.5 的实体消化线，整套代谢覆盖**文件型 + 实体型**两类记忆。
 
-### F.6 自我认知（SELF_KNOWLEDGE）
+### F.7 自我认知（SELF_KNOWLEDGE）
 
 除了 RULES / LESSONS，还有一类 self-knowledge：
 
@@ -1754,7 +1812,7 @@ score = recency × 0.35 + authority × 0.25 + context_overlap × 0.25 + verifica
 - 注入：self_iteration task / initiative 唤醒时按需注入，不全量
 - 存储位置：`apps/{id}/data/memories/SELF_KNOWLEDGE.md`
 
-### F.7 记忆文件三层架构
+### F.8 记忆文件三层架构
 
 **第一层：行为约束（每次 wake 注入）**
 
