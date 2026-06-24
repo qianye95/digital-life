@@ -287,12 +287,14 @@ class AIAgent:
         # 都给 5 分钟,导致一次 GLM 推理卡死会阻塞整个 wake 几十分钟。现拆细:
         # - connect/pool: 5s(GLM TLS 握手本身 50ms,5s 足够发现网络断裂)
         # - write: 10s(payload 上传不会超过几 MB,够用)
-        # - read: 90s(GLM reasoning_model 正常推理 9 成 < 60s;我们留 50% 余量)
-        # 整体降 borrow time:user 体感"几秒挂" → 而不是"几分钟挂"
+        # - read: 180s(GLM reasoning_model 长推理可达数分钟;此前 90s 在长链场景
+        #   几乎必触发 read timeout 重试,3 次重试 + 退避≈340s,又正好撞 cron 的
+        #   stale-RUNNING 回退阈值,制造"wake 还在跑却被判 stale"的连锁误判。
+        #   提到 180s 给长推理足够余量,把"时间太少"这条根因从源头切断。)
         os_env = __import__("os").getenv
         http_timeout = httpx.Timeout(
             connect=float(os_env("DIGITAL_LIFE_API_CONNECT_TIMEOUT", "5")),
-            read=float(os_env("DIGITAL_LIFE_API_READ_TIMEOUT", "90")),
+            read=float(os_env("DIGITAL_LIFE_API_READ_TIMEOUT", "180")),
             write=float(os_env("DIGITAL_LIFE_API_WRITE_TIMEOUT", "10")),
             pool=float(os_env("DIGITAL_LIFE_API_POOL_TIMEOUT", "5")),
         )
@@ -306,10 +308,20 @@ class AIAgent:
         # scheduler 标 BLOCKED "retry in 5 min" → 用户感觉消息发出去后"好久才响应"。
         # 历史 BUG2：网络错误 60s/120s/120s 退避 + read timeout 300s = 一次抖动让 wake
         # 卡 500 秒以上 → 僵尸 wake 占 instance lock，后续 wake 全部 skipped。
-        MAX_NET_RETRIES = 3
-        MAX_429_RETRIES = 3
+        # 历史 BUG3 (alpha #1181/#1182)：read=90s × 3 次重试 + 10/20/40s 退避 ≈ 340s，
+        #   与 cron 硬编码的 300s stale 阈值同量级,长推理必然边对边相撞。修法是
+        #   ① read 提到 180s(见上) ② 重试上限改 env ③ 本函数加单 call wall-clock 总
+        #   预算,结构上保证单次 LLM 调用链在 240s 内自我终结,永远低于 stale 阈值。
+        MAX_NET_RETRIES = int(os_env("DIGITAL_LIFE_LLM_MAX_NET_RETRIES", "3"))
+        MAX_429_RETRIES = int(os_env("DIGITAL_LIFE_LLM_MAX_429_RETRIES", "3"))
+        # 单次 _chat(含全部重试)的 wall-clock 总预算。
+        # 默认 240s:远高于单次 read(180s),又远低于 cron stale(1800s)/zombie(600s),
+        # 让重试链先于状态机兜底自我终结。GLM 健康 9 成 < 60s 返回,这只拦截灾难性
+        # 网络/限流场景,正常推理不受影响。
+        LLM_CALL_MAX_DURATION_S = float(os_env("DIGITAL_LIFE_LLM_CALL_MAX_DURATION", "240"))
         net_attempts = 0
         retry_429_attempts = 0
+        _call_start = _time.time()
         while True:
             try:
                 with httpx.Client(timeout=http_timeout) as client:
@@ -339,6 +351,18 @@ class AIAgent:
                             delay = max(2, min(float(ra), 30.0))
                         except ValueError:
                             pass  # 也可能是 HTTP date 格式，忽略走默认退避
+                    # Wall-clock 兜底:总预算耗尽就不再 sleep 重试,直接抛出,
+                    # 让 scheduler 的事件级退避(delay_pending_events)接管 — 避免
+                    # 单次 wake 卡在 LLM 重试链里逼近 cron stale 阈值。
+                    elapsed = _time.time() - _call_start
+                    if elapsed + delay > LLM_CALL_MAX_DURATION_S:
+                        logger.warning(
+                            "LLM API 429 wall-clock budget exhausted "
+                            "(elapsed=%.1fs + delay=%.1fs > %.0fs, net=%d/429=%d) — raising",
+                            elapsed, delay, LLM_CALL_MAX_DURATION_S,
+                            net_attempts, retry_429_attempts,
+                        )
+                        raise
                     logger.warning(
                         "LLM API 429 Too Many Requests (try %d/%d), backing off %.1fs",
                         retry_429_attempts, MAX_429_RETRIES, delay,
@@ -352,6 +376,16 @@ class AIAgent:
                 net_attempts += 1
                 if net_attempts < MAX_NET_RETRIES:
                     delay = 10 * (2 ** (net_attempts - 1))  # 10 / 20 / 40
+                    # Wall-clock 兜底,同 429 分支语义。
+                    elapsed = _time.time() - _call_start
+                    if elapsed + delay > LLM_CALL_MAX_DURATION_S:
+                        logger.warning(
+                            "LLM API network error wall-clock budget exhausted "
+                            "(elapsed=%.1fs + delay=%.1fs > %.0fs, net=%d) — raising: %s",
+                            elapsed, delay, LLM_CALL_MAX_DURATION_S,
+                            net_attempts, e,
+                        )
+                        raise last_error  # type: ignore[misc]
                     logger.warning(
                         "LLM API network error (attempt %d/%d), retrying in %ds: %s",
                         net_attempts, MAX_NET_RETRIES, delay, e,

@@ -114,6 +114,16 @@ FIELDS: tuple[ConfigField, ...] = (
 
     # ════════════ 运行时 ════════════
     ConfigField("L4_TICK_INTERVAL", "心跳间隔（秒）", "runtime", "env", "number", default=60),
+    ConfigField(
+        "DIGITAL_LIFE_STALE_RUNNING_SECONDS", "Stale RUNNING 判定阈值（秒）", "runtime", "env", "number",
+        default=1800,
+        description="cron 判定 wake 是否还活着的时间窗。仅在 wake 既无进程内标志、又无近期 turn 心跳时回退 BLOCKED。",
+    ),
+    ConfigField(
+        "DIGITAL_LIFE_WAKE_ZOMBIE_SECONDS", "僵尸 wake 抢占阈值（秒）", "runtime", "env", "number",
+        default=600,
+        description="wake 占用 instance lock 超过此值视为僵尸，允许新 wake 抢占。必须小于 Stale RUNNING 阈值。",
+    ),
     ConfigField("DIGITAL_LIFE_TOKEN_HOURLY_LIMIT", "Token 小时上限", "runtime", "env", "number", default=50000000),
     ConfigField("DIGITAL_LIFE_TOKEN_DAILY_LIMIT", "Token 日上限", "runtime", "env", "number", default=50000000),
     ConfigField("DIGITAL_LIFE_ENERGY_PER_KTOKEN_INPUT", "输入 token 精力系数", "runtime", "env", "number", default=0.005),
@@ -121,6 +131,24 @@ FIELDS: tuple[ConfigField, ...] = (
         default=0.05, description="一天满跑 2000 万 token 耗尽 100 精力。"),
     ConfigField("DIGITAL_LIFE_ENERGY_RECOVERY_PER_HOUR", "每小时精力恢复", "runtime", "env", "number",
         default=25.0, description="默认 25 — 4 小时不动从 0 回满血。"),
+
+    # ════════════ LLM 超时 / 重试 ════════════
+    ConfigField(
+        "DIGITAL_LIFE_API_READ_TIMEOUT", "LLM read 超时（秒）", "runtime", "env", "number", default=180,
+        description="单次 LLM 调用等待响应的最长时间。GLM 长推理调高可减少无谓重试。",
+    ),
+    ConfigField(
+        "DIGITAL_LIFE_LLM_CALL_MAX_DURATION", "单次 LLM 调用总时长上限（秒）", "runtime", "env", "number", default=240,
+        description="含全部重试的 wall-clock 预算。耗尽即抛出，让事件级退避接管。必须低于 Stale 阈值 / 僵尸阈值。",
+    ),
+    ConfigField(
+        "DIGITAL_LIFE_LLM_MAX_NET_RETRIES", "网络错误重试上限", "runtime", "env", "number", default=3,
+        description="timeout/conn reset 等网络错误的指数退避重试次数（10/20/40s）。",
+    ),
+    ConfigField(
+        "DIGITAL_LIFE_LLM_MAX_429_RETRIES", "429 限流重试上限", "runtime", "env", "number", default=3,
+        description="429 限流的指数退避重试次数（5/10/20s，优先尊重 Retry-After）。",
+    ),
 
     # ════════════ 任务策略 ════════════
     ConfigField("agent.max_turns", "最大执行轮数", "tasks", "yaml", "number", path="agent.max_turns", default=90),

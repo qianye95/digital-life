@@ -360,6 +360,11 @@ def _wake_or_inject(triggering_event_id: int) -> None:
         # 2. RUNNING → mid-session 注入内存池,不叫醒
         #    (check_before_send 会在模型下次工具调用时感知这些注入事件)
         if aff.status == "RUNNING":
+            logger.info(
+                "WAKE_OR_INJECT midsession: instance=%s affair=%s event=%d "
+                "affair_status=RUNNING → injecting, NOT dispatching new wake",
+                instance_id, life_aid[:8], triggering_event_id,
+            )
             _inject_to_running_session(triggering_event_id, instance_id)
             return
 
@@ -810,6 +815,43 @@ def pop_events_by_kind(kind: str, limit: int = 10, session_id: Optional[str] = N
     sid = session_id or get_current_session_id() or None
     channel_prefix = _get_instance_channel()
     return _event_bus.pop_events_by_kind(kind=kind, limit=limit, channel_prefix=channel_prefix, session_id=sid)
+
+
+def cancel_pending_events(
+    kind: Optional[str] = None,
+    payload_filter: Optional[Dict] = None,
+) -> int:
+    """Deprecated shim — LegacyEventBus.cancel_pending_events 的 facade 入口。
+
+    向后兼容：历史调用方 / 测试从 ``domain.lifecycle.events`` 导入此名。
+    生产已改走 alarms.cancel_alarm* 系列；保留这个 wrapper 维持公开 import 契约
+    （见 events.py 模块顶部的 facade 设计：本模块包 ``_event_bus`` 实例并暴露方法）。
+    """
+    channel_prefix = _get_instance_channel()
+    return _event_bus.cancel_pending_events(
+        kind=kind, payload_filter=payload_filter, channel_prefix=channel_prefix,
+    )
+
+
+def schedule_vital_threshold_events(
+    predictor,
+    *,
+    clear_previous: bool = True,
+    horizon_hours: float = 72.0,
+    segment_filter: Optional[set] = None,
+) -> List[Dict]:
+    """Deprecated shim — vital_threshold 已改走 emit_event 路径
+    （domain.vital.simulation.energy_events.check_energy_events）。
+
+    保留以兼容旧版本调用方与本仓 import 契约，签名与
+    LegacyEventBus.schedule_vital_threshold_events 对齐。
+    """
+    return _event_bus.schedule_vital_threshold_events(
+        predictor,
+        clear_previous=clear_previous,
+        horizon_hours=horizon_hours,
+        segment_filter=segment_filter,
+    )
 
 
 def count_pending_by_kind_and_payload(kind: str, payload_key: str, payload_value: str) -> int:

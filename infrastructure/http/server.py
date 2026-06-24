@@ -13,7 +13,9 @@ import asyncio
 import logging
 import os
 import signal
+import subprocess
 import threading
+import time
 from typing import Optional
 
 from aiohttp import web
@@ -49,17 +51,19 @@ def _cleanup_stale_affair_on_startup(instance_id: str) -> None:
     """进程启动时清理 stale RUNNING affair。
 
     问题：mid-session到达的新消息事件会被 signal 到内存队列；如果进程在此之前 wake
-    后 crash/重启，DB 里 affair.status=RUNNING，但内存队列丢失。stale rollback 要
-    等 aff.updated_at > 300s 才触发，期间事件卡死最多 6 分钟。
+    后 crash/重启，DB 里 affair.status=RUNNING，但内存队列丢失。
 
-    修法：process 重启时，DB RUNNING affair 必然 stale（session driver 已死）。
-    立即回退 BLOCKED + 关闭 DB 中所有未关闭的 session。
+    判定语义与 cron tick 不同：这里是**进程边界**——本进程刚起,上个进程的 session
+    driver 必然已死,所以无条件回退 RUNNING，不参考 turn 心跳（turn 心跳在重启瞬间可能
+    还很新,但它属于已经死掉的上一个进程,不能据此认为 wake 还活着）。
+
+    修法：立即回退 BLOCKED + 关闭 DB 中所有未关闭的 session。
+    日志带上最近 turn/wake 时间,方便运维核对"这次回退是否必要"。
     """
     from domain.lifecycle.affairs.runtime import (
-        get_affair, update_affair, list_affairs, now_iso,
+        get_affair, update_affair, now_iso,
     )
     from domain.lifecycle.state_machine import AffairStatus
-    from datetime import datetime, timezone
     try:
         from domain.orchestration.lifecycle_orchestration.bootstrap.runtime import _find_life_affair
     except Exception:
@@ -72,9 +76,23 @@ def _cleanup_stale_affair_on_startup(instance_id: str) -> None:
     if not aff or aff.status != AffairStatus.RUNNING.value:
         return
 
+    # 采集最近 turn/wake 时间仅用于日志诊断(不参与判定:重启边界必回退)。
+    last_turn_at = None
+    last_wake_started_at = None
+    try:
+        from infrastructure.persistence.instance import get_audit
+        audit = get_audit(instance_id)
+        last_turn_at = audit.last_turn_at()
+        last_wake_started_at = audit.last_wake_started_at()
+    except Exception as exc:
+        logger.debug("Startup stale rollback: audit lookup failed: %s", exc)
+
     logger.warning(
-        "Instance %s startup: found stale RUNNING affair %s (updated %s) — rolling back immediately",
+        "Instance %s startup: found stale RUNNING affair %s (updated %s) — rolling back "
+        "(process restart boundary; last_turn_at=%s last_wake_started_at=%s are ignored here "
+        "because they belong to the previous, now-dead process)",
         instance_id[:8], life_aid[:8], aff.updated_at,
+        last_turn_at, last_wake_started_at,
     )
     update_affair(life_aid, status=AffairStatus.BLOCKED.value, updated_at=now_iso())
 
@@ -611,11 +629,16 @@ async def run_master_gateway() -> None:
     await supervisor.start()
 
     # restart 物理触发：POST /api/system/gateway/restart 写 var/run/.restart_requested，
-    # 本 watcher 检测到后 graceful shutdown + os._exit(2)（外部 wrapper / launchd 拉起）
+    # 本 watcher 检测到后 spawn 一个独立的 `digital-life restart` 进程完成
+    # stop + start —— 与 CLI `digital-life restart` 完全同语义，裸跑环境也自重启，
+    # **不依赖** launchd/systemd 等外部 wrapper（历史实现只 os._exit 等外部拉起，
+    # 在开发机裸跑场景下等于"直接关服务"）。
     async def _watch_restart_trigger():
+        import sys
         from infrastructure.config import get_project_root
 
-        trigger_path = get_project_root() / "var" / "run" / ".restart_requested"
+        root = get_project_root()
+        trigger_path = root / "var" / "run" / ".restart_requested"
         while not stop_event.is_set():
             try:
                 if trigger_path.exists():
@@ -625,19 +648,53 @@ async def run_master_gateway() -> None:
                         payload = ""
                     logger.warning(
                         "Master restart triggered. Payload:\n%s\n"
-                        "外部 wrapper（launchd/systemd/`digital-life restart`）会拉起新进程。",
+                        "Delegating to a detached `digital-life restart` process "
+                        "(stop old master → start new master).",
                         payload,
                     )
                     try:
                         trigger_path.unlink()
                     except OSError:
                         pass
+
+                    # spawn 独立 session 的 restart 进程:
+                    #   - start_new_session=True: 不挂靠本 master,本 master 死了它也活
+                    #   - stdout/stderr → LOG_FILE:restart 输出可追溯
+                    #   - detached:master graceful shutdown 不会带走它
+                    # 该进程 _stop 会 SIGTERM master(配合下方 stop_event 的 graceful),
+                    # 超时会 SIGKILL 兜底,sleep 2.5s 后 _start 新 master。
+                    cli_path = root / "interfaces" / "cli" / "cli.py"
+                    log_file = root / "var" / "logs" / "digital-life.log"
+                    try:
+                        log_handle = open(log_file, "a", encoding="utf-8")
+                        log_handle.write(
+                            "\n--- restart subprocess spawned by watcher "
+                            f"at {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n"
+                        )
+                        log_handle.flush()
+                        subprocess.Popen(
+                            [sys.executable, str(cli_path), "restart",
+                             "--timeout", "20", "--health-wait", "3"],
+                            cwd=str(root),
+                            stdout=log_handle,
+                            stderr=subprocess.STDOUT,
+                            start_new_session=True,
+                            close_fds=True,
+                        )
+                    except Exception as spawn_exc:
+                        logger.error(
+                            "Failed to spawn detached restart subprocess: %s. "
+                            "Master will graceful-shutdown but NOT auto-restart "
+                            "(run `digital-life start` manually).",
+                            spawn_exc,
+                        )
+
+                    # 触发本 master graceful shutdown(stop_event → supervisor.stop +
+                    # runner.cleanup)。restart 子进程的 SIGTERM 会配合；若 graceful 卡住,
+                    # 子进程 --timeout 20 会 SIGKILL 兜底。不在此 os._exit,让 graceful 走完,
+                    # 避免在 graceful 还没回收实例子进程时暴死。
                     stop_event.set()
-                    # 给 graceful shutdown 2s 后强制退出（由 wrapper 拉起重启）
-                    import asyncio as _aio
-                    await _aio.sleep(2)
-                    import os as _os
-                    _os._exit(2)
+                    return
             except Exception as exc:
                 logger.warning("restart watcher tick failed: %s", exc)
             await asyncio.sleep(5)

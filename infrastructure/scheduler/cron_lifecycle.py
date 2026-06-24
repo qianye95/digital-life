@@ -73,7 +73,7 @@ def _run_l4_tick_inner(instance_id: str, log) -> None:
             update_affair,
         )
         from domain.lifecycle.state_machine import AffairStatus, WaitType
-        from domain.lifecycle.clock import now_dt, parse_iso
+        from domain.lifecycle.clock import now_dt
 
         life_aid = _find_life_affair()
         if not life_aid:
@@ -91,74 +91,97 @@ def _run_l4_tick_inner(instance_id: str, log) -> None:
             raise
 
         # ── State guard ────────────────────────────────────────────────────────
+        #
+        # 历史实现:看 affairs.updated_at 时长 > 300s 就回退 BLOCKED。但 updated_at
+        # 在 wake 运行期间完全不动(只在 update_affair 状态变更时刷新),所以一条
+        # 合法的 10 分钟长 wake 5 分钟后就被判 stale 回退 → affair 变 BLOCKED →
+        # 后续 emit 的新事件走 _wake_or_inject 的"新 wake"分支而不是 midsession
+        # 注入。这就是 alpha "wake #1181 还在跑, #1182 却被新触发"的根因。
+        #
+        # 现在基于真实存活信号(wake_liveness.evaluate_wake_alive):
+        #   1) 进程内 _wake_in_progress(快路径,已在上方 _SkipL4 处理)
+        #   2) turn 表最近写入(细粒度心跳,跨重启也准)
+        # 只有两者都说"死"才回退。阈值统一从 wake_liveness.STALE_RUNNING_SECONDS
+        # 读(默认 1800s,实测合法 wake 跑过 1296s 仍正常完成)。
 
         aff = get_affair(life_aid)
         if aff and aff.status == AffairStatus.RUNNING.value:
             try:
-                updated = parse_iso(aff.updated_at)
-                stale_seconds = (now_dt() - updated).total_seconds()
-                if stale_seconds > 300:
-                    log.warning("L4: affair RUNNING for >%.0fmin - rolling back", stale_seconds / 60)
-                    from datetime import timedelta
+                from domain.lifecycle.wake_liveness import evaluate_wake_alive
 
-                    from domain.lifecycle.affairs.runtime import WaitIntent, set_wait_intent
-
-                    update_affair(life_aid, status=AffairStatus.BLOCKED)
-                    retry_at = (now_dt() + timedelta(minutes=2)).isoformat(timespec="seconds")
-                    set_wait_intent(
-                        life_aid,
-                        WaitIntent(
-                            wait_type=WaitType.UNTIL,
-                            resume_when=retry_at,
-                            reason="stale_running_rollback",
-                            resume_action="",
-                            meta={},
-                        ),
-                    )
-                    # 不再 set_alarm('stale_running_rollback')。
-                    # 设计文档 5.5 / 22.1：闹钟只管「到没到点」，事件队列只管
-                    # 「有没有待处理」。affair 已回 BLOCKED，下一轮 cron tick（60s）
-                    # 会自然重扫事件队列；若上一轮 wake 真的崩了，它的失败分支自己
-                    # 会用 delay_pending_events 把 pending events 带退避推到未来，
-                    # 不需要这里额外再喊一次闹钟。
-
-                    # 收尾 session：写 ended_at + 内存 _last_session_end
-                    # 让下一次 wake 在 15min 内能命中 continuation
+                alive, reason, signals = evaluate_wake_alive(instance_id)
+                log.info(
+                    "L4_STATE_GUARD affair=%s instance=%s alive=%s reason=%s signals=%s",
+                    life_aid[:8], instance_id[:8], alive, reason, signals,
+                )
+                if alive:
+                    # wake 还活着,保留 affair=RUNNING(=midsession 注入的前提),
+                    # vitals tick 照常跑,直接返回本轮。
                     try:
-                        from domain.lifecycle.scheduler import _last_session_end
-                        from domain.lifecycle.clock import now_dt as _now_dt
-                        # session_id 可能在 affair.meta_json 里 or scheduler 内部
-                        # 安全做法：从 SessionDB 查最近未结束的 session
-                        from infrastructure.ai.session_db import SessionDB
-                        sdb = SessionDB()
-                        row = sdb._conn.execute(
-                            "SELECT id FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
-                        ).fetchone()
-                        if row:
-                            sdb.end_session(row["id"], "stale_running_rollback")
-                            _last_session_end[instance_id or ""] = {
-                                "session_id": row["id"],
-                                "at": _now_dt(),
-                            }
-                            log.info("L4: stale rollback closed session %s", row["id"])
+                        from domain.vital.simulation import get_engine, reset_engine
+                        reset_engine()
+                        get_engine().tick(state="RUNNING")
                     except Exception as exc:
-                        log.debug("stale rollback session close failed: %s", exc)
+                        log.debug("L4: vitals tick (RUNNING) failed: %s", exc)
+                    return
+
+                # 真死 → 回退 BLOCKED + close session + 写 wait_intent。
+                log.warning(
+                    "L4: affair RUNNING deemed dead (reason=%s signals=%s) — rolling back",
+                    reason, signals,
+                )
+                from datetime import timedelta
+
+                from domain.lifecycle.affairs.runtime import WaitIntent, set_wait_intent
+
+                update_affair(life_aid, status=AffairStatus.BLOCKED)
+                retry_at = (now_dt() + timedelta(minutes=2)).isoformat(timespec="seconds")
+                set_wait_intent(
+                    life_aid,
+                    WaitIntent(
+                        wait_type=WaitType.UNTIL,
+                        resume_when=retry_at,
+                        reason="stale_running_rollback",
+                        resume_action="",
+                        meta={},
+                    ),
+                )
+                # 不再 set_alarm('stale_running_rollback')。
+                # 设计文档 5.5 / 22.1：闹钟只管「到没到点」，事件队列只管
+                # 「有没有待处理」。affair 已回 BLOCKED，下一轮 cron tick（60s）
+                # 会自然重扫事件队列；若上一轮 wake 真的崩了，它的失败分支自己
+                # 会用 delay_pending_events 把 pending events 带退避推到未来，
+                # 不需要这里额外再喊一次闹钟。
+
+                # 收尾 session：写 ended_at + 内存 _last_session_end
+                # 让下一次 wake 在 15min 内能命中 continuation
+                try:
+                    from domain.lifecycle.scheduler import _last_session_end
+                    from domain.lifecycle.clock import now_dt as _now_dt
+                    # session_id 可能在 affair.meta_json 里 or scheduler 内部
+                    # 安全做法：从 SessionDB 查最近未结束的 session
+                    from infrastructure.ai.session_db import SessionDB
+                    sdb = SessionDB()
+                    row = sdb._conn.execute(
+                        "SELECT id FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
+                    ).fetchone()
+                    if row:
+                        sdb.end_session(row["id"], "stale_running_rollback")
+                        _last_session_end[instance_id or ""] = {
+                            "session_id": row["id"],
+                            "at": _now_dt(),
+                        }
+                        log.info("L4: stale rollback closed session %s", row["id"])
+                except Exception as exc:
+                    log.debug("stale rollback session close failed: %s", exc)
             except Exception as exc:
                 log.debug("RUNNING timeout check failed: %s", exc)
 
-        if aff and aff.status == AffairStatus.RUNNING.value:
-            # mid-session 注入已经在 emit_event 内 inline 完成（_signal_event_to_running_session），
-            # 不再在这里单独 _inject_events——所有事件来源（人/bot/alarm）经过 emit 都会
-            # 立即让 RUNNING 实例的信号队列看到。这里的职责只剩下"stale 检测"，已在上文完成。
-
-            # 但 vitals tick 要在 RUNNING 也跑——agent 长跑时精力也要保持鲜活（30% rate 慢补）
-            try:
-                from domain.vital.simulation import get_engine, reset_engine
-                reset_engine()
-                get_engine().tick(state="RUNNING")
-            except Exception as exc:
-                log.debug("L4: vitals tick (RUNNING) failed: %s", exc)
-            return
+        # mid-session 注入已经在 emit_event 内 inline 完成（_signal_event_to_running_session），
+        # 不再在这里单独 _inject_events——所有事件来源（人/bot/alarm）经过 emit 都会
+        # 立即让 RUNNING 实例的信号队列看到。stale 检测 + vitals tick 已在上方
+        # evaluate_wake_alive 分支内处理完毕(alive → vitals.tick + return；
+        # dead → 回退 BLOCKED 后落到下方 BLOCKED 路径)。
 
         if not aff or aff.status != AffairStatus.BLOCKED.value:
             return

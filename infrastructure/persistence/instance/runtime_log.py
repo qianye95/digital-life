@@ -345,6 +345,38 @@ class RuntimeLogDB(InstanceDB):
                     r["tool_calls"] = []
         return list(reversed(rows))
 
+    def last_turn_at(self) -> float | None:
+        """本实例最近一次 turn 的 unix timestamp；表为空返回 None。
+
+        作为 wake 存活心跳使用：turn 表每个 LLM call 都会写多行
+        (``agent.py`` 调 ``WakeContext.assistant/tool_result`` →
+        ``append_turn``)，因此 ``MAX(timestamp)`` 反映模型是否还在出 token。
+        相比 ``affairs.updated_at``（wake 运行期间不动，只在状态变更时刷新），
+        turn 心跳是细粒度且真实的存活信号。
+
+        用于 cron stale-RUNNING 判定与进程重启 stale 清理。
+        """
+        row = self.fetchone(
+            "SELECT MAX(timestamp) AS m FROM turn WHERE instance_id = ?",
+            (self.instance_id,),
+        )
+        m = (row or {}).get("m")
+        return float(m) if m is not None else None
+
+    def last_wake_started_at(self) -> float | None:
+        """最近一次 wake 的 ``started_at``；无 wake 返回 None。
+
+        用于 wake 刚起、第一个 turn 尚未落地时的存活兜底
+        （此时 ``last_turn_at`` 还为 None）。
+        """
+        row = self.fetchone(
+            "SELECT started_at FROM wake WHERE instance_id = ? "
+            "ORDER BY started_at DESC LIMIT 1",
+            (self.instance_id,),
+        )
+        s = (row or {}).get("started_at")
+        return float(s) if s is not None else None
+
     # ---- injection --------------------------------------------------------
 
     def inject(

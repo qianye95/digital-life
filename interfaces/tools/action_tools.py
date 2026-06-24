@@ -2181,7 +2181,7 @@ def _handle_rest(args: Dict[str, Any], **kwargs) -> str:
             "affair_id": None,
             "wake_at": target_iso,
             "mental_context": mental,
-            "message": f"进入休息，预计 {target_iso} 醒来",
+            "message": f"进入休息，预计 {target_iso} 醒来。闹钟已设置。当你的精力恢复之后，系统会自然而然地叫醒你（不必等到闹钟）。",
         })
 
     intent = WaitIntent(
@@ -2212,7 +2212,7 @@ def _handle_rest(args: Dict[str, Any], **kwargs) -> str:
         "affair_id": aid,
         "wake_at": target_iso,
         "mental_context": mental,
-        "message": f"进入休息，预计 {target_iso} 醒来。闹钟已设置。",
+        "message": f"进入休息，预计 {target_iso} 醒来。闹钟已设置。当你的精力恢复之后，系统会自然而然地叫醒你（不必等到闹钟）。",
     })
 
 
@@ -2235,6 +2235,9 @@ registry.register(
             "mental_context 是给未来自己的留言——你做到了啥，下一步做啥，有什么卡点。"
             "reuse 复用时如果传 mental_context，会追加到原备注后面。\n"
             "\n"
+            "你醒来不只靠闹钟：你的精力恢复之后，系统会自动叫醒你，不必非等到 until 那一刻。"
+            "所以不要默认「下次醒来 = 晚上 复盘 / 早上某点」——闹钟只是兜底，精力先回来就先醒。"
+            "until 请设你真正想被叫醒的最近时间，不要设得过早。"
             "精力状态不参与判断。累了或没事做都可以休息。"
         ),
         "parameters": {

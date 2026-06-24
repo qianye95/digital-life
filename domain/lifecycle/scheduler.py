@@ -276,6 +276,10 @@ def wake_digital_life(
             return {"woke": False, "reason": "skipped_concurrent"}
 
     _wake_in_progress[instance_id] = time.time()
+    logger.info(
+        "WAKE_LOCK_ACQUIRED instance=%s affair=%s reason=%s zombie_seconds=%d",
+        instance_id, affair_id[:8], reason, int(WAKE_ZOMBIE_SECONDS),
+    )
     _wake_result_ok: bool | None = None
     try:
         result = _wake_digital_life_inner(affair_id, reason, extra, instance_id=instance_id, pending_events=pending_events)
@@ -287,6 +291,10 @@ def wake_digital_life(
     finally:
         _wake_in_progress.pop(instance_id, None)
         inst_lock.release()
+        logger.info(
+            "WAKE_LOCK_RELEASED instance=%s affair=%s result_ok=%s",
+            instance_id, affair_id[:8], _wake_result_ok,
+        )
         # Fast-path: wake 刚释放 lock,可能有被 skipped_concurrent 的 immediate 消息
         # 留在 due 队列里。立刻扫一次 due 队列把延迟从"60s cron tick"降到"几秒"。
         # 软消息已被 debounce 累积成 30s batch event,这里只会 pick up 立刻到期的。
@@ -616,6 +624,10 @@ def _wake_digital_life_inner_safe(
 
         clear_wait_intent(affair_id)
         update_affair(affair_id, status=AffairStatus.RUNNING)
+        logger.info(
+            "AFFAIR_TRANSITION affair=%s instance=%s BLOCKED→RUNNING reason=%s",
+            affair_id[:8], instance_id, reason,
+        )
 
         # 事务 ID：延续（上轮结束 <15min）则复用上轮 session；否则新建。
         prev_sid = _check_continuation(instance_id)

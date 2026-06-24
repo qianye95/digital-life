@@ -166,9 +166,7 @@ async function confirmRestart() {
   if (restarting.value) return
   try {
     await ElMessageBox.confirm(
-      '重启 gateway master 进程？所有实例子进程会被回收 + 重启。\n'
-      + '需要外部 wrapper（launchd / systemd / `digital-life start`）才能自动拉起，'
-      + '否则 gateway 直接退出，需手动 digital-life start。',
+      '重启 gateway？所有实例子进程会被回收 + 重启（等同于在服务器执行 digital-life restart，裸跑也自动重启）。',
       '重启网关',
       { type: 'warning', confirmButtonText: '立即重启', cancelButtonText: '取消' },
     )
@@ -181,10 +179,10 @@ async function confirmRestart() {
       ElMessage.error(`重启失败：${d.error}`)
       return
     }
-    ElMessage.success('重启请求已发出，gateway 数秒后退出 + 由外部 wrapper 拉起')
-    // gateway 退出后 connection 会断 —— 5s 后给个 reload 提示
+    ElMessage.success('重启请求已发出，gateway 秒级自动 stop + start')
+    // gateway 重启期间 connection 会短暂断 —— 5s 后提示刷新
     setTimeout(() => {
-      ElMessage.warning('若 5 秒后页面无响应，请刷新浏览器（或 digital-life start）')
+      ElMessage.warning('若 5 秒后页面无响应，请刷新浏览器')
     }, 5000)
   } finally {
     setTimeout(() => { restarting.value = false }, 8000)

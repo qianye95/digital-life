@@ -1216,9 +1216,10 @@ async def _handle_abort_wake(request: web.Request) -> web.Response:
 async def _handle_gateway_restart(request: web.Request) -> web.Response:
     """POST /api/system/gateway/restart —— 重启 gateway 主进程（含所有实例子进程）。
 
-    实现机制：写一个 trigger 文件，由 master 主循环 watch + os._exit。
-    master 退出后由 systemd / launchd / nohup + bash 重启 wrapper 自动拉起。
-    如果没有外部 wrapper（裸跑），gateway 会直接退出，用户需手动 digital-life start。
+    实现机制：写一个 trigger 文件，master 主循环的 restart watcher 检测到后
+    spawn 一个独立 session 的 `digital-life restart` 子进程——与 CLI 重启语义
+    完全一致（stop 老 master → start 新 master），**裸跑环境也自重启**，
+    不依赖 launchd/systemd 等外部 wrapper。
 
     Body 可选: {reason: str}
     """
@@ -1228,7 +1229,7 @@ async def _handle_gateway_restart(request: web.Request) -> web.Response:
         body = {}
     reason = str((body or {}).get("reason") or "manual trigger from console")
 
-    # 写 trigger 文件（master 主循环检查它 → os._exit(0)）
+    # 写 trigger 文件（master restart watcher 检测到它后 spawn detached restart）
     trigger_path = get_project_root() / "var" / "run" / ".restart_requested"
     try:
         trigger_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1244,9 +1245,9 @@ async def _handle_gateway_restart(request: web.Request) -> web.Response:
     return web.json_response({
         "ok": True,
         "reason": reason,
-        "hint": "重启请求已写入 var/run/.restart_requested；master 主循环会检测并退出，"
-                "外部 wrapper（launchd/systemd/nohup+restart script）会自动拉起。"
-                "若无 wrapper，gateway 直接退出 — 请手动 `digital-life start`。",
+        "hint": "重启请求已写入 var/run/.restart_requested；master restart watcher 会检测并"
+                " spawn 一个 `digital-life restart` 子进程完成 stop + start（与 CLI 重启同语义，"
+                "裸跑也自重启，无需 launchd/systemd）。",
         "restart_in_seconds": 5,
     })
 
