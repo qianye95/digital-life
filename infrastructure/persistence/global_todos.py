@@ -71,6 +71,8 @@ _SCHEMA_SQL = """
             source TEXT DEFAULT '',
             -- 来源实例（哪个实例创建的——便于 migration 跟踪）
             origin_instance TEXT DEFAULT '',
+            -- 分配的岗位名(architect/developer/trader 等)——2026-06-24 deliverables 合并后引入。
+            assignee_position TEXT DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -152,6 +154,13 @@ def get_global_todos_db() -> sqlite.Connection:
     try:
         # detail = 详情记忆(增删改)；rest 前编辑、sense_todos board 渲染时模型可见
         db.execute("ALTER TABLE todos ADD COLUMN detail TEXT DEFAULT ''")
+    except Exception:
+        pass  # 列已存在
+    try:
+        # assignee_position = 分配的岗位名(architect/developer/trader)。
+        # 2026-06-24 Phase 4 deliverables 表合并后引入——deliverables 原有这列,
+        # todos 表此前缺失,合并后补齐。create_deliverable thin wrapper 到 create_task 时用它。
+        db.execute("ALTER TABLE todos ADD COLUMN assignee_position TEXT DEFAULT ''")
     except Exception:
         pass  # 列已存在
     db.executescript(_SCHEMA_SQL)

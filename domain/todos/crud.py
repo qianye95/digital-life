@@ -25,6 +25,7 @@ TASK_UPDATE_COLUMNS = {
     "type",
     "parent_id",
     "has_workspace",
+    "assignee_position",  # 2026-06-24 Phase 4:岗位名 architect/developer/trader
 }
 PLAN_UPDATE_COLUMNS = {"content", "deadline"}
 TODO_UPDATE_COLUMNS = {"content", "due_at", "trigger_condition", "status", "note"}
@@ -52,6 +53,7 @@ def create_task(
     project_id: Optional[str] = None,
     acceptance_criteria: str = "",
     detail: str = "",
+    assignee_position: str = "",
 ) -> dict:
     """创建一条 todo。
 
@@ -63,12 +65,17 @@ def create_task(
       detail: 详情记忆 —— 增删改（非 append-only）。模型 rest 前可写，
               sense_todos 时模型直接看见这个 todo 的"上下文记忆"。
               与 todo_notes 子表的 append-only 笔记区别：detail 是"当前最新版"。
+      assignee_position: 分配的岗位名(architect/developer/trader)。
+              2026-06-24 Phase 4 引入 — 创建 deliverable 的 thin wrapper 时透传。
 
     schema 已经迁移到 global_todos.db.todos，列：
       - project_id（拆自旧 source='project:X'）
       - assignee_instance（新增 — 旧表没这列因为"实例即拥有的"假设）
       - acceptance_criteria（新增 — 强制每个 todo 写"什么算 done"）
-      - detail（新增 — 详情记忆；ALTER TABLE 兜底加列，老库容错）
+      - detail（新增 — 详情记忆；ALTER TABLE 兜底加列，老库容错)
+      - assignee_position(2026-06-24 Phase 4 — deliverables 表合并后引入;
+        岗位名跟 assignee_kind 不同语义:kind 是 instance/human/position,
+        position 才是 architect/developer 这种)
     """
     if status not in VALID_STATUSES:
         return {"ok": False, "reason": f"无效状态 {status}"}
@@ -114,13 +121,13 @@ def create_task(
             pass
         db.execute(
             "INSERT INTO todos (id, title, description, acceptance_criteria, detail, status, priority, "
-            "deadline, tags, project_id, assignee_instance, assignee_kind, parent_id, "
+            "deadline, tags, project_id, assignee_instance, assignee_kind, assignee_position, parent_id, "
             "linked_deliverable_id, type, has_workspace, source, origin_instance, "
             "created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)",
             (tid, title, description, acceptance_criteria, (detail or ""), status, priority, deadline,
              json.dumps(tags, ensure_ascii=False),
-             project_id, assignee_instance, assignee_kind,
+             project_id, assignee_instance, assignee_kind, assignee_position,
              linked_deliverable_id, type, 1 if _needs_workspace else 0,
              source, assignee_instance, now, now),
         )
