@@ -225,10 +225,11 @@ def query_entities_ranked(
     snippet = summary + facts 合成);碎片仍按排名返回作补充细节。
     这样联想时模型读到的是「对实体的理解」而非散乱碎片——与 memory_hygiene
     的「消化碎片成 profile」步骤配套。没 profile 的实体退回纯碎片(不破坏旧行为)。
+
+    ⚠ 重要:有 profile 但碎片已清空的实体(消化机制铺开后常态)不能被
+    query_entities 的 "无碎片即空" 短路掉——profile 卡生成必须独立于碎片存在。
     """
     results = query_entities(entity_names)
-    if not results:
-        return []
 
     exclude = exclude_ids or set()
     # Use both passed entity_names AND entities extracted from the full context
@@ -256,26 +257,26 @@ def query_entities_ranked(
         scored.append((score, mem))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    top = [mem for _, mem in scored[:limit]]
+    top = scored[:limit]
+    top_mems = [mem for _, mem in top]
 
     # Profile-first: 为每个有 profile 的命中实体生成一张概念卡,排在碎片前面。
-    # 默认把 1/3 的 limit 配额留给 profile(至少 1 张),其余给碎片。
+    # 必须独立于碎片结果——碎片可能是空的(消化机制铺开后 profile 实体常已清碎片)。
     profile_cards = _build_profile_cards(entity_names)
     if profile_cards:
+        # 把 limit 拆分:profile 卡占一部分,碎片占余下。
         profile_quota = max(1, limit // 3)
-        # 若命中的 profile 数 < 配额,多出的配额让给碎片(top 已含 limit 条)
-        keep_fragments = max(0, limit - min(len(profile_cards), profile_quota))
-        top = profile_cards[:profile_quota] + top[:keep_fragments]
-        # 重新去重(按 _matched_entity 让同实体不同源不挤):profile 已代表该实体,
-        # 碎片里同实体的减一条避免重复占位。简单起见不强行去重,留观感。
+        used_profile = profile_cards[:profile_quota]
+        keep_fragments = max(0, limit - len(used_profile))
+        top_mems = used_profile + top_mems[:keep_fragments]
 
     # Update last_accessed for returned fragments (profile 卡不是真实 memory,跳过)
-    for mem in top:
+    for mem in top_mems:
         mid = str(mem.get("memory_id", ""))
         if mem.get("memory_type") != "profile" and mid:
             touch_last_accessed(mid)
 
-    return top
+    return top_mems
 
 
 def _build_profile_cards(entity_names: list[str]) -> list[dict[str, Any]]:
