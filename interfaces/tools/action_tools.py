@@ -872,7 +872,7 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
             pass
         try:
             if wait_minutes > 0:
-                from domain.lifecycle.alarms import cancel_alarms_by_filter, set_alarm
+                from domain.lifecycle.alarms import cancel_alarms_by_filter, set_alarm, find_alarms_by_filter
                 from domain.lifecycle import clock as _clock
                 # 同通道精确清旧闹钟：发到群 A 时只清群 A 的 awaiting_reply，
                 # 保留群 B 等待（之前用 cancel_alarms_by_kind 会全局清，跨通道误取消）
@@ -880,15 +880,44 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
                     "awaiting_reply",
                     payload_filter={"channel": channel},
                 )
-                set_alarm(
-                    event_kind="awaiting_reply",
-                    fire_at=(_clock.now_dt() + timedelta(minutes=wait_minutes)).isoformat(timespec="seconds"),
-                    payload={
-                        "last_sent_text": text[:200],
-                        "channel": channel,
-                        "hint": "或许该去做自己的事了？看看计划或笔记里有没有想继续的。",
-                    },
-                )
+
+                # ⚠ 2026-06-24 修复:多消息不重复催的事件 DEDUP。
+                # 真人习惯:正在等回复时不会再说"我没收到回复"——会接着等。
+                # 历史现象:用户连发 3 条消息,系统在同通道设了 3 个 awaiting_reply
+                # 闹钟,每个 fire 各自叫醒一次 agent —— 后续 wake 1177 醒来一次性
+                # 收到 3 条 await 事件,显得"卡在处理多事件"。
+                # 修法:SET 新 timer 前,先看 events 表有没有同通道的未消费 awaiting_reply。
+                # 有 → 不再 SET(沿用老的),只清掉过长 fire_at 让它顶 15min 即可;
+                #      这样不会拉升事件队列里 awaiting 数量。
+                # 无 → 真的需要新 await,正常 SET。
+                should_set_new = True
+                try:
+                    from domain.lifecycle.events import list_recent_events
+                    recent = list_recent_events(hours=1, include_consumed=False, limit=50) or []
+                    for ev in recent:
+                        if (ev.get("kind") == "awaiting_reply"
+                                and (ev.get("payload") or {}).get("channel") == channel
+                                and ev.get("consumed_at") in (None, "")):
+                            should_set_new = False
+                            logger.info(
+                                "express_to_human: channel=%s 仍在 awaiting_reply(event_id=%s) "
+                                "— 不重复设新 timer(沿用原 await 队列)",
+                                channel, ev.get("event_id"),
+                            )
+                            break
+                except Exception as exc:
+                    logger.debug("awaiting dedup check failed (will still SET): %s", exc)
+
+                if should_set_new:
+                    set_alarm(
+                        event_kind="awaiting_reply",
+                        fire_at=(_clock.now_dt() + timedelta(minutes=wait_minutes)).isoformat(timespec="seconds"),
+                        payload={
+                            "last_sent_text": text[:200],
+                            "channel": channel,
+                            "hint": "或许该去做自己的事了？看看计划或笔记里有没有想继续的。",
+                        },
+                    )
         except Exception:
             pass  # non-fatal
 
