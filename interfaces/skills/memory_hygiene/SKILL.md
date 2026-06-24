@@ -262,11 +262,19 @@ a→d 都是对索引做**归类 / 清扫**(删噪音、合别名、清悬空、
 - 写理解:`set_entity_profile(name, summary, facts, kind)` —— 写回后碎片不动。
 
 **原则(只有这几条)**
-- 碎片是**底档**,profile 是**结论**。消化 = 写 profile,**永远不改碎片**;碎片的合并/裁剪留给前几步。
-- profile 一次写**一次理解**(1-2 句 summary + 几条核心 facts),不是把碎片逐条翻译成 facts。升华,不是摘抄。
-- 已有 profile 的实体也要看 —— 新碎片有没有带来增量认知?有就更到最新;旧 profile 已涵盖新碎片就没必要重写。
-- 你自己挑消化谁:**碎片多但没 profile 的最该处理;高价值实体(人/标的/策略)优先于一次性事件**。不强制每晚全做,做不完的自然留到下次。
+- 这是**整合**:消化 = 写 profile **+ 把碎片收干净**,两件事一起做。光写 profile 不收碎片不叫整合。
+- 消化完,一个实体应收敛成「一条 profile + 少量核心碎片」,下次联想它读到的是提炼后的理解,不被老碎片淹没。
+- 收多少**你定**:重要的(人/标的/策略)留几条最近核心当活跃底档;一次性事件、已被 profile 完全覆盖的,碎片基本 prune 掉。不强制清零,也不强制留几条——看你消化时这些碎片的 value 还在不在。
+- profile 写**一次理解**(1-2 句 summary + 几条核心 facts),不是把碎片逐条翻译成 facts。升华,不是摘抄。
+- 已有 profile 的实体也要看——新碎片有没有带来增量认知?有就更到最新;旧 profile 已涵盖新碎片就没必要重写。
+- **消化顺序你自己挑**:碎片多但没 profile 的最该处理;高价值实体(人/标的/策略)优先于一次性事件。做不完的自然留到下次。
 - 别把运行时 status 类碎片当事实收进 facts;facts 优先取 lesson / rule 这类已沉淀过的。
+
+**工具**
+- 看碎片:`execute_code` 跑 `get_entity_summary("实体名")` —— 拿全量碎片,不被截断。
+  (`recall_entity` / `sense_entity` 也行,但只给最近几条且会截断,不适合"重读整个实体"。)
+- 写理解:`set_entity_profile(name, summary, facts, kind)`。
+- 收碎片:`prune_fragments_for_entity(name, keep=N)` —— 留最近 N 条,其余清掉。keep 的值你定。
 
 ### 8. 写 [整理] audit trail(必做)
 
