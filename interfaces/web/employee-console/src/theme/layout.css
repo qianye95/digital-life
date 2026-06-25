@@ -56,30 +56,19 @@
   margin-left: var(--space-2);
 }
 
-/* 全局当前实例徽章 —— 实例域内顶部始终醒目，一眼知道在看谁 */
-.current-instance-badge {
+/* 当前实例名 —— 紧贴右侧切换器前的轻量标识，实例域内可见 */
+.instance-switcher {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 14px;
-  margin-left: var(--space-4);
-  background: var(--bg-panel);
-  border: 1px solid var(--border-line-strong);
-  border-left: 3px solid var(--neon-cyan);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-glow-cyan);
+  gap: 6px;
+  padding: 4px 10px;
 }
-.current-instance-badge .ci-name {
+.instance-switcher .ci-name {
   font-family: var(--font-display);
   font-weight: 600;
-  font-size: var(--fs-md);
+  font-size: var(--fs-sm);
   color: var(--neon-cyan);
-  letter-spacing: 0.12em;
-}
-.current-instance-badge .ci-sub {
-  font-size: var(--fs-xs);
-  color: var(--text-muted);
-  letter-spacing: 0.05em;
+  letter-spacing: 0.1em;
 }
 
 .topbar-nav {

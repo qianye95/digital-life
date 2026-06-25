@@ -8,18 +8,16 @@
         <span class="brand-sub">数字生命控制台</span>
       </div>
 
-      <!-- 全局当前实例徽章 —— 实例域内始终醒目可见，避免"不知道在看谁" -->
-      <div v-if="currentInstance" class="current-instance-badge">
-        <span class="status-dot" :class="statusClass(currentInstance.status)"></span>
-        <span class="ci-name">{{ currentInstance.display_name }}</span>
-        <span class="ci-sub" v-if="currentInstance.tagline">{{ currentInstance.tagline }}</span>
-      </div>
-
       <nav class="topbar-nav">
         <RouterLink class="topbar-link" :class="{ active: !isInstanceScope }" to="/system">
           全局台
         </RouterLink>
         <el-divider direction="vertical" />
+        <!-- 当前实例徽章 + 切换器合并到右侧，实例域内才会显示，左侧保持干净 -->
+        <div class="instance-switcher" v-if="currentInstance">
+          <span class="status-dot" :class="statusClass(currentInstance.status)"></span>
+          <span class="ci-name">{{ currentInstance.display_name }}</span>
+        </div>
         <el-select
           v-model="currentIid"
           placeholder="进入实例…"
