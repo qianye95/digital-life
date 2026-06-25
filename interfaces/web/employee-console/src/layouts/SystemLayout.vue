@@ -7,6 +7,14 @@
         <span>DIGITAL LIFE</span>
         <span class="brand-sub">数字生命控制台</span>
       </div>
+
+      <!-- 全局当前实例徽章 —— 实例域内始终醒目可见，避免"不知道在看谁" -->
+      <div v-if="currentInstance" class="current-instance-badge">
+        <span class="status-dot" :class="statusClass(currentInstance.status)"></span>
+        <span class="ci-name">{{ currentInstance.display_name }}</span>
+        <span class="ci-sub" v-if="currentInstance.tagline">{{ currentInstance.tagline }}</span>
+      </div>
+
       <nav class="topbar-nav">
         <RouterLink class="topbar-link" :class="{ active: !isInstanceScope }" to="/system">
           全局台
@@ -197,15 +205,14 @@ async function loadInstances() {
   const d = await systemApi.instances()
   if (!d.error) {
     instanceList.value = d.instances || []
-    // 默认选第一个 active
-    if (!currentIid.value && instanceList.value.length) {
-      const firstActive = instanceList.value.find((i) => i.active) || instanceList.value[0]
-      currentIid.value = firstActive.id
-    }
+    // 顶部切换器只跟随路由 iid，不做"默认选 active 实例"预选 ——
+    // 否则用户在全局台或刚进页面时，右上角总是显示 zero，造成"当前是 zero"的错觉。
+    // currentIid 严格由 watch(iid) 从路由同步；无 iid 时保持空(显示"进入实例…")。
   }
 }
 
-watch(iid, (v) => { if (v) currentIid.value = v })
+// 严格跟随路由：进入 /instance/:iid 时同步到顶部切换器；离开实例域时清空
+watch(iid, (v) => { currentIid.value = v || '' }, { immediate: true })
 
 onMounted(loadInstances)
 </script>

@@ -56,6 +56,32 @@
   margin-left: var(--space-2);
 }
 
+/* 全局当前实例徽章 —— 实例域内顶部始终醒目，一眼知道在看谁 */
+.current-instance-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 14px;
+  margin-left: var(--space-4);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-line-strong);
+  border-left: 3px solid var(--neon-cyan);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-glow-cyan);
+}
+.current-instance-badge .ci-name {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--fs-md);
+  color: var(--neon-cyan);
+  letter-spacing: 0.12em;
+}
+.current-instance-badge .ci-sub {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+}
+
 .topbar-nav {
   display: flex;
   gap: var(--space-2);
