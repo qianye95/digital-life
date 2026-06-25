@@ -138,3 +138,28 @@ def reset_current_reply_msg_id(token) -> None:
         _reply_msg_id.reset(token)
     except Exception:
         pass
+
+
+# 当前在跑的 wake 的 audit id（runtime_log.wake 表主键）。
+# scheduler 在 WakeContext.start 之后 set，wake 结束后 reset。
+# mid-session 注入（_inject_to_running_session / _mirror_inject_to_audit_turn）读它，
+# 把注入的 user turn 精确挂到当前 wake——而不是靠 ended_at IS NULL 猜（旧实现会挂到
+# 失败 wake 的 NULL 行上，导致前端按 wake_id 分组时把消息错归到上一组）。
+_current_wake_id: ContextVar[str] = ContextVar("digital_life_current_wake_id", default="")
+
+
+def set_current_wake_id(wake_id: str) -> object:
+    """记录当前在跑的 wake 的 audit id。返回 token 供 reset 使用。"""
+    return _current_wake_id.set(wake_id or "")
+
+
+def get_current_wake_id() -> str:
+    """返回当前在跑的 wake id；空表示当前没在 wake 作用域内。"""
+    return _current_wake_id.get()
+
+
+def reset_current_wake_id(token) -> None:
+    try:
+        _current_wake_id.reset(token)
+    except Exception:
+        pass

@@ -439,113 +439,169 @@ def _inject_to_running_session(event_id: int, instance_id: str) -> None:
       2. 镜像到 runtime_log.turn(若有活动 wake)— 让前端 Transcript 看得到
       3. signal_new_events 内存池 — check_before_send 下次感知
 
-    但**完成动作**(没有调用方 handler 传入 text/sender 等字段)——这里从
-    events 表读出 payload 再做。这一步对 _emit_l4_human_event 写入的事件结构
-    (payload.text/sender_name/...)有意义;对其它 kind 略过(BLOCKED 路径已经叫醒,
-    没 signal 必要)。
+    ⚠ bug2 修复 (2026-06)：旧实现重新 `pop_due_events(limit=20)` 盲扫全队列注入，
+    导致同一事件既被 events.py 写库又被 agent signal-pool 消费、双重出现；且
+    传入的 triggering_event_id 被忽略。
+    现在改为：**只注入 triggering_event_id 这一条**（它才是本次 emit 进来、需要
+    注入的），外加注入后 consume 掉，既去重又防幽灵事件。
 
     任一步骤失败都不抛——只是 log。
     """
     try:
         from domain.lifecycle.event_registry import get_event_type
 
-        # 从 events 表读出当前 due 的 message/group_message 事件
-        events = pop_due_events(limit=20)
-        targets = [
-            ev for ev in events
-            if ev.get("kind") in ("message", "group_message")
-        ]
-        if not targets:
+        # ⚠ bug2 fix: 只处理本次触发的这条事件，不再 pop 全队列盲注。
+        # 用 peek(只读)+consume 的组合替代原来的 pop_due_events。
+        ev = _peek_single_event(event_id)
+        if not ev:
+            logger.debug("mid-session inject: event %d not found, skip", event_id)
+            return
+        kind = ev.get("kind", "")
+        if kind not in ("message", "group_message"):
+            # 非 message 类事件：旧逻辑也只处理 message/group_message。
+            # 其它 kind 的 mid-session 通知走 signal 即可，不写 user message。
+            _consume_event_safe(event_id)
             return
 
-        for ev in targets:
-            kind = ev.get("kind", "")
-            eid = ev.get("event_id")
-            ev_type = get_event_type(kind)
-            payload = ev.get("payload", {}) if isinstance(ev.get("payload"), dict) else {}
-            text = payload.get("text", "") or ""
-            sender_name = payload.get("sender_name", "") or ""
-            chat_name = payload.get("chat_name", "") or ""
-            chat_id = payload.get("chat_id", "") or ""
-            mentions_bot = bool(payload.get("mentions_bot", False))
-            is_group = kind == "group_message"
+        eid = ev.get("event_id")
+        ev_type = get_event_type(kind)
+        payload = ev.get("payload", {}) if isinstance(ev.get("payload"), dict) else {}
+        text = payload.get("text", "") or ""
+        sender_name = payload.get("sender_name", "") or ""
+        chat_name = payload.get("chat_name", "") or ""
+        chat_id = payload.get("chat_id", "") or ""
+        mentions_bot = bool(payload.get("mentions_bot", False))
+        is_group = kind == "group_message"
 
-            # 1. 拼完整 wake-prompt 文本(按当前 event_types.yaml 模板格式)
-            wf = (
-                f"## ── ↓ 当下事件 ↓ ──\n\n"
-                f"### 唤醒原因\n\n"
-                f"💬 {'群聊有新消息' if is_group else '新消息'}。\n"
-                + f"{sender_name}：{text}\n"
-                + f"\n如需回应，必须用 `express_to_human` 工具发送。\n"
-                + f"── /当下事件 ──"
-            )
+        # 1. 拼完整 wake-prompt 文本(按当前 event_types.yaml 模板格式)
+        wf = (
+            f"## ── ↓ 当下事件 ↓ ──\n\n"
+            f"### 唤醒原因\n\n"
+            f"💬 {'群聊有新消息' if is_group else '新消息'}。\n"
+            + f"{sender_name}：{text}\n"
+            + f"\n如需回应，必须用 `express_to_human` 工具发送。\n"
+            + f"── /当下事件 ──"
+        )
 
-            # 2. 持久化为 user message(manager 线程不知道 session_id，需自己查最新的 running session)
-            cur_sid = ""
-            try:
-                from infrastructure.ai.session_db import SessionDB
-                from infrastructure.config import get_current_session_id
-                cur_sid = get_current_session_id() or ""
-                if not cur_sid:
-                    import sqlite3
-                    from infrastructure.config import get_runtime_state_db_path
-                    sdb_path = get_runtime_state_db_path()
-                    if sdb_path.exists():
-                        conn = sqlite3.connect(str(sdb_path))
-                        try:
-                            row = conn.execute(
-                                "SELECT id FROM sessions WHERE ended_at IS NULL "
-                                "ORDER BY started_at DESC LIMIT 1"
-                            ).fetchone()
-                            if row:
-                                cur_sid = row[0]
-                        finally:
-                            conn.close()
-                if cur_sid:
-                    sdb = SessionDB()
-                    sdb.append_message(
-                        cur_sid, "user", wf,
-                        chat_id=chat_id if is_group else "",
-                    )
+        # 2. 持久化为 user message(manager 线程不知道 session_id，需自己查最新的 running session)
+        cur_sid = ""
+        try:
+            from infrastructure.ai.session_db import SessionDB
+            from infrastructure.config import get_current_session_id
+            cur_sid = get_current_session_id() or ""
+            if not cur_sid:
+                import sqlite3
+                from infrastructure.config import get_runtime_state_db_path
+                sdb_path = get_runtime_state_db_path()
+                if sdb_path.exists():
+                    conn = sqlite3.connect(str(sdb_path))
+                    try:
+                        row = conn.execute(
+                            "SELECT id FROM sessions WHERE ended_at IS NULL "
+                            "ORDER BY started_at DESC LIMIT 1"
+                        ).fetchone()
+                        if row:
+                            cur_sid = row[0]
+                    finally:
+                        conn.close()
+            if cur_sid:
+                sdb = SessionDB()
+                sdb.append_message(
+                    cur_sid, "user", wf,
+                    chat_id=chat_id if is_group else "",
+                )
 
                 # 3. 同步镜像到 runtime_log.turn(前端 Transcript 数据源)
                 #    归属:挂到当前在跑的 wake 的 turn 序列末尾。
-                if cur_sid:
-                    try:
-                        _mirror_inject_to_audit_turn(
-                            instance_id=instance_id,
-                            text=wf,
-                            chat_id=chat_id if is_group else "",
-                        )
-                    except Exception as exc:
-                        logger.debug("mid-session inject audit mirror failed: %s", exc)
-            except Exception as exc:
-                logger.debug("mid-session inject DB persistence failed: %s", exc)
+                try:
+                    _mirror_inject_to_audit_turn(
+                        instance_id=instance_id,
+                        text=wf,
+                        chat_id=chat_id if is_group else "",
+                    )
+                except Exception as exc:
+                    logger.debug("mid-session inject audit mirror failed: %s", exc)
+        except Exception as exc:
+            logger.debug("mid-session inject DB persistence failed: %s", exc)
 
-            # 4. signal 内存信号池(check_before_send 下次感知)
-            try:
-                summary = {
-                    "event_id": eid,
-                    "kind": kind,
-                    "display_name": ev_type.display_name if ev_type else kind,
-                    "description": ev_type.description if ev_type else "",
-                    "payload": {
-                        "text": text,
-                        "sender_name": sender_name,
-                        "chat_name": chat_name,
-                        "mentions_bot": mentions_bot,
-                    },
-                }
-                from domain.lifecycle.session_events import signal_new_events
-                signal_new_events([summary], instance_id=instance_id)
-                logger.info(
-                    "WAKE_OR_INJECT mid-session injected %s event %d to RUNNING %s",
-                    kind, eid, instance_id,
-                )
-            except Exception as exc:
-                logger.debug("signal_new_events failed: %s", exc)
+        # 4. signal 内存信号池(check_before_send 下次感知)
+        try:
+            summary = {
+                "event_id": eid,
+                "kind": kind,
+                "display_name": ev_type.display_name if ev_type else kind,
+                "description": ev_type.description if ev_type else "",
+                "payload": {
+                    "text": text,
+                    "sender_name": sender_name,
+                    "chat_name": chat_name,
+                    "mentions_bot": mentions_bot,
+                },
+            }
+            from domain.lifecycle.session_events import signal_new_events
+            signal_new_events([summary], instance_id=instance_id)
+            logger.info(
+                "WAKE_OR_INJECT mid-session injected %s event %d to RUNNING %s",
+                kind, eid, instance_id,
+            )
+        except Exception as exc:
+            logger.debug("signal_new_events failed: %s", exc)
+
+        # 5. ⚠ bug2 fix: 注入完成即 consume 掉，防止 cron 下次 POP_DUE 再取它、
+        #    也防止 agent signal-pool 与 events 写库的双重消费。
+        _consume_event_safe(event_id)
     except Exception as exc:
         logger.warning("mid-session inject failed for event %d: %s", event_id, exc)
+
+
+def _peek_single_event(event_id: int) -> dict | None:
+    """只读取出一条事件（不 consume），供 mid-session 注入用。"""
+    try:
+        import sqlite3
+        from infrastructure.config import get_runtime_state_db_path
+        sdb_path = get_runtime_state_db_path()
+        if not sdb_path.exists():
+            return None
+        conn = sqlite3.connect(str(sdb_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT event_id, channel, payload, created_at, fire_at, kind, "
+                "consumed_at, resurrect_count FROM events WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+            if not row:
+                return None
+            import json
+            payload = {}
+            try:
+                payload = json.loads(row["payload"]) if row["payload"] else {}
+            except Exception:
+                payload = {}
+            return {
+                "event_id": row["event_id"],
+                "channel": row["channel"],
+                "payload": payload,
+                "created_at": row["created_at"],
+                "fire_at": row["fire_at"],
+                "kind": row["kind"],
+                "consumed_at": row["consumed_at"],
+                "resurrect_count": row["resurrect_count"],
+            }
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.debug("_peek_single_event failed for %d: %s", event_id, exc)
+        return None
+
+
+def _consume_event_safe(event_id: int) -> None:
+    """consume 一条事件（标记 consumed_at）。失败只 log，不抛。"""
+    try:
+        from domain.lifecycle.events import consume_event
+        consume_event(event_id)
+    except Exception as exc:
+        logger.debug("consume_event failed for %d: %s", event_id, exc)
 
 
 def _mirror_inject_to_audit_turn(*, instance_id: str, text: str, chat_id: str = "") -> None:
@@ -574,25 +630,49 @@ def _mirror_inject_to_audit_turn(*, instance_id: str, text: str, chat_id: str = 
         return
 
     try:
-        # 找当前实例最近的未结束 wake 且仍在时间窗内(避免僵尸 wake 污染:
-        # 进程被 SIGTERM 杀掉后,某些 wake.end_at 没写,长期 NULL 留在表里)
-        row = audit.fetchone(
-            "SELECT id, wake_seq FROM wake "
-            "WHERE instance_id = ? AND ended_at IS NULL "
-            "AND started_at >= ? "
-            "ORDER BY started_at DESC LIMIT 1",
-            (instance_id, _time.time() - 3600),
-        )
-        if not row:
-            # 当前没有在跑的 wake —— 不写孤 turn 避免幽灵数据
+        # 找当前在跑的 wake —— 优先用 contextvar（scheduler 在 wake 作用域内 set 的），
+        # 精确归属到本 wake。fallback 才查 wake 表（ended_at IS NULL + 时间窗）。
+        #
+        # ⚠ bug1 修复：旧实现只靠 "ended_at IS NULL + 1h 窗" 查表猜归属，一旦失败 wake
+        # 的 ended_at 因异常被吞而留 NULL（scheduler finally 静默吞 WakeContext.end），
+        # 下一条消息的注入就会被 SELECT 命中那个 NULL 失败 wake，把 user turn 错挂到
+        # 上一组——前端按 wake_id 分组就显示成"消息归到了上一个 wake"。
+        wake_id = None
+        wake_seq = None
+        try:
+            from domain.lifecycle.runtime_context import get_current_wake_id
+            _ctx_wake_id = get_current_wake_id()
+        except Exception:
+            _ctx_wake_id = ""
+        if _ctx_wake_id:
+            row = audit.fetchone(
+                "SELECT id, wake_seq FROM wake WHERE instance_id = ? AND id = ?",
+                (instance_id, _ctx_wake_id),
+            )
+            if row:
+                wake_id = row.get("id") or row["wake_seq"]
+                wake_seq = row["wake_seq"]
+        if wake_id is None:
+            # fallback：contextvar 没设（如非 wake 作用域的旁路注入）才走老的查表猜
+            import time as _time
+            row = audit.fetchone(
+                "SELECT id, wake_seq FROM wake "
+                "WHERE instance_id = ? AND ended_at IS NULL "
+                "AND started_at >= ? "
+                "ORDER BY started_at DESC LIMIT 1",
+                (instance_id, _time.time() - 3600),
+            )
+            if row:
+                wake_id = row.get("id") or row["wake_seq"]
+                wake_seq = row["wake_seq"]
+
+        if wake_id is None:
+            # contextvar 没设 + fallback 也没命中 → 当前没有在跑的 wake，不写孤 turn
             logger.debug(
                 "mid-session inject: no active wake for %s, skip turn mirror",
                 instance_id[:8],
             )
             return
-
-        wake_id = row.get("id") or row["wake_seq"]
-        wake_seq = row["wake_seq"]
 
         # 找该 wake 现有 turn 的最后一行,继承 llm_call_seq
         last = audit.fetchone(

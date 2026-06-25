@@ -162,7 +162,7 @@ def _build_recent_chat_log() -> str | None:
             text = (m.get("text") or "").strip()
             if not text:
                 continue
-            lines.append(f"{sender}：{text[:300]}")
+            lines.append(f"{sender}：{text}")
         return "\n\n".join(lines)
     except Exception:
         return None

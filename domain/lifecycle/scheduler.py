@@ -53,6 +53,62 @@ WAKE_ZOMBIE_SECONDS = float(os.environ.get("DIGITAL_LIFE_WAKE_ZOMBIE_SECONDS", "
 _last_session_end: dict[str, dict] = {}  # instance_id → {"session_id": str, "at": datetime}
 CONTINUATION_WINDOW_S = 15 * 60
 
+# 实例级连续 wake 失败计数 —— 偶发超时是常态（GLM 偶尔抽风），不报健康异常；
+# 持续失败到阈值才写 flow_event error 事件，让健康检查（system_routes 的
+# health_state）亮 error 并显示原因。成功一次即清零（健康自动恢复）。
+WAKE_FAILURE_HEALTH_THRESHOLD = 3
+_consecutive_wake_failures: dict[str, int] = {}  # instance_id → 连续失败次数
+
+
+def _record_wake_health_failure(instance_id: str, error_text: str, *, is_429: bool) -> None:
+    """连续 wake 失败到阈值 → 写一条 flow_event error，触发实例健康变 error。
+
+    设计要点：
+    - GLM 偶发超时/429 是常态，单次失败不当健康异常兇（避免频繁误报）；
+    - 达阈值才报，让健康检查能看到"持续故障"；
+    - 429（配额耗尽）单独标注，因为这才是真正需要人介入的；
+    - 写完即重置计数，避免每轮重复写多条（最新一条反映最新错误即可）。
+    """
+    key = instance_id or "_global"
+    n = _consecutive_wake_failures.get(key, 0) + 1
+    _consecutive_wake_failures[key] = n
+    if n < WAKE_FAILURE_HEALTH_THRESHOLD:
+        return
+    _consecutive_wake_failures[key] = 0  # 重置，避免重复刷 error 事件
+
+    reason = "429_token_quota_exhausted" if is_429 else "agent_failed"
+    summary = (
+        f"GLM API 持续失败（连续 {n} 次，最近: {reason}）：{error_text[:160]}"
+        if is_429 or "timeout" in str(error_text).lower() or "timed out" in str(error_text).lower()
+        else f"实例连续 {n} 次 wake 失败（{reason}）：{error_text[:160]}"
+    )
+    try:
+        from domain.flow_event_log.core.events import FlowEvent, new_flow_event_id
+        from infrastructure.config import get_runtime_state_db_path
+        from infrastructure.persistence.repositories import SQLiteFlowEventLogRepository
+        repo = SQLiteFlowEventLogRepository(get_runtime_state_db_path())
+        repo.append_event(FlowEvent(
+            run_id=f"health_{key}",
+            id=new_flow_event_id(),
+            type="WakeHealthFailure",
+            layer="orchestration",
+            source="scheduler.wake",
+            employee_id=instance_id,
+            summary=summary,
+            severity="error",
+            payload={"reason": reason, "consecutive": n, "error": error_text[:500]},
+        ))
+        logger.warning("Health alert written: %s", summary)
+    except Exception as exc:
+        logger.debug("Failed to record wake health failure: %s", exc)
+
+
+def _clear_wake_health_failure(instance_id: str) -> None:
+    """成功 wake 一次即清零连续失败计数 —— 复用 system_routes 第 350 行的
+    "最近一次成功 turn = 自动恢复" 机制，无需额外处理 error 事件清除。"""
+    _consecutive_wake_failures.pop(instance_id or "_global", None)
+
+
 
 def _get_instance_lock(instance_id: str) -> threading.Lock:
     if instance_id not in _wake_locks:
@@ -836,6 +892,7 @@ def _wake_digital_life_inner_safe(
         # 生命周期说明 → 用户看到"system prompt 没拼生命周期说明")。
         # 直接存全文:前端回放永远和 model 实际看到的一致。
         wake_ctx = None
+        _wake_id_token = None
         try:
             from infrastructure.persistence.instance import get_audit
             from infrastructure.persistence.instance.wake_context import WakeContext
@@ -849,6 +906,11 @@ def _wake_digital_life_inner_safe(
             wake_ctx = WakeContext.start(get_audit(instance_id), meta=audit_meta)
             agent.audit_ctx = wake_ctx
             agent.wake_id = wake_ctx.wake_id
+            # 把当前 wake_id 挂到 contextvar —— mid-session 注入靠它精确归属到本 wake，
+            # 而不是靠 ended_at IS NULL 猜（失败 wake 的 ended_at 曾因异常被吞而留 NULL，
+            # 导致下一条消息的注入错挂到上一组失败 wake 上）。
+            from domain.lifecycle.runtime_context import set_current_wake_id
+            _wake_id_token = set_current_wake_id(str(wake_ctx.wake_id))
             logger.info("WakeContext started: instance=%s wake_id=%d seq=%d",
                         instance_id, wake_ctx.wake_id, wake_ctx.wake_seq)
         except Exception:
@@ -1008,9 +1070,11 @@ def _wake_digital_life_inner_safe(
                         sender = (m.get("sender_name") or "").strip()
                         if not sender:
                             sender = m.get("sender_id") or "未知"
-                        # 截断提升 200 → 800: alpha 的执行计划/操作建议常含 markdown 表格,
-                        # 200 字会截掉关键参数(标的代码、买入金额、止盈止损)。
-                        snippet_lines.append(f"{sender}：{text[:800]}")
+                        # 历史流水全量进 prompt（不再截断 [:800]）。
+                        # 旧 200→800 的截断会让长消息/代码/markdown 表格丢内容，
+                        # 用户反馈 zero"看不全"正是这里栽的——消息里的标的、参数、
+                        # 表格关键列被砍掉。去掉截断换完整性，token 成本可接受。
+                        snippet_lines.append(f"{sender}：{text}")
                     snippet_lines.append("## ── /当前对话近期流水 ──")
                     prev_history.append({
                         "role": "user",
@@ -1105,6 +1169,11 @@ def _wake_digital_life_inner_safe(
 
         summary["agent_response"] = final_resp[:200]
         logger.info("Wake agent completed: reason=%s, %s", reason, summary["agent_response"][:80])
+        # 健康监控：本轮 agent 成功 → 清零连续失败计数（健康自动恢复 ok）。
+        try:
+            _clear_wake_health_failure(instance_id)
+        except Exception:
+            pass
 
         # Agent 没显式调 rest() → 退出 RUNNING，但不再自动塞兜底 timer。
         # rest() 是 agent 的主动职责；这里只把状态归位，下一轮事件到来时
@@ -1136,6 +1205,12 @@ def _wake_digital_life_inner_safe(
             logger.exception("Wake agent failed: %s", e)
 
         summary["error"] = str(e)
+        # 健康监控：连续失败到阈值才写 error flow event，让健康检查亮异常 + 显示原因。
+        # GLM 偶发超时/429 是常态，单次不当告警；成功一次即清零（下次成功自动恢复）。
+        try:
+            _record_wake_health_failure(instance_id, str(e), is_429=is_llm_429)
+        except Exception:
+            pass
         # ⚠ 2026-06-23 修正: empty_response 分支同样的 _agent_started 守卫——
         # agent 已经跑过的失败不该 unconsume(事件已被模型看见)。详见 empty_response
         # 分支注释里的 awaiting_reply 1421 BUG 复盘。
@@ -1208,7 +1283,28 @@ def _wake_digital_life_inner_safe(
                     output_tokens=_out_t,
                 )
             except Exception as e:
-                logger.debug("Failed to end WakeContext: %s", e)
+                # ⚠ bug1 修复：原来这里只 logger.debug 静默吞，导致 ended_at 永远 NULL。
+                # 下一条消息的 mid-session 注入靠 ended_at IS NULL 选归属 wake，
+                # 就会把消息错挂到这条失败 wake 的 id 上（前端按 wake_id 分组 → 归到上一组）。
+                # 兜底：直接 UPDATE 强写 ended_at，确保本 wake 行不会留着 NULL 误导后续注入。
+                logger.warning("WakeContext.end failed, force-marking ended_at: %s", e)
+                try:
+                    from infrastructure.persistence.instance import get_audit
+                    from domain.lifecycle.clock import now_iso
+                    get_audit(instance_id).execute(
+                        "UPDATE wake SET ended_at = COALESCE(ended_at, ?) WHERE id = ?",
+                        (now_iso(), wake_ctx.wake_id),
+                    )
+                except Exception as ee:
+                    logger.error("Force-mark ended_at also failed for wake %s: %s",
+                                 getattr(wake_ctx, "wake_id", "?"), ee)
+        # reset current_wake_id：本 wake 作用域结束，注入归属回到"不在 wake 内"
+        if _wake_id_token is not None:
+            try:
+                from domain.lifecycle.runtime_context import reset_current_wake_id
+                reset_current_wake_id(_wake_id_token)
+            except Exception:
+                pass
         # 记忆巩固：session 结束后自动生成 digest
         try:
             if _session_db and session_id:
