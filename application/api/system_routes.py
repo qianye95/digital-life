@@ -299,12 +299,17 @@ def _read_instance_runtime_state(iid: str, active: bool) -> tuple[float, str, st
                 except sqlite3.OperationalError:
                     pass
 
-                # active wake
+                # active wake：只看「最新一条 wake」的 ended_at。
+                # 旧的失败 wake 可能因进程重启/异常留下 ended_at IS NULL 的孤儿，
+                # 如果用 "任意一条 NULL" 判定 working，孤儿会永久把状态灯钉死。
+                # 真正在跑的 wake 一定是 id 最大的那一条且尚未 end。
                 try:
-                    stuck_row = conn.execute(
-                        "SELECT 1 FROM wake WHERE ended_at IS NULL LIMIT 1"
+                    latest_wake_row = conn.execute(
+                        "SELECT COALESCE(ended_at, 0) FROM wake "
+                        "ORDER BY id DESC LIMIT 1"
                     ).fetchone()
-                    has_active_wake = bool(stuck_row)
+                    if latest_wake_row and float(latest_wake_row[0] or 0) == 0:
+                        has_active_wake = True
                 except sqlite3.OperationalError:
                     pass
             finally:
