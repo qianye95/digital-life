@@ -136,6 +136,27 @@ digital-life start
 
 确认 `digital-life status` 输出的 API 端口，并使用实例 UUID 访问 `/employee/{uuid}/`。
 
+### 实例突然集体不响应（疑似账号级 429 熔断）
+
+当某把 LLM API key 撞到 GLM 账号级 429（QPM/日配额用尽），共用该 key 的所有实例会一起被熔断，暂停调用 LLM 直到自动过期。这是预期保护行为——熔断期间真人消息也不会触发 wake（429 说明账号额度真炸，打进来也是 429）。
+
+- **查看熔断状态**：查 `data/circuit_breaker.db`，`SELECT * FROM circuit_breaker`。`expires_at` 为恢复时间（UTC ISO），过期后自动恢复。
+- **日志特征**：搜 `circuit breaker TRIPPED` / `circuit breaker tripped for ... until ...` / `WAKE_OR_INJECT blocked by circuit breaker`。
+- **手动解除**（确认账号额度已恢复、想立即重试时）：
+
+  ```bash
+  python3 -c "from infrastructure.budget import clear_circuit_breaker; \
+  import os; clear_circuit_breaker(os.environ['LLM_API_KEY'])"
+  ```
+
+  注意：明文 key 不落库，手动 clear 需提供原始 key（用于算指纹）。或直接删 `data/circuit_breaker.db` 里对应行。
+- **调熔断时长**：env `DIGITAL_LIFE_CB_DEFAULT_RETRY_AFTER`(无 Retry-After 时的兜底秒数，默认 300)、`DIGITAL_LIFE_CB_MIN_RETRY_AFTER`(下限，默认 10)、`DIGITAL_LIFE_CB_MAX_RETRY_AFTER`(上限，默认 3600)。
+- **确认不是误熔断**：熔断按 api_key 分区，不同 key 的实例互不影响。多实例若共用一把 key 是正常配置（不是 bug）。
+
+### 根本预防：避免单实例 token 烧爆
+
+熔断是限流的补救。若某实例单会话调用次数过高（如几十轮、每轮全量上下文重发），token 会平方级膨胀触发 429。可通过 `app.agent.max_turns`（实例 `app.yaml`）限制单会话最大轮次，避免长会话把账号额度打穿。
+
 ---
 
 ## 通道配置

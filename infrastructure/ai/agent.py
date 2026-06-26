@@ -30,6 +30,8 @@ class AIAgent:
     session_id: str = ""
     session_db: Any = None
     audit_ctx: Any = None  # WakeContext | None — dual-write sink for the new audit DB
+    # 实例 ID（账号级熔断 trip 时记录是谁触发的；不参与推理）。
+    instance_id: str = ""
     # 本 session 累计 token 用量（用于精力-token 耦合 + 写回 sessions 表）。
     # 每次 _chat() 返回后由 _record_token_usage() 累加。
     session_input_tokens: int = 0
@@ -341,34 +343,45 @@ class AIAgent:
                     pass
                 return {"message": _msg, "raw": data}
             except httpx.HTTPStatusError as e:
-                if e.response.status_code == 429 and retry_429_attempts < MAX_429_RETRIES:
-                    retry_429_attempts += 1
-                    # 优先尊重 Retry-After 头（秒）。GLM 实际不一定带，给默认值兜底。
-                    delay = 5 * (2 ** (retry_429_attempts - 1))  # 5 / 10 / 20
-                    ra = e.response.headers.get("Retry-After") or e.response.headers.get("retry-after")
-                    if ra:
-                        try:
-                            delay = max(2, min(float(ra), 30.0))
-                        except ValueError:
-                            pass  # 也可能是 HTTP date 格式，忽略走默认退避
-                    # Wall-clock 兜底:总预算耗尽就不再 sleep 重试,直接抛出,
-                    # 让 scheduler 的事件级退避(delay_pending_events)接管 — 避免
-                    # 单次 wake 卡在 LLM 重试链里逼近 cron stale 阈值。
-                    elapsed = _time.time() - _call_start
-                    if elapsed + delay > LLM_CALL_MAX_DURATION_S:
+                if e.response.status_code == 429:
+                    # 账号级熔断：收到 429 立即 trip（按 api_key 分区，跨实例共享）。
+                    # 用本次响应的 Retry-After 解析熔断时长。trip 的 upsert 保护保证
+                    # 只有更长的退避才覆盖，所以即使每次重试都 trip 也不会错误缩短恢复时间。
+                    # 这让同 key 的其它实例子进程（cron & _wake_or_inject）下次能读到熔断
+                    # 状态而停止打 API，把账号级限流从"每实例各自撞墙"变成"一起暂停"。
+                    self._trip_circuit_breaker(e.response)
+                    if retry_429_attempts < MAX_429_RETRIES:
+                        retry_429_attempts += 1
+                        # 优先尊重 Retry-After 头（秒）。GLM 实际不一定带，给默认值兜底。
+                        delay = 5 * (2 ** (retry_429_attempts - 1))  # 5 / 10 / 20
+                        ra = e.response.headers.get("Retry-After") or e.response.headers.get("retry-after")
+                        if ra:
+                            try:
+                                delay = max(2, min(float(ra), 30.0))
+                            except ValueError:
+                                pass  # 也可能是 HTTP date 格式，忽略走默认退避
+                        # Wall-clock 兜底:总预算耗尽就不再 sleep 重试,直接抛出,
+                        # 让 scheduler 的事件级退避(delay_pending_events)接管 — 避免
+                        # 单次 wake 卡在 LLM 重试链里逼近 cron stale 阈值。
+                        elapsed = _time.time() - _call_start
+                        if elapsed + delay > LLM_CALL_MAX_DURATION_S:
+                            logger.warning(
+                                "LLM API 429 wall-clock budget exhausted "
+                                "(elapsed=%.1fs + delay=%.1fs > %.0fs, net=%d/429=%d) — raising",
+                                elapsed, delay, LLM_CALL_MAX_DURATION_S,
+                                net_attempts, retry_429_attempts,
+                            )
+                            raise
                         logger.warning(
-                            "LLM API 429 wall-clock budget exhausted "
-                            "(elapsed=%.1fs + delay=%.1fs > %.0fs, net=%d/429=%d) — raising",
-                            elapsed, delay, LLM_CALL_MAX_DURATION_S,
-                            net_attempts, retry_429_attempts,
+                            "LLM API 429 Too Many Requests (try %d/%d), backing off %.1fs",
+                            retry_429_attempts, MAX_429_RETRIES, delay,
                         )
-                        raise
+                        _time.sleep(delay)
+                        continue
                     logger.warning(
-                        "LLM API 429 Too Many Requests (try %d/%d), backing off %.1fs",
-                        retry_429_attempts, MAX_429_RETRIES, delay,
+                        "LLM API 429 retry budget exhausted (%d/%d) — raising",
+                        retry_429_attempts, MAX_429_RETRIES,
                     )
-                    _time.sleep(delay)
-                    continue
                 # 非 429 的 HTTPStatusError（5xx / 4xx）以前直接抛出，保持原行为。
                 raise
             except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as e:
@@ -394,6 +407,27 @@ class AIAgent:
                     continue
                 raise last_error  # type: ignore[misc]
         # unreachable
+
+    def _trip_circuit_breaker(self, response: "httpx.Response") -> None:
+        """收到 429 时触发账号级熔断（按 api_key 分区，跨实例共享）。
+
+        从 429 响应头读 Retry-After 并按 resolve_retry_after 解析出熔断时长，
+        写入共享 circuit_breaker.db（WAL，跨进程可见）。同 key 的其它实例
+        下次在 cron / _wake_or_inject / _chat 入口读到熔断即停止打 API。
+
+        自身故障必须 swallow——熔断是保护机制，不能让它的 DB 写失败把一次
+        正常的 429 重试链改成抛异常（同 _record_token_usage 的 swallow 策略）。
+        """
+        try:
+            from infrastructure.budget.circuit_breaker import trip, resolve_retry_after
+            ra = response.headers.get("Retry-After") or response.headers.get("retry-after")
+            trip(
+                self.api_key or "",
+                retry_after_sec=resolve_retry_after(ra),
+                instance_id=self.instance_id or "",
+            )
+        except Exception as exc:
+            logger.debug("circuit breaker trip failed: %s", exc)
 
     def _record_token_usage(self, raw_response: dict[str, Any] | None) -> None:
         """从 LLM API 返回的 usage 字段累加 token 用量。
@@ -767,20 +801,17 @@ class AIAgent:
 
         当前段永远不压缩，只对历史段做叙事替换。
         """
-        from domain.memory.memory.summaries.consolidation_runtime import (
-            load_segment_narrative,
-            _lazy_generate_segment_narrative,
-        )
-
-        # Token 估算（中文 ≈ 1.5 chars/token，英文 ≈ 4 chars/token）
+        # Token 估算：中文为主时 ~1.5-1.6 chars/token，英文 ~4 chars/token。
+        # 旧的 total_chars/3 严重高估所需 token 数（中文被当成英文算），
+        # 导致实际已经超 context 但 estimated_tokens 仍低于阈值 → 压缩不触发。
+        # 改用 /1.8：中文混合场景下偏保守，确保该压缩时能真正触发。
         total_chars = sum(len(str(m.get("content") or "")) for m in messages)
         if system_prompt:
             total_chars += len(system_prompt)
         if ref_context:
             total_chars += len(ref_context)
 
-        # 粗略 token 估算
-        estimated_tokens = int(total_chars / 3)
+        estimated_tokens = int(total_chars / 1.8)
 
         # 从配置读取阈值（默认 60% 的 128K context = 76K）
         threshold = self._get_compression_threshold()
@@ -808,7 +839,7 @@ class AIAgent:
             # 尝试加载叙事
             narrative = self._load_narrative_for_segment(seg)
             if narrative:
-                narrative_tokens = len(narrative) // 3
+                narrative_tokens = int(len(narrative) / 1.8)
                 if current_tokens - seg_tokens + narrative_tokens < threshold:
                     # 替换后满足阈值，追加叙事 + 剩余段
                     self._append_narrative_to_messages(compressed, narrative, seg, segment_index=i)
@@ -840,12 +871,20 @@ class AIAgent:
             return 76800
 
     def _split_by_user_message(self, messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-        """按 user 消息切分段。"""
+        """按 user 消息切分段。
+
+        只有「真正的 user 消息」才是段（= wake）起始 marker。带 ``_sys_tool``
+        tag 的 user 消息是 slow_ctx 注入项（task_board / chat_stream / digest /
+        consciousness 等），它们随每次 wake 重新注入、不是新对话回合，若当成
+        段起始会导致 segment 切分碎片化、与「segment_index = wake 序号」的
+        语义脱钩（见 ``session_db.append_message`` 的 segment_index 自增规则）。
+        因此这类注入项归入当前段、不触发新段。
+        """
         segments: list[list[dict[str, Any]]] = []
         current: list[dict[str, Any]] = []
 
         for m in messages:
-            if m.get("role") == "user":
+            if m.get("role") == "user" and not m.get("_sys_tool"):
                 if current:
                     segments.append(current)
                 current = [m]
@@ -881,17 +920,29 @@ class AIAgent:
                 except Exception:
                     pass
 
-        # segment_index 从 context 推断（当前是第几段）
+        # session_id 还没找到时，用 agent 当前 session（continuation 场景同 session 复用）
+        if not session_id and getattr(self, "session_id", None):
+            session_id = self.session_id
+
         if not session_id:
             return None
 
-        # 从 session_db 获取实际 segment_index
-        if self.session_db:
+        # segment_index 优先从 message 自带的持久化字段读取（_load_prior_messages
+        # 经 get_messages 的 SELECT * 已带 segment_index 列，语义 = wake 序号，
+        # 见 session_db.append_message）。这比旧的「count - user 数 - 1」反推稳：
+        # 后者在 prev_history 被 slow_ctx 注入的 user 消息污染（_sys_tool）时算错。
+        for m in segment:
+            si = m.get("segment_index")
+            if isinstance(si, int) and si >= 0:
+                segment_index = si
+                break
+
+        # 字段缺失（旧库 / 非 DB 来源的 segment）→ 回退到 session_db 反推
+        if segment_index is None and self.session_db:
             try:
                 count = self.session_db.get_segment_count(session_id)
-                # 当前段是最后一 segment_index = count - 1
-                # 但我们在压缩时需要的是历史段的 index
-                segment_index = max(0, count - len([m for m in segment if m.get("role") == "user"]) - 1)
+                user_count = sum(1 for m in segment if m.get("role") == "user")
+                segment_index = max(0, count - user_count - 1)
             except Exception:
                 pass
 
@@ -905,8 +956,12 @@ class AIAgent:
 
         # 惰性生成
         if self.session_db:
-            narrative = _lazy_generate_segment_narrative(self.session_db, session_id, segment_index)
-            return narrative
+            try:
+                narrative = _lazy_generate_segment_narrative(self.session_db, session_id, segment_index)
+                return narrative
+            except Exception as e:
+                logger.debug("Lazy segment narrative generation failed for %s#%d: %s",
+                             session_id[:20], segment_index, e)
 
         return None
 

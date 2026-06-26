@@ -287,6 +287,36 @@ def _run_l4_tick_inner(instance_id: str, log) -> None:
         except Exception as exc:
             log.debug("budget gate check failed (let through): %s", exc)
 
+        # ── 账号级熔断闸门（按 api_key 分区，跨实例共享）─────────────────────
+        # budget_gate 只管"该实例 token 用量超没超"，不感知账号级 429。当某把
+        # key 收到 429 被 trip 后，共用该 key 的所有实例（含本实例后续 cron tick）
+        # 必须在此停下——否则限流期间每个 tick 仍会 pop events 起 wake 撞 429。
+        # 与 budget_gate 不同：熔断闸**不区分事件优先级**（429 说明账号额度真炸，
+        # 真人消息打进来也是 429），所以此处不保留 HIGH_PRIORITY_KINDS 穿透。
+        # 已 pop 的 events 推到 +5 分钟，让熔断到期后下个 tick 自然 pop 接管。
+        try:
+            from infrastructure.budget.circuit_breaker import is_tripped
+            from infrastructure.ai import load_runtime_config, resolve_runtime_provider
+            from domain.lifecycle.events import delay_pending_events as _delay_for_cb
+            _rt = resolve_runtime_provider(config=load_runtime_config())
+            _cb_tripped, _cb_info = is_tripped(_rt.get("api_key") or "")
+            if _cb_tripped:
+                log.warning(
+                    "L4: circuit breaker tripped for %s until %s "
+                    "(tripped_by=%s) — delaying ALL %d events incl. high-priority",
+                    instance_id or "<?>",
+                    _cb_info.get("expires_at"),
+                    _cb_info.get("tripped_by"),
+                    len(events),
+                )
+                try:
+                    _delay_for_cb(events, base=5.0, cap=5.0)
+                except Exception as exc:
+                    log.debug("circuit-breaker delay failed: %s", exc)
+                return
+        except Exception as exc:
+            log.debug("circuit breaker check failed (let through): %s", exc)
+
         # ── Dispatch ──────────────────────────────────────────────────────────
 
         try:

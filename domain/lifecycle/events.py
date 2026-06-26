@@ -343,6 +343,31 @@ def _wake_or_inject(triggering_event_id: int) -> None:
         )
         return
 
+    # 账号级熔断闸口（堵真人消息的关键点）：
+    # _wake_or_inject 是真人消息即时唤醒的唯一入口，**不经 budget_gate**
+    # （budget_gate 只在 cron 路径）。账号级 429 时若放它过去，每次真人消息都会
+    # 重新起 wake、_chat 撞 429 三次——把账号级限流从暂停变成反复触发。
+    # 熔断生效则直接 return，事件留在 due 队列；熔断到期后 cron 自然 pop 接管。
+    # 闸口自身故障必须 fail-through（多打一次 API 比漏唤醒可接受少很多，但这里
+    # 事件有 cron 兜底，与熔断本身的 fail-open 语义一致）。
+    try:
+        from infrastructure.budget.circuit_breaker import is_tripped
+        from infrastructure.ai.config import resolve_runtime_provider
+        from infrastructure.ai import load_runtime_config
+        _key = resolve_runtime_provider(config=load_runtime_config()).get("api_key") or ""
+        _tripped, _cb_info = is_tripped(_key)
+        if _tripped:
+            logger.info(
+                "WAKE_OR_INJECT blocked by circuit breaker: event %d will retry on cron "
+                "after expires_at=%s (reason started by instance=%s)",
+                triggering_event_id,
+                _cb_info.get("expires_at"),
+                _cb_info.get("tripped_by"),
+            )
+            return
+    except Exception as exc:
+        logger.debug("WAKE_OR_INJECT circuit breaker check failed (let through): %s", exc)
+
     try:
         # 1. 查 affair 状态
         from domain.lifecycle.affairs.runtime import get_affair

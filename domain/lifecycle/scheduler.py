@@ -53,6 +53,11 @@ WAKE_ZOMBIE_SECONDS = float(os.environ.get("DIGITAL_LIFE_WAKE_ZOMBIE_SECONDS", "
 _last_session_end: dict[str, dict] = {}  # instance_id → {"session_id": str, "at": datetime}
 CONTINUATION_WINDOW_S = 15 * 60
 
+# 接续时 prev_history 的时间折叠阈值：同 session 的历史 segment（= 历史 wake）
+# 若其最后一条消息距「本次 wake 开始」超过此 gap，原文折叠为摘要后回灌，
+# 不再全量回放——避免长期接续的 session 把 6 小时前的原文一遍遍塞进 LLM。
+SEGMENT_GAP_COMPRESS_S = 30 * 60
+
 # 实例级连续 wake 失败计数 —— 偶发超时是常态（GLM 偶尔抽风），不报健康异常；
 # 持续失败到阈值才写 flow_event error 事件，让健康检查（system_routes 的
 # health_state）亮 error 并显示原因。成功一次即清零（健康自动恢复）。
@@ -175,6 +180,166 @@ def _load_prior_messages(session_db, session_id: str) -> list:
         else:
             out.append({"role": role, "content": m.get("content") or ""})
     return out
+
+
+def _segment_gap_end_timestamp(messages: list[dict]) -> float:
+    """段内最后一条带 timestamp 的消息时间，用于 gap 判定。"""
+    for m in reversed(messages):
+        ts = m.get("timestamp")
+        if ts is not None:
+            try:
+                return float(ts)
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
+
+def _summarize_segment(segment: list[dict], session_db, session_id: str, seg_idx: int) -> list[dict]:
+    """把一个段的原文折叠成一条摘要消息（三级降级，保证不丢信息也不抛异常）。
+
+    1) segment narrative（LLM/规则化叙事）—— 优先，最贴合「段」语义
+    2) session 级 digest 头（规则化、必出）—— 兜底最近经历
+    3) 段首尾消息（_shrink_segment 风格）—— 最差也不丢全部
+
+    返回的 list 可直接 extend 进 prev_history。
+    """
+    try:
+        body = ""
+        # 1) segment narrative
+        try:
+            from domain.memory.memory.summaries.consolidation_runtime import (
+                load_segment_narrative,
+                _lazy_generate_segment_narrative,
+            )
+            narrative = load_segment_narrative(session_id, seg_idx)
+            if not narrative and session_db:
+                narrative = _lazy_generate_segment_narrative(session_db, session_id, seg_idx)
+            if narrative:
+                body = narrative
+        except Exception as e:
+            logger.debug("segment narrative unavailable for %s#%d: %s", session_id[:20], seg_idx, e)
+
+        # 提取段时间范围做标题
+        time_range = ""
+        ts_end = _segment_gap_end_timestamp(segment)
+        ts_start = _segment_gap_start_timestamp(segment)
+        if ts_start and ts_end:
+            import time as _time
+            time_range = "{0}-{1}".format(
+                _time.strftime("%m-%d %H:%M", _time.localtime(ts_start)),
+                _time.strftime("%H:%M", _time.localtime(ts_end)),
+            )
+
+        if body:
+            return [{
+                "role": "user",
+                "content": f"[历史回顾 · 非新事件 · {time_range}]\n{body}\n[/历史回顾]",
+                "_sys_tool": "segment_recap",
+            }]
+
+        # 2) 无 narrative → 段首尾兜底（不丢全部，但显著瘦身）
+        if len(segment) <= 4:
+            return _load_prior_messages_segment(segment)
+        head = _load_prior_messages_segment(segment[:2])
+        tail = _load_prior_messages_segment(segment[-2:])
+        return head + [{
+            "role": "user",
+            "content": "[…此段更早内容已折叠…]",
+            "_sys_tool": "segment_recap",
+        }] + tail
+    except Exception as e:
+        # 绝不抛 —— 降级为段首尾
+        logger.debug("segment summarization failed for %s#%d, keeping verbatim: %s",
+                     session_id[:20], seg_idx, e)
+        return _load_prior_messages_segment(segment)
+
+
+def _segment_gap_start_timestamp(messages: list[dict]) -> float:
+    """段内第一条带 timestamp 的消息时间。"""
+    for m in messages:
+        ts = m.get("timestamp")
+        if ts is not None:
+            try:
+                return float(ts)
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
+
+def _load_prior_messages_segment(segment: list[dict]) -> list[dict]:
+    """把单个段的 DB message 还原成 API message 格式（_load_prior_messages 的 per-segment 版）。"""
+    out: list[dict] = []
+    for m in segment:
+        role = m.get("role")
+        if role == "tool":
+            out.append({"role": "tool", "tool_call_id": m.get("tool_call_id"),
+                        "name": m.get("tool_name"), "content": m.get("content") or ""})
+        elif role == "assistant":
+            item = {"role": "assistant", "content": m.get("content") or ""}
+            if m.get("tool_calls"):
+                item["tool_calls"] = m["tool_calls"]
+            out.append(item)
+        elif role == "user":
+            out.append({"role": "user", "content": m.get("content") or ""})
+        else:
+            out.append({"role": role, "content": m.get("content") or ""})
+    return out
+
+
+def _load_prior_messages_with_compression(session_db, session_id: str, now_ts: float) -> list:
+    """接续时拉 prev_history，并按「段(wake) gap」做时间折叠。
+
+    segment（= wake）的最后一条消息若距 now_ts 超过 SEGMENT_GAP_COMPRESS_S，
+    原文折叠为摘要；否则保留原文。当前正在跑的 wake（最后一段）永不折叠。
+
+    任何环节失败 → 退回 _load_prior_messages 全量原文，绝不抛异常（热路径）。
+    """
+    try:
+        all_messages = session_db.get_messages(session_id)
+        if not all_messages:
+            return []
+
+        # 按 segment_index 分组（保留时间序）。message dict 自带 segment_index。
+        segments_map: dict[int, list[dict]] = {}
+        for m in all_messages:
+            try:
+                idx = int(m.get("segment_index") or 0)
+            except (TypeError, ValueError):
+                idx = 0
+            segments_map.setdefault(idx, []).append(m)
+
+        if len(segments_map) <= 1:
+            # 只有一段（首次接续），无需折叠
+            return _load_prior_messages(session_db, session_id)
+
+        seg_indices = sorted(segments_map.keys())
+
+        out: list[dict] = []
+        folded = 0
+        for idx in seg_indices:
+            seg = segments_map[idx]
+            # get_messages 返回的全是已落库的历史段（本轮 wake 即将产生的新
+            # message 尚未 append，不在列表里），所以无需 skip 当前段。
+            seg_end_ts = _segment_gap_end_timestamp(seg)
+            gap = now_ts - seg_end_ts if seg_end_ts else 0.0
+            if gap > SEGMENT_GAP_COMPRESS_S:
+                out.extend(_summarize_segment(seg, session_db, session_id, idx))
+                folded += 1
+            else:
+                out.extend(_load_prior_messages_segment(seg))
+
+        if folded:
+            logger.info(
+                "SEGMENT_GAP_FOLD session=%s folded=%d/%d (gap>%ds)",
+                session_id[:20], folded, len(seg_indices), SEGMENT_GAP_COMPRESS_S,
+            )
+        return out
+    except Exception as e:
+        logger.debug("compressed prev_history failed, fallback to verbatim: %s", e)
+        try:
+            return _load_prior_messages(session_db, session_id)
+        except Exception:
+            return []
 
 
 def _load_prev_session_summary(session_db, current_session_id: str) -> list:
@@ -877,6 +1042,7 @@ def _wake_digital_life_inner_safe(
             session_db=_session_db,
             enabled_toolsets=_enabled_toolsets_for_reason(reason),
             skip_memory=True,
+            instance_id=instance_id,
         )
         try:
             agent.session_log_file = agent.logs_dir / make_wake_session_log_filename(session_id)
@@ -941,7 +1107,12 @@ def _wake_digital_life_inner_safe(
         #   - 新 session: 拼装 slow_ctx (digest/consciousness/ref_context) + task_board + chat_stream
         # 避免每次 wake 都重新注入整套 slow_ctx，导致 messages 表指数膨胀 + LLM API 超限。
         if is_continuation:
-            prev_history = list(_load_prior_messages(_session_db, session_id))
+            # prev_history 拉 + 时间折叠：超 30min 的历史段折叠为摘要，避免长期接续
+            # 的 session 把几小时前的原文一遍遍全量回放给 LLM。
+            import time as _time
+            prev_history = list(_load_prior_messages_with_compression(
+                _session_db, session_id, _time.time()
+            ))
             if not prev_history:
                 is_continuation = False
                 prev_history = []

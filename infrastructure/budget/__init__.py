@@ -37,6 +37,14 @@ from .budget_gate import (
     DEFAULT_TOKEN_HOURLY_LIMIT,
     DEFAULT_TOKEN_DAILY_LIMIT,
 )
+from .circuit_breaker import (
+    CircuitBreakerOpen,
+    circuit_breaker_db_path,
+    clear as clear_circuit_breaker,
+    is_tripped,
+    resolve_retry_after,
+    trip,
+)
 
 
 __all__ = [
@@ -49,4 +57,11 @@ __all__ = [
     "HIGH_PRIORITY_KINDS",
     "DEFAULT_TOKEN_HOURLY_LIMIT",
     "DEFAULT_TOKEN_DAILY_LIMIT",
+    # 账号级 429 熔断（按 api_key 分区，跨实例共享）
+    "CircuitBreakerOpen",
+    "circuit_breaker_db_path",
+    "clear_circuit_breaker",
+    "is_tripped",
+    "resolve_retry_after",
+    "trip",
 ]
