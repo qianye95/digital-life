@@ -50,6 +50,17 @@
             </div>
 
             <div class="mono id-line">{{ safeSlice(inst.id, 0, 8) }}…</div>
+
+            <!-- 离线/上线开关：stop 阻止冒泡到卡片本身的 enter 跳转 -->
+            <div class="card-actions" @click.stop>
+              <el-button
+                size="small"
+                :type="inst.active ? 'danger' : 'success'"
+                plain
+                :loading="toggling === inst.id"
+                @click="toggleActive(inst)"
+              >{{ inst.active ? '离线' : '上线' }}</el-button>
+            </div>
           </div>
         </div>
       </div>
@@ -83,6 +94,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { systemApi } from '@/api/client'
 import { fmtTs } from '@/composables/useFormat'
 // template 用 safeSlice 通过 app.config.globalProperties 注入；script 内用 fmtTs import
@@ -92,6 +104,7 @@ const subtitle = computed(() => '')
 
 const instances = ref([])
 const projects = ref([])
+const toggling = ref('') // 正在切换 active 的实例 id
 const refreshTimer = ref(null)
 const now = ref(Date.now())
 const nowTs = computed(() => fmtTs(new Date(now.value).toISOString()))
@@ -106,6 +119,32 @@ const stats = computed(() => [
 
 function enter(iid) {
   router.push(`/instance/${iid}/overview`)
+}
+
+async function toggleActive(inst) {
+  if (toggling.value) return
+  const next = !inst.active
+  const verb = next ? '上线' : '离线'
+  try {
+    await ElMessageBox.confirm(
+      `${verb} 实例「${inst.display_name}」？\n\n`
+      + (next
+        ? '下次 master tick / gateway restart 后该实例子进程自动 spawn。'
+        : '当前会停止 spawn；正在跑的会在自然生命周期结束。'),
+      `确认${verb}`,
+      { type: 'warning', confirmButtonText: verb, cancelButtonText: '取消' },
+    )
+  } catch { return }
+
+  toggling.value = inst.id
+  try {
+    const d = await systemApi.setInstanceActive(inst.id, next, 'overview toggle')
+    if (d.error) return ElMessage.error(`操作失败：${d.error}`)
+    ElMessage.success(`✓ ${verb}）已记录；gateway 下次 tick / restart 生效`)
+    await load()
+  } finally {
+    toggling.value = ''
+  }
 }
 
 async function load() {
@@ -186,6 +225,13 @@ onUnmounted(() => clearInterval(refreshTimer.value))
   font-size: 11px;
   color: var(--text-muted);
   opacity: 0.7;
+}
+
+/* 离线/上线开关容器：右对齐，与 id-line 保持间距 */
+.card-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--space-3);
 }
 
 .project-row {
