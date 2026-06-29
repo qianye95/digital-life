@@ -376,6 +376,20 @@ def get_global_routines_path() -> Path:
     return get_global_config_dir() / "routines.yaml"
 
 
+def get_instance_routines_path(instance_id: str | None = None) -> Path:
+    """Return per-instance routines YAML: apps/{iid}/config/routines.yaml.
+
+    作息 2026-06-29 下沉到实例级后的路径。实例存在该文件时，routine_scheduler
+    用实例版作息（完全覆盖全局）；不存在时回退全局 get_global_routines_path()
+    （由 routine_scheduler.load_routines 决定回退逻辑，本函数只返路径）。
+
+    与 get_instance_config_path 同级风格——作息是一个独立的有结构清单，
+    不挤在 app.yaml 的扁平配置里。
+    """
+    # get_instance_config_path 返 app.yaml 文件，.parent 得到 config/ 目录。
+    return get_instance_config_path(instance_id).parent / "routines.yaml"
+
+
 def get_global_default_config_path() -> Path:
     """Return the global default config: config/default.yaml"""
     return get_global_config_dir() / "default.yaml"

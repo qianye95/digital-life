@@ -81,6 +81,16 @@ def _copy_templates(inst_dir: Path) -> None:
     if copied:
         print(f"  ✓ 已拷贝 {copied} 个人设模板")
 
+    # 作息 2026-06-29 下沉到实例级：新实例从全局 config/routines.yaml 复制一份独立的
+    # apps/{iid}/config/routines.yaml，从此每个实例单独维护自己的作息时间
+    # （可手动错峰，避免多实例整点同时 wake 撞限流）。全局 config/routines.yaml
+    # 仅作 init 模板 + console 全局操作的对象。
+    global_routines = ROOT / "config" / "routines.yaml"
+    inst_routines = inst_dir / "config" / "routines.yaml"
+    if global_routines.is_file() and not inst_routines.exists():
+        shutil.copy2(global_routines, inst_routines)
+        print("  ✓ config/routines.yaml 已复制（独立作息）")
+
 
 # ── 配置文件生成 ──
 

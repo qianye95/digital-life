@@ -13,8 +13,51 @@ logger = logging.getLogger(__name__)
 _CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "routines.yaml"
 
 
-def load_routines() -> list[dict[str, Any]]:
-    """从 config/routines.yaml 加载作息条目列表。"""
+def _current_instance_id() -> str | None:
+    """安全取当前实例 id（ContextVar），无实例上下文时返回 None。
+
+    ensure_routine_events 实际只在实例进程的 cron tick 内被调用，ContextVar 总有值；
+    但函数本身是无副作用查询，留 None 兜底让它在测试/无上下文场景下也能跑通
+    （此时回退全局作息，行为与旧版一致）。
+    """
+    try:
+        from infrastructure.config import get_app_instance_id
+        return get_app_instance_id() or None
+    except Exception:
+        return None
+
+
+def load_routines(instance_id: str | None = None) -> list[dict[str, Any]]:
+    """加载作息条目列表。
+
+    三层路径（作息 2026-06-29 下沉到实例级）:
+      1. instance_id 给定 + `apps/{iid}/config/routines.yaml` 存在 → 用实例版（覆盖全局）
+      2. 否则回退全局 `config/routines.yaml`
+      3. 全局也缺失 → 内置 `_default_routines`
+
+    instance_id=None（默认）→ 读全局。所有现存的"无实例上下文"调用
+    （console API / get_quiet_hours / resolve_routine_prompt）行为零变化，
+    仍读全局模板；只有 ensure_routine_events（实例 cron tick）会显式
+    传当前实例 id 走 per-instance 路径。
+    """
+    # 1. per-instance 优先（仅当显式传了 instance_id）
+    if instance_id:
+        try:
+            from infrastructure.config import get_instance_routines_path
+            inst_path = get_instance_routines_path(instance_id)
+            if inst_path.exists():
+                import yaml
+                with open(inst_path, "r", encoding="utf-8") as f:
+                    raw = yaml.safe_load(f) or {}
+                routines = raw.get("routines", [])
+                if routines:
+                    return routines
+                # 实例文件存在但 routines 为空 → 也走下面全局兜底（视为"未配置"）
+        except Exception as exc:
+            # 实例作息读取失败不应阻断调度——回退全局。
+            logger.warning("Failed to load instance routines for %s: %s", instance_id, exc)
+
+    # 2. 全局兜底
     try:
         if not _CONFIG_PATH.exists():
             logger.warning("routines.yaml not found, using defaults")
@@ -161,7 +204,7 @@ def ensure_routine_events() -> None:
     except Exception as exc:
         logger.debug("Failed to check pending alarms: %s", exc)
 
-    routines = load_routines()
+    routines = load_routines(_current_instance_id())
 
     for entry in routines:
         if not entry.get("enabled", True):
