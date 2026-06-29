@@ -35,16 +35,22 @@ def load_routines(instance_id: str | None = None) -> list[dict[str, Any]]:
       2. 否则回退全局 `config/routines.yaml`
       3. 全局也缺失 → 内置 `_default_routines`
 
-    instance_id=None（默认）→ 读全局。所有现存的"无实例上下文"调用
-    （console API / get_quiet_hours / resolve_routine_prompt）行为零变化，
-    仍读全局模板；只有 ensure_routine_events（实例 cron tick）会显式
-    传当前实例 id 走 per-instance 路径。
+    **instance_id 默认回退 ContextVar**(2026-06-29 联动修复 BUG-B/C):
+    instance_id=None 时先尝试 _current_instance_id() 拿当前实例。这样所有
+    "在实例上下文里"的调用方（console 监控 6 处 / get_schedule_overview /
+    get_quiet_hours）无需逐个改，全部自动读当前实例的 per-instance 作息；
+    真正无实例上下文（顶层测试 / 全局工具）才读全局作模板兜底。
+
+    显式传 instance_id 仍优先（ensure_routine_events 用最明确的路径）。
     """
-    # 1. per-instance 优先（仅当显式传了 instance_id）
-    if instance_id:
+    # instance_id 缺省 → 回退 ContextVar 拿当前实例（可能仍为 None）
+    resolved_iid = instance_id or _current_instance_id()
+
+    # 1. per-instance 优先（resolved_iid 非空 + 实例文件存在）
+    if resolved_iid:
         try:
             from infrastructure.config import get_instance_routines_path
-            inst_path = get_instance_routines_path(instance_id)
+            inst_path = get_instance_routines_path(resolved_iid)
             if inst_path.exists():
                 import yaml
                 with open(inst_path, "r", encoding="utf-8") as f:
@@ -55,9 +61,9 @@ def load_routines(instance_id: str | None = None) -> list[dict[str, Any]]:
                 # 实例文件存在但 routines 为空 → 也走下面全局兜底（视为"未配置"）
         except Exception as exc:
             # 实例作息读取失败不应阻断调度——回退全局。
-            logger.warning("Failed to load instance routines for %s: %s", instance_id, exc)
+            logger.warning("Failed to load instance routines for %s: %s", resolved_iid, exc)
 
-    # 2. 全局兜底
+    # 2. 全局兜底（无实例上下文 / 实例文件缺失 / 实例文件空）
     try:
         if not _CONFIG_PATH.exists():
             logger.warning("routines.yaml not found, using defaults")
@@ -110,12 +116,35 @@ def _default_routines() -> list[dict[str, Any]]:
     ]
 
 
-def save_routines(routines: list[dict[str, Any]]) -> None:
-    """将作息条目列表写回 YAML。"""
+def save_routines(
+    routines: list[dict[str, Any]], instance_id: str | None = None
+) -> Path:
+    """将作息条目列表写回 YAML。**per-instance 必需**(2026-06-29 BUG-A 修复)。
+
+    作息已下沉到实例级，写入必须落 `apps/{iid}/config/routines.yaml`——找不到
+    实例上下文就直接报错，**绝不静默写全局**(那正是 BUG-A：前端在某实例页面
+    编辑作息结果改了全局 config/routines.yaml，污染所有实例)。
+
+    instance_id 缺省时回退 _current_instance_id()（与 load_routines 对称）。
+    仍拿不到实例（如旧前缀 /api/employee/schedules 无 iid 路由）→ ValueError，
+    调用方收到明确错误，避免悄悄污染全局。
+
+    返回写入的文件路径，便于调试/日志。
+    """
     import yaml
-    _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
+    resolved_iid = instance_id or _current_instance_id()
+    if not resolved_iid:
+        raise ValueError(
+            "save_routines 需要实例上下文才能写入（拒绝静默写全局）。"
+            "请在实例上下文内调用，或显式传 instance_id。"
+        )
+    from infrastructure.config import get_instance_routines_path
+    path = get_instance_routines_path(resolved_iid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
         yaml.dump({"routines": routines}, f, allow_unicode=True, default_flow_style=False)
+    logger.info("routines saved (instance=%s, routines=%d) → %s", resolved_iid, len(routines), path)
+    return path
 
 
 def ensure_routine_events() -> None:
