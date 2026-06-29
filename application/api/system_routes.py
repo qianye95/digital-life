@@ -193,6 +193,32 @@ def _instances_summary() -> list[dict[str, Any]]:
     return out
 
 
+def _parse_iso_to_epoch(iso: str) -> float:
+    """ISO 时间字符串 → unix epoch（用于跨表时间戳对比）。
+
+    flow_event_log_events.timestamp 存的是 TEXT（ISO，如 '2026-06-27T14:57:01.877659+00:00'），
+    turn.timestamp 存的是 REAL（epoch）。health_state 的 auto-recover 判定需要把两者统一到 epoch
+    比"最近成功 assistant turn 是否比 critical event 更新"。
+
+    parse 失败（空串/非法/无法识别时区）→ 返回 -inf（负无穷），使 health 判定的
+    `latest_successful_assistant_at >= critical_at` 保守走 "未恢复" 分支——
+    即"无法确定 critical 时间时认为它最近、未恢复"，宁可多显示一次 error 也不误报为 ok。
+    """
+    if not iso:
+        return float("-inf")
+    try:
+        from datetime import datetime, timezone
+
+        # 兼容带 Z / 带偏移 / naive 三种 ISO 写法
+        text = iso.strip().replace("Z", "+00:00")
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (ValueError, TypeError):
+        return float("-inf")
+
+
 def _read_instance_runtime_state(iid: str, active: bool) -> tuple[float, str, str, str, str]:
     """读实例运行态 → (energy, runtime_state, process_state, health_state, health_reason)。
 
@@ -268,6 +294,8 @@ def _read_instance_runtime_state(iid: str, active: bool) -> tuple[float, str, st
     latest_turn_role: str = ""
     latest_turn_has_error: bool = False
     latest_turn_error_text: str = ""
+    # 最近一次成功 assistant turn 的 epoch（用于 auto-recover 判定）。
+    latest_successful_assistant_at: float = 0.0
     latest_critical_event_at_iso: str = ""
     latest_critical_event_summary: str = ""
 
@@ -296,6 +324,21 @@ def _read_instance_runtime_state(iid: str, active: bool) -> tuple[float, str, st
                         latest_turn_role = str(latest[1] or "")
                         latest_turn_error_text = str(latest[2] or "")
                         latest_turn_has_error = bool(latest_turn_error_text)
+                except sqlite3.OperationalError:
+                    pass
+
+                # auto-recover 用的"最近一次成功 assistant turn"时间戳（REAL epoch）。
+                # 只有 role=assistant 且无 error 的 turn 才算"模型成功"——user turn 成功
+                # 不代表模型能工作。无成功 turn（实例从没跑过）→ 0.0，让恢复判定保守放行。
+                # 见 health_state 判定段（"recovered"）。
+                try:
+                    succ_row = conn.execute(
+                        "SELECT timestamp FROM turn "
+                        "WHERE role='assistant' AND (error IS NULL OR error='') "
+                        "ORDER BY id DESC LIMIT 1"
+                    ).fetchone()
+                    if succ_row:
+                        latest_successful_assistant_at = float(succ_row[0] or 0.0)
                 except sqlite3.OperationalError:
                     pass
 
@@ -351,14 +394,36 @@ def _read_instance_runtime_state(iid: str, active: bool) -> tuple[float, str, st
         runtime_state = "idle"
 
     # 5. health_state（事件驱动）
-    # 优先级：critical 事件 > 最近 turn error > 默认 ok
-    # Auto-recover: 任何一次 role=assistant 无 error 的 turn = 模型成功 = 恢复
-    if latest_critical_event_at_iso:
-        # critical 事件 + 最近一次 turn 又是 fresh 错误（id 比 event 更后）
+    # 优先级：未恢复的 critical 事件 > 最近 turn error > 默认 ok
+    #
+    # BUG 修复（2026-06-29）：原实现只看"DB 里是否有 severity=error 的 flow_event"就 error，
+    # 导致实例一旦撞过 3 次失败写了 critical event，即便后来已恢复正常产出 assistant turn，
+    # health 也永久 stuck 在 error（前端红灯钉死）。alpha/贝塔实测确认：今天 10:36/10:54
+    # 已恢复成功 turn，但 health 仍 error。
+    #
+    # 正确语义（与模块 docstring :218-219 一致）：任意一次成功的 assistant turn
+    # （比 critical event 更新）= 模型已恢复。用 epoch 对比跨表异构时间戳
+    # （turn.timestamp=REAL, flow_event timestamp=TEXT ISO）。
+    critical_at = _parse_iso_to_epoch(latest_critical_event_at_iso or "")
+    # recovered = 最近成功 assistant turn 比 critical event 更新（含相等，保守起见视为已覆盖）
+    # 仅当确实有过成功 assistant turn（>0）才算恢复——从没成功过的实例不能靠这个翻成 ok。
+    recovered = (
+        latest_successful_assistant_at > 0
+        and latest_successful_assistant_at >= critical_at
+    )
+    if latest_critical_event_at_iso and not recovered:
+        # 有未恢复的 critical 事件（最近成功 turn 早于故障）→ error
         health_state = "error"
         health_reason = (
             f"事件流严重错误：{latest_critical_event_summary or 'unknown'}"
             f"（{latest_critical_event_at_iso}）"
+        )
+    elif latest_critical_event_at_iso and recovered:
+        # 故障已被后续成功 turn 覆盖 → 恢复成 ok，reason 留一个提示便于前端展示"已恢复"
+        health_state = "ok"
+        health_reason = (
+            f"已恢复：最近成功 assistant turn（epoch={latest_successful_assistant_at:.0f}）"
+            f"覆盖了历史故障（{latest_critical_event_at_iso}）"
         )
     elif latest_turn_has_error:
         health_state = "error"
