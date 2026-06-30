@@ -48,7 +48,7 @@ Loop Engineering starts from "I want to automate coding," Digital Life from "I w
 |---|---|---|
 | **Who is the subject** | Model is the core of the coding loop; humans design the pipeline, agents execute the loop | Model is an organ, runtime is the subject (see "subject-theory" above) |
 | **How abstract can a goal be** | Concrete tasks: finish a feature, fix a bug, land a PR | Fully compatible with concrete tasks, and supports abstract goals: a role responsibility, a KPI, "grow a social-account following to X in three months," "grow a simulated portfolio 20% in three months" — a goal can be long-running, fuzzy, and require it to pace itself |
-| **Event mechanism** | Automations (alarms / hooks / webhooks) trigger loops | Also event-driven, with two differences: first, **internal and external events are equal** — human messages, timers, energy drops, wanting to explore all pass the same arbitration, none jumping the queue; second, events don't merely trigger — **they participate in the wake decision** (deciding when and why to wake) |
+| **Event mechanism** | Automations (alarms / hooks / webhooks) trigger loops; triggers come from outside | Also event-driven, with two differences: first, **internal and external events are equal** — human messages, timers, energy drops, wanting to explore all pass the same arbitration, none jumping the queue; second, **events can be set by the model itself** — it can decide "check stock movement in 15 minutes" or "review at 5 PM," whereas LE triggers can only be preset by humans from outside |
 | **Continuity** | "start loop → execute → destroy," discrete | A continuous lifeline across days, sessions, and identities — as long as it runs, it acts on a goal; with no goal, it explores on its own (see the Beta case below) |
 | **Human presence** | Always the loop designer / approver | Human can fully leave, woken by its own event system — life itself doesn't depend on the external; the human is not necessary in the system, and in the long run can be entirely absent |
 
@@ -68,7 +68,7 @@ There are also some organs with market counterparts, but **grown inside an organ
 
 There are other designs derived from the subject-theory — energy and routine, execution and orchestration, feedback and homeostasis... Because the design thesis differs, most components look somewhat different. Of course, for things like **skills and tools**, they're general-purpose: as long as they're callable, it doesn't matter who uses them.
 
-In short: Loop Engineering pivots on **loop**; Digital Life pivots on **life** (lifecycle + cross-session continuity + autonomous rhythm). The methods overlap (events / sub-agents / memory / tools), the intent differs — the former solves "automation," the latter solves "independence."
+In short: Loop Engineering pivots on **loop**; Digital Life pivots on **life** (lifecycle + cross-session continuity + autonomous rhythm). The methods overlap (goals / events / multi-agent collaboration), the intent differs — the former solves "automation," the latter solves "independence."
 
 📖 Deep dive:
 - [docs/design/digital-life-system-design.md](docs/design/digital-life-system-design.md) — Main system design (thesis: from tool to life)
