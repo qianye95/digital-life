@@ -66,7 +66,16 @@ def register_task_tools(
         if action == "list":
             snap = consume_energy_fn(energy_cost_per_thought)
             tasks = list_tasks()
-            return _j({"ok": True, "tasks": tasks, "energy": round(snap.energy, 1)})
+            # 待办看板可能很长（实测全量 dump 单条可达 69KB）。默认只回最近
+            # 30 条即可支撑模型决策；count 保留全部条数，避免误判「没活干」。
+            limit = int(args.get("limit") or 30)
+            total = len(tasks)
+            sliced = tasks[:limit] if limit > 0 else tasks
+            payload = {"ok": True, "count": total, "returned": len(sliced),
+                       "tasks": sliced, "energy": round(snap.energy, 1)}
+            if len(sliced) < total:
+                payload["note"] = f"仅展示最近 {len(sliced)} 条，共 {total} 条；如需更多请提高 limit"
+            return _j(payload)
 
         if action == "get":
             if not task_id:
@@ -145,7 +154,15 @@ def register_task_tools(
                 return _j({"ok": False, "reason": "query 必填"})
             snap = consume_energy_fn(energy_cost_per_thought)
             results = search_tasks(query)
-            return _j({"ok": True, "tasks": results, "energy": round(snap.energy, 1)})
+            # 搜索命中可能很多；默认只回前 20 条，保留 count 告知命中总数。
+            limit = int(args.get("limit") or 20)
+            total = len(results)
+            sliced = results[:limit] if limit > 0 else results
+            payload = {"ok": True, "count": total, "returned": len(sliced),
+                       "tasks": sliced, "energy": round(snap.energy, 1)}
+            if len(sliced) < total:
+                payload["note"] = f"仅展示前 {len(sliced)} 条命中，共 {total} 条；如需更多请提高 limit"
+            return _j(payload)
 
         return _j({"ok": False, "reason": f"未知 action: {action}"})
 
@@ -228,6 +245,10 @@ def register_task_tools(
                         "description": "对应的项目 deliverable ID（可选，用于反向引用）",
                     },
                     "query": {"type": "string", "description": "搜索关键词（search必填）"},
+                    "limit": {
+                        "type": "integer",
+                        "description": "list/search 时最多返回多少条（list 默认 30，search 默认 20）。命中数仍在 count 字段。",
+                    },
                 },
                 "required": ["action"],
             },
@@ -235,6 +256,7 @@ def register_task_tools(
         handler=_handle_task,
         check_fn=lambda: True,
         emoji="📋",
+        max_result_size_chars=8000,
     )
 
     # ── task_plan ──

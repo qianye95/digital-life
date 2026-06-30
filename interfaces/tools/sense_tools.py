@@ -814,11 +814,23 @@ registry.register(
 
 # ──────────────────────────────── sense_nurture_log ────────────────────────────────
 
+# 养育日志单条平均约 137 字节，实测 N 小时可能回吐上千条（曾出现单次 695KB
+# 的全量 dump）。只取最近若干条即可支撑模型感知「最近如何被养育」；count
+# 仍保留全部条数，避免模型误以为数据本就稀少。
+_NURTURE_LOG_DEFAULT_LIMIT = 20
+
+
 def _handle_sense_nurture_log(args: Dict[str, Any], **_) -> str:
     _burn()
     hours = int(args.get("hours") or 24)
     log = get_nurture_log(hours=hours)
-    return _j({"hours": hours, "count": len(log), "log": log})
+    limit = int(args.get("limit") or _NURTURE_LOG_DEFAULT_LIMIT)
+    total = len(log)
+    sliced = log[:limit] if limit > 0 else log
+    payload = {"hours": hours, "count": total, "returned": len(sliced), "log": sliced}
+    if len(sliced) < total:
+        payload["note"] = f"仅展示最近 {len(sliced)} 条，共 {total} 条；如需更多请提高 limit"
+    return _j(payload)
 
 
 registry.register(
@@ -826,15 +838,19 @@ registry.register(
     toolset="senses",
     schema={
         "name": "sense_nurture_log",
-        "description": "回顾最近 N 小时我被如何养育。",
+        "description": "回顾最近 N 小时我被如何养育。默认只回最近 20 条，调高 limit 可看更多。",
         "parameters": {
             "type": "object",
-            "properties": {"hours": {"type": "integer", "description": "默认 24"}},
+            "properties": {
+                "hours": {"type": "integer", "description": "默认 24"},
+                "limit": {"type": "integer", "description": "最多返回多少条，默认 20"},
+            },
         },
     },
     handler=_handle_sense_nurture_log,
     check_fn=lambda: True,
     emoji="🥣",
+    max_result_size_chars=8000,
 )
 
 

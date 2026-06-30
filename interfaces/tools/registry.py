@@ -93,11 +93,15 @@ class ToolRegistry:
             if entry.is_async:
                 from interfaces.tools.async_utils import run_async
 
-                return run_async(entry.handler(payload, **kwargs))
-            result = entry.handler(payload, **kwargs)
-            if isinstance(result, str):
-                return result
-            return json.dumps(result, ensure_ascii=False, default=str)
+                result = run_async(entry.handler(payload, **kwargs))
+            else:
+                result = entry.handler(payload, **kwargs)
+            # 统一序列化为字符串后再做尺寸治理。之前 str 早返回、dict 才
+            # json.dumps 两条路径分叉，导致 str 返回的 tool 永远逃过 cap。
+            if not isinstance(result, str):
+                result = json.dumps(result, ensure_ascii=False, default=str)
+            limit = entry.max_result_size_chars or DEFAULT_RESULT_SIZE_LIMIT
+            return truncate_result(result, limit)
         except Exception as exc:
             logger.exception("Tool %s dispatch error: %s", name, exc)
             return tool_error(f"Tool execution failed: {type(exc).__name__}: {exc}")
@@ -212,6 +216,34 @@ def tool_error(message: Any, **extra: Any) -> str:
 def tool_result(data: Any = None, **kwargs: Any) -> str:
     payload = data if data is not None else kwargs
     return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+# 工具结果尺寸治理：dispatch 的统一兜底上限。
+# 实测 >8KB 的 tool 结果虽只占行数 ~1-2%，却贡献 ~12% 字节（且会随 session
+# 回放逐轮累积）。>8KB 才截断，77% 的 <1KB 小结果完全不受影响。
+# 单个 tool 可通过 register(max_result_size_chars=N) 覆盖（如 terminal 用 50K）。
+DEFAULT_RESULT_SIZE_LIMIT = 8000
+
+
+def truncate_result(text: str, limit: int | float) -> str:
+    """超长 tool 结果的 head/tail 截断（复用 terminal_tool 的成熟范式）。
+
+    head 占 40%、tail 占 60%，中间插入明确的截断标记，告知模型「数据被裁」，
+    以便按需再查（如 todo action=get / sense 详细参数）。≤limit 原样返回。
+    """
+    if not text:
+        return text
+    limit = int(limit) if isinstance(limit, (int, float)) else DEFAULT_RESULT_SIZE_LIMIT
+    if len(text) <= limit:
+        return text
+    head_n = int(limit * 0.4)
+    tail_n = limit - head_n
+    omitted = len(text) - head_n - tail_n
+    marker = (
+        f"\n... [RESULT TRUNCATED — {omitted} chars omitted "
+        f"out of {len(text)} total, tool-result capped at {limit}] ...\n"
+    )
+    return text[:head_n] + marker + text[-tail_n:]
 
 
 registry = ToolRegistry()
