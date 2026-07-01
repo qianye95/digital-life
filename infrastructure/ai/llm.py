@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
 
 from infrastructure.ai.config import load_runtime_config, resolve_runtime_provider
+
+logger = logging.getLogger(__name__)
 
 
 def call_llm(
@@ -41,4 +44,38 @@ def call_llm(
         response = client.post(url, headers=headers, json={"model": model_name, "messages": messages})
         response.raise_for_status()
         data = response.json()
+    _record_summary_token_usage(data)
     return str(((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
+
+
+def _record_summary_token_usage(raw_response: dict[str, Any]) -> None:
+    """把摘要调用的 token 用量记进 budget_log，kind=session_summary。
+
+    历史盲区：call_llm 走独立路径（不经 agent._chat），token 从未记录，
+    导致"今日总消耗"长期漏算摘要成本。这里补回——与 _record_token_usage
+    同口径，仅 kind 不同（前端图表可拆"摘要花了多少"）。失败吞掉不阻断摘要。
+    """
+    if not raw_response:
+        return
+    usage = raw_response.get("usage") or {}
+    if not isinstance(usage, dict):
+        return
+    try:
+        in_t = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+        out_t = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+    except (ValueError, TypeError):
+        return
+    if in_t <= 0 and out_t <= 0:
+        return
+    try:
+        from infrastructure.config import get_app_instance_id
+        from infrastructure.budget import get_token_tracker
+        get_token_tracker().record(
+            instance_id=get_app_instance_id() or "",
+            input_tokens=in_t,
+            output_tokens=out_t,
+            kind="session_summary",
+        )
+    except Exception:
+        logger.debug("record summary token usage failed", exc_info=True)
+

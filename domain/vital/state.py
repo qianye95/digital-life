@@ -56,6 +56,16 @@ CREATE TABLE IF NOT EXISTS nurture_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_nurture_at ON nurture_log(at DESC);
+
+-- 精力值采样（每 cron tick ~60s 一行，供前端画精力值波动曲线：涨=自然恢复，跌=消耗）。
+-- 与 budget_log 的 occurred_at 同用 Unix 秒，便于与 token 图同时间轴叠放。
+CREATE TABLE IF NOT EXISTS vital_history (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    at           REAL NOT NULL,           -- Unix ts（秒）
+    energy       REAL NOT NULL,
+    affair_state TEXT                     -- BLOCKED/RUNNING：区分全速恢复与 30% 速率段
+);
+CREATE INDEX IF NOT EXISTS idx_vital_history_at ON vital_history(at DESC);
 """
 
 
@@ -122,7 +132,7 @@ def get_current_vitals(state: str = "BLOCKED", persist: bool = False) -> VitalSn
     if not row:
         snap = VitalSnapshot(energy=70.0, updated_at=now_iso(), last_activity_at=now_iso())
         if persist:
-            _persist_snapshot_for_tick(snap)
+            _persist_snapshot_for_tick(snap, affair_state=state)
         return snap
 
     keys = row.keys()
@@ -137,16 +147,33 @@ def get_current_vitals(state: str = "BLOCKED", persist: bool = False) -> VitalSn
     # tick 路径:落盘 energy 并推进 updated_at 到 now(下次 tick 从此计 elapsed)。
     # 不动 last_activity_at(那是 initiative 的锚,只在 consume/nurture/touch 时推进)。
     if persist and abs(recovered.energy - base.energy) > 0.01:
-        _persist_snapshot_for_tick(recovered)
+        _persist_snapshot_for_tick(recovered, affair_state=state)
+    elif persist:
+        # 即使没有恢复量变化（已达上限等），tick 也采样一行 —— 让曲线连续不断点。
+        _persist_snapshot_for_tick(recovered, affair_state=state)
 
     return recovered
 
 
-def _persist_snapshot_for_tick(snap: VitalSnapshot) -> None:
-    """tick 路径专用:推进 updated_at 到 now,不碰 last_activity_at。"""
+def _persist_snapshot_for_tick(snap: VitalSnapshot, *, affair_state: str = "") -> None:
+    """tick 路径专用:推进 updated_at 到 now,不碰 last_activity_at。
+
+    同时向 vital_history 表追加一行采样（供前端画精力值波动曲线）。
+    采样仅在 persist=True 的 tick 路径触发，API 读路径不污染历史。
+    """
+    import time as _time
+    now_unix = _time.time()
     with _conn() as c:
         c.execute("UPDATE vitals SET energy=?, updated_at=? WHERE id=1",
                   (snap.energy, now_iso()))
+        # 采样历史：失败不影响 tick 主路径（best-effort）。
+        try:
+            c.execute(
+                "INSERT INTO vital_history (at, energy, affair_state) VALUES (?, ?, ?)",
+                (now_unix, snap.energy, affair_state),
+            )
+        except Exception:
+            pass
 
 
 def touch_activity() -> None:
@@ -217,6 +244,30 @@ def recent_nurture_log(hours: int = 24) -> List[Dict]:
             "deltas": _json.loads(r["deltas_json"]),
             "raw_text": r["raw_text"] or "",
             "source": r["source"] or "",
+        }
+        for r in rows
+    ]
+
+
+def vital_history_series(hours: int = 24) -> List[Dict]:
+    """读近 N 小时的精力采样序列（供前端精力值波动曲线：涨=恢复,跌=消耗）。
+
+    返回按时间升序（旧→新）的 [at_iso, energy, affair_state] 列表。
+    """
+    import time as _time
+    init_vitals_db()
+    since_unix = _time.time() - hours * 3600
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT at, energy, affair_state FROM vital_history "
+            "WHERE at >= ? ORDER BY at ASC",
+            (since_unix,),
+        ).fetchall()
+    return [
+        {
+            "at_unix": r["at"],
+            "energy": r["energy"],
+            "affair_state": r["affair_state"] or "",
         }
         for r in rows
     ]

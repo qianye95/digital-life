@@ -141,5 +141,7 @@ export const instanceApi = (iid) => ({
   wakeDetail:    (wakeId) => api.get(`/api/employee/${iid}/wakes/${wakeId}`),
   wakeCallInput: (wakeId, callSeq) => api.get(`/api/employee/${iid}/wakes/${wakeId}/input/${callSeq}`),
   budget:        () => api.get(`/api/employee/${iid}/budget`),
+  budgetSeries:  (hours = 24, bucket = 'hour') => api.get(`/api/employee/${iid}/budget/series`, { hours, bucket }),
+  vitalsSeries:  (hours = 24) => api.get(`/api/employee/${iid}/vitals/series`, { hours }),
   events:        () => api.get(`/api/employee/${iid}/events`),
 })

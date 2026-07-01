@@ -350,6 +350,19 @@ class AIAgent:
                     # 这让同 key 的其它实例子进程（cron & _wake_or_inject）下次能读到熔断
                     # 状态而停止打 API，把账号级限流从"每实例各自撞墙"变成"一起暂停"。
                     self._trip_circuit_breaker(e.response)
+                    # 记一笔 429 时序点（token 不计，前端按 kind=llm_call_429 计次数）。
+                    # 每次撞墙都记（连同重试），反映真实限流压力。失败吞掉不阻断重试链。
+                    try:
+                        from infrastructure.budget.token_tracker import get_token_tracker
+                        from infrastructure.config import get_app_instance_id
+                        get_token_tracker().record(
+                            instance_id=get_app_instance_id() or "",
+                            input_tokens=0, output_tokens=0, total_tokens=0,
+                            session_id=self.session_id or "",
+                            kind="llm_call_429",
+                        )
+                    except Exception:
+                        pass
                     if retry_429_attempts < MAX_429_RETRIES:
                         retry_429_attempts += 1
                         # 优先尊重 Retry-After 头（秒）。GLM 实际不一定带，给默认值兜底。

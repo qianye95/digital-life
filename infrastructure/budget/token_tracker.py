@@ -55,6 +55,11 @@ CREATE INDEX IF NOT EXISTS idx_budget_log_instance_time
 """
 
 
+# 即使 token=0 也写入的 kind 集合（用于按 kind 计事件次数，如 429 频次图）。
+# total=0 不会影响 SUM(total_tokens)，只是为 COUNT(*) 提供时序点。
+_EVENT_KINDS = {"llm_call_429"}
+
+
 def _beijing_now() -> datetime:
     """北京时间当前时刻。Token 预算按北京时间"今天 00:00 → 明天 00:00"切。"""
     return datetime.now(timezone(timedelta(hours=8)))
@@ -120,9 +125,15 @@ class TokenUsageTracker:
         传入的 input_tokens/output_tokens 直接来自 LLM API 的 usage 字段。
         total_tokens 自动算 (input + output)；模型若返回 total_tokens 也直接
         用也行（本实现优先 input+output 之和，兼容 GLM/OpenAI）。
+
+        零 token 事件（如 kind=llm_call_429）也写一行 —— 用于按 kind 计次数，
+        total_tokens=0 不会影响 SUM。其它零 token 默认 kind 仍 early-return。
         """
-        if input_tokens <= 0 and output_tokens <= 0:
-            return  # 没数据，不记
+        # 零 token 且非"事件类 kind" → 视为无数据不写。
+        # 事件类 kind（_event_kinds）即使 token=0 也记，用于前端按 kind 计次数。
+        is_event_kind = kind in _EVENT_KINDS
+        if input_tokens <= 0 and output_tokens <= 0 and not is_event_kind:
+            return
         total = input_tokens + output_tokens
         ts = occurred_at if occurred_at is not None else time.time()
         try:
@@ -174,6 +185,73 @@ class TokenUsageTracker:
         """最近 N 分钟累计 token。"""
         since = time.time() - n * 60
         return self._sum_since(since, instance_id)
+
+    def usage_series(
+        self,
+        *,
+        hours: int = 24,
+        bucket: str = "hour",
+        instance_id: str = "",
+    ) -> list[dict]:
+        """按时间桶聚合近 N 小时的 token 用量明细（给前端图表）。
+
+        返回每个桶的小计，已按 kind 透视成两路：
+          - 主调用 (llm_call) 的 input/output/total
+          - 摘要 (session_summary) 的 input/output/total
+          - 429 次数 (count_429)
+        bucket: 'hour'（默认）/ 'day' / 'minute'。
+        桶时间戳按北京时间切（与 usage_today 同口径）。
+        """
+        bucket_fmt = {
+            "hour": "%Y-%m-%dT%H:00",
+            "day": "%Y-%m-%d",
+            "minute": "%Y-%m-%dT%H:%M",
+        }.get(bucket, "%Y-%m-%dT%H:00")
+        since = time.time() - hours * 3600
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        strftime(?, occurred_at, 'unixepoch', '+8 hours') AS b,
+                        kind,
+                        COALESCE(SUM(input_tokens), 0)  AS s_in,
+                        COALESCE(SUM(output_tokens), 0) AS s_out,
+                        COALESCE(SUM(total_tokens), 0)  AS s_tot,
+                        COUNT(*) AS cnt
+                    FROM budget_log
+                    WHERE occurred_at >= ? AND (? = '' OR instance_id = ?)
+                    GROUP BY b, kind
+                    ORDER BY b ASC
+                    """,
+                    (bucket_fmt, since, instance_id, instance_id),
+                ).fetchall()
+        except Exception as exc:
+            logger.debug("budget_log usage_series failed: %s", exc)
+            return []
+
+        # 按 bucket 聚合两路 kind
+        buckets: dict[str, dict] = {}
+        for r in rows:
+            b = r["b"]
+            bk = buckets.setdefault(b, {
+                "at_iso": b,
+                "input": 0, "output": 0, "total": 0,
+                "input_summary": 0, "output_summary": 0, "total_summary": 0,
+                "count_429": 0,
+            })
+            kind = r["kind"] or "llm_call"
+            if kind == "llm_call_429":
+                bk["count_429"] += int(r["cnt"])
+            elif kind == "session_summary":
+                bk["input_summary"] += int(r["s_in"])
+                bk["output_summary"] += int(r["s_out"])
+                bk["total_summary"] += int(r["s_tot"])
+            else:  # llm_call 及其它默认归主调用
+                bk["input"] += int(r["s_in"])
+                bk["output"] += int(r["s_out"])
+                bk["total"] += int(r["s_tot"])
+        return list(buckets.values())
 
     def hour_resets_at(self) -> str:
         """下个小时开端（北京时），ISO 字符串。前端展示"重置于 ..."用。"""
