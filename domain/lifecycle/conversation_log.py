@@ -26,7 +26,7 @@ def _ensure_table() -> sqlite3.Connection:
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS conversation_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            platform TEXT NOT NULL DEFAULT 'lark',
+            platform TEXT NOT NULL DEFAULT 'feishu',
             conversation_id TEXT NOT NULL,
             chat_type TEXT NOT NULL DEFAULT 'dm',
             direction TEXT NOT NULL,

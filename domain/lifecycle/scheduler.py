@@ -765,10 +765,11 @@ def _wake_digital_life_inner_safe(
             # Primary source: explicit chat_id field (group_message / message).
             _wake_chat_id = payload.get("chat_id") or ""
             # Fallback: awaiting_reply 类无 chat_id 但有 channel
-            # 形如 "lark:dm:oc_xxx" / "lark:group:oc_xxx" → 抽尾部 oc_xxx
+            # 形如 "feishu:dm:oc_xxx" / "lark:group:oc_xxx" → 抽尾部 oc_xxx
+            # （同时认现用 feishu: 与历史存量 lark: 前缀）
             if not _wake_chat_id:
                 chan = payload.get("channel") or ""
-                if chan.startswith("lark:"):
+                if chan.startswith(("feishu:", "lark:")):
                     parts = chan.split(":", 2)
                     if len(parts) >= 3 and parts[2].startswith("oc_"):
                         _wake_chat_id = parts[2]
@@ -1146,6 +1147,21 @@ def _wake_digital_life_inner_safe(
         except Exception as exc:
             logger.debug("social_context inject failed: %s", exc)
 
+        # schedule: 近期日程 + 每日作息 + 精力恢复说明，让模型无需主动调 sense_schedule
+        # 就能预判后续安排（每条闹钟带 id，方便 rest 时 reuse）。
+        try:
+            from domain.lifecycle.alarms import get_schedule_overview, format_schedule_for_human
+            _sched_overview = get_schedule_overview(days_ahead=7)
+            _sched_body = format_schedule_for_human(_sched_overview).strip()
+            if _sched_body:
+                prev_history.append({
+                    "role": "user",
+                    "content": _sched_body,
+                    "_sys_tool": "schedule",
+                })
+        except Exception as exc:
+            logger.debug("schedule inject failed: %s", exc)
+
         # task_skill: 当前 in_progress task 的 type → 对应 skill 注入 prompt
         # P2: task 带 type，type 有对应 skill 文件 → 读取内容注入
         try:
@@ -1256,6 +1272,13 @@ def _wake_digital_life_inner_safe(
                         "Injected chat_stream: %d msgs from chat %s",
                         len(msgs), _wake_chat_id[:16],
                     )
+                    # 系统已把 _wake_chat_id 的近期流水展示给模型 → 登记为「本 session 已查看」，
+                    # 供 express_to_human 发送前校验「目标通道是否看过」（channel_views 账本）。
+                    try:
+                        from domain.lifecycle.channel_views import mark_channel_viewed
+                        mark_channel_viewed(_wake_chat_id)
+                    except Exception:
+                        logger.debug("channel_views mark failed for chat %s", _wake_chat_id[:16], exc_info=True)
             except Exception as exc:
                 logger.debug("chat_stream injection failed: %s", exc)
 

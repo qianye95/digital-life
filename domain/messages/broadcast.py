@@ -46,7 +46,7 @@ class Peer:
 @dataclass
 class Subscription:
     chat_id: str
-    platform: str = "lark"
+    platform: str = "feishu"
     peers: list[Peer] = field(default_factory=list)
     name: str = ""  # 群名(可选)
 
@@ -77,7 +77,7 @@ def load_subscriptions(instance_id: str) -> dict[str, Subscription]:
         ]
         out[chat_id] = Subscription(
             chat_id=chat_id,
-            platform=cfg.get("platform") or "lark",
+            platform=cfg.get("platform") or "feishu",
             peers=peers,
             name=cfg.get("name") or "",
         )
@@ -152,7 +152,7 @@ def sync_subscriptions_from_registry() -> None:
                 cur[chat_id].peers = peers
                 changed = True
             else:
-                cur[chat_id] = Subscription(chat_id=chat_id, platform="lark",
+                cur[chat_id] = Subscription(chat_id=chat_id, platform="feishu",
                                             peers=peers, name="")
                 changed = True
         if changed:
@@ -357,7 +357,7 @@ def receive_broadcast(payload: dict) -> dict:
                     text=text,
                     msg_ref=msg_ref if msg_ref else
                         f"broadcast_{from_instance_id[:8]}_{int(time.time()*1000)}",
-                    source_platform=payload.get("source_platform") or "lark",
+                    source_platform=payload.get("source_platform") or "feishu",
                     instance_id=peer_iid,  # 显式:绕过默认值
                 )
             except Exception as exc:

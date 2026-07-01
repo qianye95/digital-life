@@ -302,8 +302,16 @@ def format_schedule_for_human(overview: Dict[str, Any]) -> str:
     recurring = overview.get("recurring", [])
     next_wake = overview.get("next_wake")
 
+    # 精力恢复说明：定性表达（不精确算时间），让模型知道休息后不只有固定闹钟会叫醒，
+    # 精力恢复到阈值 + 空闲足够也会以 initiative 形式自然苏醒。两条返回路径都带这段。
+    vital_hint = (
+        "🌱 **精力恢复**\n"
+        "  · 休息时精力会慢慢恢复，大致 1-2 小时后会以「主动探索」形式自然苏醒，"
+        "可能比闹钟更早醒来"
+    )
+
     if not alarms and not recurring:
-        return "📅 近期没有任何已注册的闹钟或作息。"
+        return f"📅 近期没有任何已注册的闹钟或作息。\n\n{vital_hint}"
 
     parts = []
 
@@ -321,7 +329,11 @@ def format_schedule_for_human(overview: Dict[str, Any]) -> str:
         fire_date = fire_dt.date()
         fire_h = fire_dt.hour
 
-        key = f'{fire_dt.strftime("%H:%M")} → {a["reason"] or a["event_kind"]}'
+        # 渲染每条闹钟时带 id（#<id>）——rest 工具 reuse 入参需要这个 id，
+        # 让模型无需再调 sense_schedule 就能在休息时复用现有闹钟。
+        alarm_id = a.get("id")
+        id_tag = f" (#{alarm_id})" if alarm_id else ""
+        key = f'{fire_dt.strftime("%H:%M")} → {a["reason"] or a["event_kind"]}{id_tag}'
 
         if fire_date == today_date:
             if fire_h >= 20 or fire_h < 4:
@@ -370,5 +382,8 @@ def format_schedule_for_human(overview: Dict[str, Any]) -> str:
             parts.insert(0, f"⏰ 最近唤醒：{next_dt.strftime('%H:%M')}（{rel_str}）")
         except Exception:
             pass
+
+    # 精力恢复说明放在最后（在作息、next_wake 之后），作为通用提示。
+    parts.append(vital_hint)
 
     return "\n".join(parts)

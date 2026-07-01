@@ -38,7 +38,7 @@ def render_social_context(instance_id: str) -> str:
         def _channel_ids(c: dict) -> list[str]:
             """提取联系人**所有平台**的可达 ID（带通道前缀）。
 
-            返回例：["lark:ou_eb5083eb...", "wechat:zhp@im.wechat..."]
+            返回例：["feishu:ou_eb5083eb...", "wechat:zhp@im.wechat..."]
             ⚠️ 完整 ID 必须保留——模型会原样填回 express_to_human(channel=...)。
                任何截断都会让模型拿到无法发送的废字符串。
             """
@@ -49,7 +49,7 @@ def render_social_context(instance_id: str) -> str:
                 if not pid:
                     continue
                 if pf == "feishu":
-                    out.append(f"lark:{pid}")
+                    out.append(f"feishu:{pid}")
                 elif pf == "wechat":
                     out.append(f"wechat:{pid}")
                 else:
@@ -58,7 +58,7 @@ def render_social_context(instance_id: str) -> str:
 
         if humans:
             lines.append("\n联系人（人类），回复时按平台填 channel：")
-            lines.append("  格式：lark:dm:<ou_xxx>（飞书私聊）/ lark:group:<oc_xxx>（飞书群）/ wechat:dm:<xxx@im.wechat>（微信）")
+            lines.append("  格式：feishu:dm:<ou_xxx>（飞书私聊）/ feishu:group:<oc_xxx>（飞书群）/ wechat:dm:<xxx@im.wechat>（微信）")
             for c in humans:
                 ids = _channel_ids(c)
                 name = (c.get("name") or "").strip()
@@ -83,12 +83,12 @@ def render_social_context(instance_id: str) -> str:
         chats = _collect_known_chats(instance_id)
         if chats:
             lines.append("\n参与的群，回复时按平台填 channel：")
-            lines.append("  格式：lark:group:<oc_xxx>（飞书群）/ wechat:group:<group_id>（微信群，ClawBot 暂不支持群）")
+            lines.append("  格式：feishu:group:<oc_xxx>（飞书群）/ wechat:group:<group_id>（微信群，ClawBot 暂不支持群）")
             for cid, name in chats.items():
                 name_display = name or "(未命名群)"
                 # 标注平台（飞书 oc_ / 微信 @im）— 完整 cid 保留
                 if cid.startswith("oc_"):
-                    lines.append(f"  · {name_display}（lark:{cid}）")
+                    lines.append(f"  · {name_display}（feishu:{cid}）")
                 elif "@im" in cid:
                     lines.append(f"  · {name_display}（wechat:{cid}）")
                 else:

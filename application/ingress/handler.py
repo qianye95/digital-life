@@ -281,7 +281,9 @@ def _route_to_life(
         inbound_channel = None
         if chat_id:
             kind = "group" if is_group else "dm"
-            _prefix = "lark" if platform == "feishu" else platform  # wechat → wechat, feishu → lark
+            # 平台前缀：feishu→feishu（旧版曾归一为 lark，现已统一更直观的 feishu；
+            # 读侧 cancel_alarms/scheduler 同时认 feishu: 与存量 lark:）。
+            _prefix = "feishu" if platform == "feishu" else platform
             inbound_channel = f"{_prefix}:{kind}:{chat_id}"
 
         # 2) 按通道精确取消
@@ -513,8 +515,8 @@ def _emit_l4_human_event(
     调用是个伪调用。精力只通过两个通道影响：consume_energy(agent LLM call）
     和 nurture_energy(前端加鸡腿）。
     """
-    # 平台前缀（source/channel 用）：feishu → lark, 其它 → platform 本身
-    pf = "lark" if platform == "feishu" else platform
+    # 平台前缀（source/channel 用）：feishu→feishu（旧版曾归一为 lark，现在统一直观）
+    pf = "feishu" if platform == "feishu" else platform
 
     # 已废弃的精力入站钩子残留——前置版本会在这里调 apply_nurture(parse_message(text))
     # 得到 kinds/deltas，但精力系统重构后这个调用被判定为"伪调用"删掉了。

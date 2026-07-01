@@ -29,15 +29,19 @@ def check_before_send(
     text: str,
     *,
     session_id: str = "",
+    target_chat_id: str = "",
 ) -> dict[str, Any] | None:
-    """发送前拦截核心——检查是否有未消费的人类消息需先展示给模型。
+    """发送前拦截核心——两道独立关卡，命中任一即拦截。
 
-    核心问题：是否有模型还没看到的人类/群消息？
+    关卡一（原有）：是否有模型还没看到的人类/群消息？
+      有未读 → 拦截，加载当前事件来源 chat 的近期流水让模型重写。
+    关卡二（新增）：目标通道 chat_id 是否被本 session 查看过？
+      未查看 → 拦截，加载【目标通道】的近期流水让模型先看再发。
+      （覆盖 BUG #1：timer/主动 wake 凭 stale reply-context 盲发未看过的通道）
 
-    有未读消息 → 拦截，加载最近几轮对话历史让模型自己重新组织回复
-    无未读消息 → 放行（return None），允许直接发送
+    两关都过 → return None 放行。
 
-    consume_event() 是唯一的消费入口，被拦截事件写入 consumed_at + consumed_by_session_id。
+    consume_event() 是关卡一事件消费的唯一入口。
     """
     unread: list[dict[str, Any]] = []
     seen_ids: set[int] = set()
@@ -92,7 +96,8 @@ def check_before_send(
         pass
 
     if not unread:
-        return None
+        # 关卡一通过。在放行前，先过关卡二：目标通道是否被本 session 查看过。
+        return _check_target_channel_viewed(target_chat_id, session_id=session_id)
 
     # Consume discovered events — single consumption entry point.
     # After this, consumed_at + consumed_by_session_id are set in DB.
@@ -138,13 +143,60 @@ def check_before_send(
 # ---------------------------------------------------------------------------
 
 
-def _build_recent_chat_log() -> str | None:
-    """构建当前 chat 的最近 10 条对话流水，仿 sense_conversation。"""
+def _check_target_channel_viewed(
+    target_chat_id: str,
+    *,
+    session_id: str = "",
+) -> dict[str, Any] | None:
+    """关卡二：目标通道是否被本 session 查看过。
+
+    未查看 → 拦截，加载【目标通道】的近期流水（而非事件来源 chat），
+    并登记已查看避免模型重发时被同一道关卡循环拦。
+    已查看 / 目标为空 / 账本不可用 → return None 放行。
+    """
+    if not target_chat_id:
+        return None
     try:
-        from domain.lifecycle.runtime_context import get_current_event_chat_id
-        chat_id = get_current_event_chat_id() or ""
+        from domain.lifecycle.channel_views import has_viewed_channel, mark_channel_viewed
+        if has_viewed_channel(target_chat_id, session_id=session_id):
+            return None
+        viewed = False
     except Exception:
-        chat_id = ""
+        # 账本不可用时不应阻塞发送（fail-open）。
+        return None
+
+    recent_chat_log = _build_recent_chat_log(target_chat_id)
+    # 补完后立即登记，避免同一 session 重发被循环拦截。
+    try:
+        mark_channel_viewed(target_chat_id, session_id=session_id)
+        viewed = True
+    except Exception:
+        pass
+
+    response: dict[str, Any] = {
+        "sent": False,
+        "result_summary": (
+            f"你正要发消息到通道 {target_chat_id[:20]}，但本会话还没看过它的近期对话。"
+            "为避免你的发言脱离上下文，请先看一遍下面这份该通道的对话历史，"
+            "然后重新组织你的发言再发一次。"
+        ),
+        "recent_chat_log": recent_chat_log or "（该通道暂无可用历史，可能是新通道——你可以在确认后重发。）",
+    }
+    _ = viewed  # 仅供调试/可读，登记失败也已尽力补历史
+    return response
+
+
+def _build_recent_chat_log(chat_id: str = "") -> str | None:
+    """构建指定通道的最近 10 条对话流水，仿 sense_conversation。
+
+    chat_id 为空时回退到当前事件来源 chat（向后兼容旧调用）。
+    """
+    if not chat_id:
+        try:
+            from domain.lifecycle.runtime_context import get_current_event_chat_id
+            chat_id = get_current_event_chat_id() or ""
+        except Exception:
+            chat_id = ""
     if not chat_id:
         return None
     try:

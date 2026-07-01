@@ -86,7 +86,7 @@ def _list_contact_candidates() -> list[dict]:
                 if not pid:
                     continue
                 if pf == "feishu":
-                    prefix = "lark"
+                    prefix = "feishu"
                 elif pf == "wechat":
                     prefix = "wechat"
                 else:
@@ -104,7 +104,7 @@ def _list_contact_candidates() -> list[dict]:
         iid = _get_iid() or ""
         if iid:
             for cid, cname in (_collect_known_chats(iid) or {}).items():
-                prefix = "lark" if cid.startswith("oc_") else ("wechat" if "@im" in cid else "lark")
+                prefix = "feishu" if cid.startswith("oc_") else ("wechat" if "@im" in cid else "feishu")
                 out.append({"name": cname or "群", "channel": f"{prefix}:group:{cid}"})
     except Exception:
         pass
@@ -112,11 +112,14 @@ def _list_contact_candidates() -> list[dict]:
 
 
 def _get_runtime_channel_prefix() -> str:
-    """返回当前事件来源的平台前缀（feishu→lark / wechat→wechat）。
+    """返回当前事件来源的平台前缀（feishu / wechat / 默认 feishu）。
 
     用于 express_to_human 合成默认 channel 字符串——决定走飞书还是微信发送路径。
-    优先级：runtime_context ContextVar > _REPLY_CONTEXT 全局 dict > 默认 lark。
+    优先级：runtime_context ContextVar > _REPLY_CONTEXT 全局 dict > 默认 feishu。
     （_REPLY_CONTEXT 用于跨线程可见；to_thread 里 set 的 ContextVar 主线程看不到）
+
+    旧版本归一为内部代号 "lark"，现已统一为更直观的 "feishu"。
+    读侧需同时认 "feishu" 与历史存量 "lark"。
     """
     try:
         from domain.lifecycle.runtime_context import get_current_event_platform
@@ -136,10 +139,53 @@ def _get_runtime_channel_prefix() -> str:
             ctx = _REPLY_CONTEXT.get(_iid) or {}
             pf2 = str(ctx.get("platform") or "").strip()
             if pf2:
-                return "lark" if pf2 in ("feishu", "lark") else pf2
+                return "feishu" if pf2 in ("feishu", "lark") else pf2
     except Exception:
         pass
-    return "lark"
+    return "feishu"
+
+
+_FEISHU_PREFIXES = ("feishu:", "lark:")
+
+
+def _is_feishu_channel(channel: str) -> bool:
+    """判定是否飞书发送路径——同时认 feishu 与历史遗留 lark 前缀。"""
+    return channel.startswith(_FEISHU_PREFIXES)
+
+
+def _channel_kind(channel: str) -> str:
+    """从 channel 提取 kind 段（feishu:<kind>:<id> 中的 <kind>）。无前缀返回 ""。"""
+    if not _is_feishu_channel(channel) or channel.count(":") < 2:
+        return ""
+    return channel.split(":", 2)[1]
+
+
+def _channel_has_prefix(channel: str, kind: str) -> bool:
+    """channel 是否形如 <pf>:<kind>:... （pf = feishu 或 lark）。
+
+    kind 应含尾部冒号，如 'group:' / 'dm:'。
+    """
+    return any(
+        channel.startswith(f"{pf}{kind}")
+        for pf in _FEISHU_PREFIXES
+    )
+
+
+def _strip_feishu_prefix(channel: str, *, kind: str) -> str:
+    """剥离飞书平台前缀 + kind 段，返回剩余 id 段。
+
+    kind 应含尾部冒号（'group:' / 'dm:'）。同时认 feishu/lark 前缀。
+    """
+    for pf in _FEISHU_PREFIXES:
+        marker = f"{pf}{kind}"
+        if channel.startswith(marker):
+            return channel[len(marker):]
+    return channel
+
+
+def _channel_has_raw_suffix(channel: str, suffix: str) -> bool:
+    """channel 是否形如 <pf>:<suffix>（如 feishu:oc_xxx）——用于 reply context 直接匹配。"""
+    return channel.endswith(suffix) and _is_feishu_channel(channel) and channel.count(":") == 1
 
 
 def _resolve_chat_id(short_or_full: str) -> str:
@@ -424,29 +470,30 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
     # 不再强制覆盖模型意图（移除原 is_group_wake force channel 逻辑）
 
     # 补全是通用机制：channel 形式里嵌入的短码 ID 也要补全（之前只有 chat_id 参数走补全，
-    # 模型写 lark:dm:ou_eb5083… 时短码会被原样发给飞书触发 invalid receive_id）。
-    # 形如 lark:<kind>:<id> → 取 <id> 过 _resolve_chat_id，重组回去。
-    if channel.startswith("lark:") and channel.count(":") >= 2:
+    # 模型写 feishu:dm:ou_eb5083… 时短码会被原样发给飞书触发 invalid receive_id）。
+    # 形如 <平台>:<kind>:<id> → 取 <id> 过 _resolve_chat_id，重组回 feishu: 前缀
+    # （同时认历史遗留的 lark: 前缀，归一输出统一用 feishu:）。
+    if _is_feishu_channel(channel) and channel.count(":") >= 2:
         _parts = channel.split(":", 2)
-        _prefix, _id = f"lark:{_parts[1]}:", _parts[2].strip()
+        _id = _parts[2].strip()
         if _id:
-            channel = _prefix + _resolve_chat_id(_id)
+            channel = f"feishu:{_parts[1]}:" + _resolve_chat_id(_id)
 
     if chat_id_arg:
         # 模型可能传 prompt 显示的短码（如 oc_5ff7967bf5…），还原为完整 ID
         chat_id_arg = _resolve_chat_id(chat_id_arg)
-        try:
-            from domain.lifecycle.runtime_context import get_current_wake_reason
-            wr = get_current_wake_reason()
-        except Exception:
-            wr = ""
+        # kind 由 ID 前缀派生（取代旧版按 wake_reason 推断）：
+        #   ou_ → dm（私聊对方 open_id）
+        #   oc_ → group（群/会话 chat_id）
+        #   on_ → dm（union_id，少见，按私聊处理）
+        # 显式 kind 参数仍尊重（向后兼容），否则按 ID 前缀判断。
         explicit_kind = (args.get("kind") or "").strip().lower()
         if explicit_kind in ("group", "dm"):
             kind_str = explicit_kind
-        elif wr == "group_message":
+        elif chat_id_arg.startswith("oc_"):
             kind_str = "group"
         else:
-            kind_str = "dm"
+            kind_str = "dm"  # ou_/on_/其他都按私聊
         _pf = _get_runtime_channel_prefix()
         channel = f"{_pf}:{kind_str}:{chat_id_arg}"
     elif not channel:
@@ -457,11 +504,6 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
         except Exception:
             curr_chat = ""
         if curr_chat:
-            try:
-                from domain.lifecycle.runtime_context import get_current_wake_reason
-                wr = get_current_wake_reason()
-            except Exception:
-                wr = ""
             # 显式 kind=dm + 用 fallback chat：如果 fallback chat 是 oc_ 开头
             # （群 chat_id，不是真实 ou_ open_id），不能伪装成 dm 发——飞书会拒。
             # 这种 case 给模型明确错误，避免"被 dm 套前缀后 sanitize 又改回 group"
@@ -473,61 +515,25 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
                     "channel": "",
                     "text": text,
                     "error": (
-                        "你显式要求 kind=dm，但当前 wake 没有 DM 上下文（current_event_chat_id 是 group chat "
-                        f"{curr_chat[:16]}…）。要么去掉 kind 让系统按 wake 上下文发，要么显式 chat_id=ou_xxx。"
+                        "你显式要求 kind=dm，但 current_event_chat_id 是 group chat "
+                        f"{curr_chat[:16]}…。要么去掉 kind 让系统按 ID 前缀发，要么显式 chat_id=ou_xxx。"
                     ),
                 })
-            kind_str = "group" if (curr_chat.startswith("oc_") or wr == "group_message") else "dm"
+            # kind 由 fallback chat_id 前缀派生（取代旧版读 wake_reason 判断）
+            kind_str = "group" if curr_chat.startswith("oc_") else "dm"
             _pf = _get_runtime_channel_prefix()
             channel = f"{_pf}:{kind_str}:{curr_chat}"
         else:
             _pf = _get_runtime_channel_prefix()
             channel = f"{_pf}:default"
-    # 模型给出 channel 直接保留，比如 "lark:group:oc_xxx" 或 "lark:dm:ou_xxx" 即可
+    # 模型给出 channel 直接保留，比如 "feishu:group:oc_xxx" 或 "feishu:dm:ou_xxx" 即可
 
-    # 发送前上下文检查：mid-session 新消息 / 主动发言历史回顾
     session_id = str(context.get("session_id") or "")
-    try:
-        from domain.lifecycle.communication import check_before_send
-        block = check_before_send(text, session_id=session_id)
-        if block:
-            return _j(block)
-    except Exception:
-        pass
 
-    # 如果有群聊回复上下文（仅作为 initiative wake 时的兜底）
-    global _GROUP_REPLY_CHAT_ID
-    group_chat_id = _get_group_reply_chat_id() or _get_recent_group_chat_id()
-
-    # 从 contacts 表找 group 联系人作为 fallback（initiative / timer 触发时无 reply context）
-    if not group_chat_id:
-        try:
-            from domain.contacts import list_contacts
-            for c in list_contacts() or []:
-                if c.get("kind") != "group":
-                    continue
-                for p in (c.get("platform_ids") or []):
-                    if p.get("platform") == "feishu":
-                        pid = (p.get("platform_id") or "").strip()
-                        if pid.startswith("oc_"):
-                            group_chat_id = pid
-                            logger.info("express_to_human: group fallback from contacts: %s (%s)",
-                                        c.get("name", ""), pid[:16] + "...")
-                            break
-                if group_chat_id:
-                    break
-        except Exception:
-            pass
-
-    # 注意：移除了"is_group_wake force channel"自动覆盖逻辑。
-    # 现在 channel/chat_id 已在前面解析完成，模型自主决策回复目标。
-    # 仅当 channel 仍是默认值时（initiative / 模型未指定）才用 group context 兜底。
+    # 通道兜底（仅限 wake 入口显式设置的 reply context；不再从 contacts 表「猜」群）。
+    # 设计原则：目标通道必须明确。reply context 是 wake 根据 reason 正确 set 的上下文，
+    # 属合法兜底；contacts 表自动挑一个群属于无依据猜测（曾导致发错通道），已移除。
     _default_markers = ("lark:default", "feishu:default", "wechat:default")
-    if group_chat_id and channel in _default_markers:
-        channel = f"{_pf}:group:{group_chat_id}"
-        logger.info("express_to_human: initiative fallback → group context, channel=%s", channel)
-
-    # 没有显式目标时，退化到当前 wake 的回复上下文（DM/group），仍找不到就显式失败。
     if channel in _default_markers:
         _dm = _get_dm_reply_chat_id()
         _grp = _get_group_reply_chat_id()
@@ -536,18 +542,34 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
         elif _grp:
             channel = f"{_pf}:{_grp}"
         else:
-            # 报错时列出可用联系人/群候选
+            # 兜底仍拿不到目标 → 显式拒绝，引导模型主动查 ID（不让系统盲猜发错通道）。
             _candidates = _list_contact_candidates()
             return _j({
                 "sent": False,
                 "channel": f"{_pf}:default",
                 "text": text,
                 "error": (
-                    "你没有指定发给谁（chat_id 必填），且这次唤醒也没有回复上下文。"
-                    "请填写 channel 或 chat_id 后重试。"
+                    "你没有指定发给谁，且本次唤醒也没有明确的回复上下文。"
+                    "请显式传 chat_id（oc_xxx 群 / ou_xxx 私聊），或先调 sense_contacts 按名字查到 ID 再发。"
                 ),
                 "candidates": _candidates,
             })
+
+    # ── 发送前校验（通道已 100% 确定，此刻执行顺序：先未读消息，再目标通道是否查看过）──
+    # 从已解析 channel 反解目标 chat_id（形如 lark:group:oc_xxx → oc_xxx）。
+    target_chat_id = ""
+    try:
+        if channel.count(":") >= 2 and not channel.split(":", 2)[2].strip().lower() == "default":
+            target_chat_id = channel.split(":", 2)[2].strip()
+    except Exception:
+        target_chat_id = ""
+    try:
+        from domain.lifecycle.communication import check_before_send
+        block = check_before_send(text, session_id=session_id, target_chat_id=target_chat_id)
+        if block:
+            return _j(block)
+    except Exception:
+        pass
 
     # ── WeChat (ClawBot) 发送路径 —— 按 channel 前缀分发 ──
     if channel.startswith("wechat:"):
@@ -616,37 +638,38 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
                     token = tr.json().get("tenant_access_token", "")
                     if not token:
                         return False, "failed to get token"
-                    # 由 channel 决定发送目标：
-                    #   - lark:group:<chat_id> 或 lark:<group_chat_id>（_GROUP_REPLY_CHAT_ID 命中）→ 群聊
-                    #   - lark:dm:<open_id (ou_)>                            → 私聊（按 open_id）
-                    #   - lark:dm:<chat_id (oc_)>    ← 模型经常误写 dm 前缀但 target 是群 chat_id
-                    #                                  → 重写成 group 路径，按 chat_id 发到群
-                    #   - lark:<chat_id (oc_)>                                → 群聊（按 chat_id 直发）
-                    #   - 兜底：FEISHU_ALLOWED_USERS 第一个 open_id            → 私聊
+                    # 由 channel 决定发送目标（channel 前缀 feishu: 或历史遗留 lark: 均识别）：
+                    #   - <pf>:group:<chat_id> 或 <pf>:<group_chat_id>（_GROUP_REPLY_CHAT_ID 命中）→ 群聊
+                    #   - <pf>:dm:<open_id (ou_)>                                  → 私聊（按 open_id）
+                    #   - <pf>:dm:<chat_id (oc_)>  ← 模型经常误写 dm 前缀但 target 是群 chat_id
+                    #                                                            → 重写成 group 路径，按 chat_id 发到群
+                    #   - <pf>:<chat_id (oc_)>                                     → 群聊（按 chat_id 直发）
+                    #   - 兜底：FEISHU_ALLOWED_USERS 第一个 open_id                → 私聊
+                    _grp_ctx = _get_group_reply_chat_id()
                     is_group_channel = (
-                        channel.startswith("lark:group:")
-                        or (_get_group_reply_chat_id() and channel.startswith(f"lark:{_get_group_reply_chat_id()}"))
+                        _channel_has_prefix(channel, "group:")
+                        or (bool(_grp_ctx) and _channel_has_raw_suffix(channel, f"{_grp_ctx}"))
                     )
-                    # Backwards-compat: model sometimes writes "lark:dm:oc_xxx" — read DM prefix
+                    # Backwards-compat: model sometimes writes "<pf>:dm:oc_xxx" — read DM prefix
                     # but the id is actually a group chat_id (oc_). Detect and rewrite to group.
-                    if not is_group_channel and channel.startswith("lark:dm:"):
-                        tail = channel.split("lark:dm:", 1)[1].strip()
+                    if not is_group_channel and _channel_has_prefix(channel, "dm:"):
+                        tail = _strip_feishu_prefix(channel, kind="dm:").strip()
                         if tail.startswith("oc_"):
-                            channel = f"lark:group:{tail}"
+                            channel = f"feishu:group:{tail}"
                             is_group_channel = True
                     if is_group_channel:
                         # 群聊路径：从 channel 解析 group chat_id，不用 FEISHU_CHAT_ID
                         # （那个可能被 DM context 污染）
-                        if channel.startswith("lark:group:"):
-                            target_chat = channel.split("lark:group:", 1)[1].strip()
+                        if _channel_has_prefix(channel, "group:"):
+                            target_chat = _strip_feishu_prefix(channel, kind="group:").strip()
                         else:
-                            target_chat = _get_group_reply_chat_id()
+                            target_chat = _grp_ctx
                         # ⚠️ 真实 chat_type：只有 target_chat 等于配置的 group context 时才算群。
-                        # 否则可能是 lark:dm:oc_<私聊 conv> 被 rewrite 的——那种情形下
+                        # 否则可能是 <pf>:dm:oc_<私聊 conv> 被 rewrite 的——那种情形下
                         # 上面 send 走了 chat_id 接口（API 要求），但语义仍是私聊，
                         # 不应记 group（否则 conversation_log chat_type 自相矛盾，
                         # social_context 会把私聊当群）。
-                        real_chat_type = "group" if target_chat == (_get_group_reply_chat_id() or "") else "dm"
+                        real_chat_type = "group" if target_chat == (_grp_ctx or "") else "dm"
                         # mention_user_ids：默认 prepend 到 text 前；
                         # 但若 text 里已经含 <at user_id="ou_xxx"></at> 标签，
                         # 跳过那些 ou_（auto-mention 已经替换过，避免重复）
@@ -681,8 +704,8 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
                         # 私聊路径：接受 open_id (ou_) 或 chat_id (oc_) 形式
                         target_chat = FEISHU_CHAT_ID
                         routed_id = ""
-                        if channel.startswith("lark:dm:"):
-                            routed_id = channel.split("lark:dm:", 1)[1].strip()
+                        if _channel_has_prefix(channel, "dm:"):
+                            routed_id = _strip_feishu_prefix(channel, kind="dm:").strip()
                         elif target_chat:
                             routed_id = target_chat
                         # 找不到目标：直接失败，把根因和下一步交给模型。
@@ -736,8 +759,8 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
                 # 完全一致（否则外层以为非 group，fan-out 不触发，sibling 收不到）。
                 _grp_ctx = _get_group_reply_chat_id() or ""
                 _is_group_send = (
-                    channel.startswith("lark:group:")
-                    or (bool(_grp_ctx) and channel.startswith(f"lark:{_grp_ctx}"))
+                    _channel_has_prefix(channel, "group:")
+                    or (bool(_grp_ctx) and _channel_has_raw_suffix(channel, f"{_grp_ctx}"))
                 )
                 result = run_async(_send_feishu_direct())
                 if isinstance(result, tuple) and result[0]:
@@ -809,7 +832,9 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
         try:
             from domain.lifecycle.conversation_log import log_conversation
             parts = channel.split(":")
-            platform = parts[0] if parts else "lark"
+            _raw_pf = parts[0] if parts else "feishu"
+            # 归一平台前缀：历史存量可能写 lark/feishu，统一记 feishu。
+            platform = "feishu" if _raw_pf in ("feishu", "lark") else _raw_pf
             # ⚠️ conversation_id 与 chat_type 必须从 _send_feishu_direct 闭包暴露出的
             # real_chat_type + target_chat/routed_id 取（它们是 send 真正用的值）。
             # 早期版本凭 channel 字符串推断 chat_type，但 line 626-630 会把 `lark:dm:oc_xxx`
@@ -872,7 +897,12 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
             pass
         try:
             if wait_minutes > 0:
-                from domain.lifecycle.alarms import cancel_alarms_by_filter, set_alarm, find_alarms_by_filter
+                # ⚠ 2026-06-24 引入了 find_alarms_by_filter 这个 import，但它
+                # 在 alarms.py 里从未定义（死 import）→ 整行 ImportError 被
+                # 下方 except 静默吞掉，导致 cancel_alarms_by_filter + set_alarm
+                # 自 6/24 起从未执行 → awaiting_reply 事件再也没被设上。
+                # DEDUP 用的是 events.list_recent_events（920 行），与此 import 无关，删除即可。
+                from domain.lifecycle.alarms import cancel_alarms_by_filter, set_alarm
                 from domain.lifecycle import clock as _clock
                 # 同通道精确清旧闹钟：发到群 A 时只清群 A 的 awaiting_reply，
                 # 保留群 B 等待（之前用 cancel_alarms_by_kind 会全局清，跨通道误取消）
@@ -918,8 +948,10 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
                             "hint": "或许该去做自己的事了？看看计划或笔记里有没有想继续的。",
                         },
                     )
-        except Exception:
-            pass  # non-fatal
+        except Exception as exc:
+            # awaiting_reply 的设立是 express_to_human 的关键副作用，失败必须有日志
+            # —— 历史上这里是 `except: pass`，曾把 ImportError 静默吞掉一周才被发现。
+            logger.warning("express_to_human: set awaiting_reply failed: %s", exc, exc_info=True)
 
     try:
         from domain.todos import record_session_human_reply

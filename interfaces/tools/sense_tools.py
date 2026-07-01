@@ -489,6 +489,16 @@ def _handle_sense_conversation(args: Dict[str, Any], **kwargs) -> str:
             dialog.append(entry)
         # Return in chronological order
         dialog.reverse()
+        # 模型已主动查看这些通道的历史 → 登记到 channel_views 账本，
+        # 供 express_to_human 发送前校验「目标通道是否看过」。
+        try:
+            from domain.lifecycle.channel_views import mark_channel_viewed
+            for d in dialog:
+                cid = d.get("conversation_id") or ""
+                if cid:
+                    mark_channel_viewed(cid)
+        except Exception:
+            pass
         return _j({"dialog": dialog, "filter": {"conversation_id": conversation_id, "chat_type": chat_type}})
     except Exception as exc:
         return _j({"error": f"获取对话历史失败: {exc}"})
@@ -712,7 +722,7 @@ def _handle_sense_contacts(args: Dict[str, Any], **_) -> str:
             if not pid:
                 continue
             if pf == "feishu":
-                all_ids.append(f"lark:{pid}")
+                all_ids.append(f"feishu:{pid}")
             elif pf == "wechat":
                 all_ids.append(f"wechat:{pid}")
             else:
@@ -727,7 +737,7 @@ def _handle_sense_contacts(args: Dict[str, Any], **_) -> str:
     reachable = [x for x in out if x["channels"] and x["kind"] == "human"]
     summary_hint = (
         f"共 {len(out)} 个联系人，其中 {len(reachable)} 个有可达 channel。"
-        "channel 字段已含前缀（lark:ou_xxx 私聊 / lark:oc_xxx 飞书群 / wechat:<openid> 微信），"
+        "channel 字段已含前缀（feishu:ou_xxx 私聊 / feishu:oc_xxx 飞书群 / wechat:<openid> 微信），"
         "直接填入 express_to_human(channel=...)。"
     )
     return _j({"ok": True, "contacts": out, "summary": summary_hint})

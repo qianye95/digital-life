@@ -72,19 +72,26 @@ def reset_current_event_chat_id(token) -> None:
 
 
 # ── 多通道上下文：当前事件来自哪个平台 + 通道相关的 platform token ──────────
-# feishu → 平台前缀 "lark"，wechat → "wechat"
+# 平台前缀统一用 feishu（旧数据可能存 lark，读侧需兜底认两者）。
 # express_to_human 用来决定发到哪个通道(action_tools.py channel 前缀)
 _event_platform: ContextVar[str] = ContextVar("digital_life_event_platform", default="")
 
 
 def set_current_event_platform(platform: str) -> object:
-    """设置当前事件来源平台（feishu/wechat/...）。返回 token。"""
-    _pf = "lark" if (platform or "").lower() in ("feishu", "lark") else (platform or "")
+    """设置当前事件来源平台（feishu/wechat/...）。返回 token。
+
+    归一化：feishu 与历史遗留的 lark 都归一为 feishu（内部统一前缀）。
+    wechat 等其他值原样保留。
+    """
+    _pf = "feishu" if (platform or "").lower() in ("feishu", "lark") else (platform or "")
     return _event_platform.set(_pf)
 
 
 def get_current_event_platform() -> str:
-    """返回当前事件平台前缀（lark / wechat / ''=未设置）。"""
+    """返回当前事件平台前缀（feishu / wechat / ''=未设置）。
+
+    消费方读侧匹配 channel 字符串时应同时认 'feishu' 与存量历史值 'lark'。
+    """
     return _event_platform.get()
 
 

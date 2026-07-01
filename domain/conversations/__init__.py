@@ -43,7 +43,7 @@ def record_inbound_message(
         _pf = get_current_event_platform()
     except Exception:
         _pf = ""
-    _source = _pf or "lark"  # fallback 默认 lark（向后兼容）
+    _source = _pf or "feishu"  # fallback 默认 feishu（向后兼容，旧版记 lark）
     return record_inbound(
         chat_id=chat_id, sender_id=sender_id, sender_name=sender_name,
         text=text, msg_id=msg_id, source=_source, sender_kind=sender_kind,
@@ -78,7 +78,7 @@ def publish_chat_message(
 
     rid = record_outbound(
         chat_id=chat_id, self_display_name=my_name,
-        self_instance_id=my_iid, text=text, msg_id=msg_id, source="lark",
+        self_instance_id=my_iid, text=text, msg_id=msg_id, source="feishu",
     )
 
     # HTTP 广播(决策 4:fire-and-forget,失败只 log 不阻塞,但 log 级别要够高

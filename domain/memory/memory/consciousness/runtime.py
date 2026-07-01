@@ -290,7 +290,7 @@ def log_sent_message(text: str) -> None:
     """记录发出去的消息 — 委托给 conversation_log DB 表。"""
     try:
         from domain.lifecycle.conversation_log import log_conversation
-        log_conversation(platform="lark", conversation_id="unknown", chat_type="dm",
+        log_conversation(platform="feishu", conversation_id="unknown", chat_type="dm",
                          direction="out", text=text)
     except Exception:
         pass

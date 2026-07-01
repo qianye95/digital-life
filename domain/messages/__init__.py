@@ -195,7 +195,7 @@ def record_inbound(
     sender_name: str = "",
     text: str,
     msg_id: str = "",
-    source: str = "lark",
+    source: str = "feishu",
     sender_kind: str = "human",
 ) -> Optional[int]:
     """入站消息:实例自己收到平台消息时调一次。
@@ -223,7 +223,7 @@ def record_outbound(
     self_instance_id: str,
     text: str,
     msg_id: str = "",
-    source: str = "lark",
+    source: str = "feishu",
 ) -> Optional[int]:
     """出站消息:实例自己发群/私聊消息成功后调。
 
@@ -249,7 +249,7 @@ def record_broadcast_in(
     from_instance_id: str,
     text: str,
     msg_ref: str,
-    source_platform: str = "lark",
+    source_platform: str = "feishu",
     instance_id: str | None = None,
 ) -> Optional[int]:
     """接收广播:peer 实例 HTTP POST 过来后,本实例写一行 'in'。
