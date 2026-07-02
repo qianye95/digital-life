@@ -86,7 +86,7 @@
         精力值波动
       </h3>
       <p class="brand-sub" style="color: var(--text-muted); margin-bottom: var(--space-3);">
-        ⚡ 当前精力 {{ Math.round(Number(energy) || 0) }}% —— 折线为精力值变化（上涨=自然恢复，下跌=消耗），柱状为消耗/投喂事件。
+        ⚡ 当前精力 {{ Math.round(Number(energy) || 0) }}% —— 折线为精力值变化（上涨=自然恢复，下跌=消耗）。
       </p>
       <div ref="energyChartEl" style="height: 240px;"></div>
     </div>
@@ -498,7 +498,7 @@ async function loadCharts() {
     }
     if (vs && !vs.error) {
       vitalsSeries.value = vs
-      renderEnergyChart(vs.samples || [], vs.events || [])
+      renderEnergyChart(vs.samples || [])
     }
   } catch {}
 }
@@ -532,30 +532,19 @@ function renderTokenChart(buckets) {
   tokenChartHandle = createChart(tokenChartEl.value, option)
 }
 
-function renderEnergyChart(samples, events) {
+function renderEnergyChart(samples) {
   if (!energyChartEl.value) return
-  // 折线：采样 energy（精力值变化：涨=自然恢复，跌=消耗）
+  // 单一精力值折线：涨=自然恢复，跌=消耗。
   const lineData = samples.map(s => [Number(s.at_unix) * 1000, Number(s.energy).toFixed(1)]).filter(p => p[0])
-  // 柱状：nurture_log 事件点（消耗为负、投喂为正）
-  const barData = (events || []).map(e => {
-    const ts = new Date(e.at).getTime()
-    const d = (e.deltas && Number(e.deltas.energy)) || 0
-    return [ts, d]
-  }).filter(p => p[0] && p[1] !== 0)
   const option = {
     backgroundColor: 'transparent',
-    color: [NEON_PALETTE[0], NEON_PALETTE[1]],
-    grid: { top: 30, left: 40, right: 20, bottom: 30, containLabel: true },
-    tooltip: { trigger: 'axis', backgroundColor: 'rgba(10,14,36,0.95)', borderColor: 'rgba(0,240,255,0.32)', textStyle: { color: '#e8ecff' } },
-    legend: { data: ['精力值', '消耗/投喂'], textStyle: { color: '#9aa4cf' }, top: 0 },
+    color: [NEON_PALETTE[0]],
+    grid: { top: 20, left: 40, right: 20, bottom: 30, containLabel: true },
+    tooltip: { trigger: 'axis', backgroundColor: 'rgba(10,14,36,0.95)', borderColor: 'rgba(0,240,255,0.32)', textStyle: { color: '#e8ecff' }, valueFormatter: v => `${v}%` },
     xAxis: { type: 'time', axisLabel: { color: '#7a85ad' }, axisLine: { lineStyle: { color: '#2a3358' } } },
-    yAxis: [
-      { type: 'value', name: '精力%', min: 0, max: 100, axisLabel: { color: '#7a85ad' }, splitLine: { lineStyle: { color: 'rgba(42,51,88,0.4)' } } },
-      { type: 'value', name: 'delta', axisLabel: { color: '#7a85ad' }, splitLine: { show: false } },
-    ],
+    yAxis: { type: 'value', name: '精力%', min: 0, max: 100, axisLabel: { color: '#7a85ad' }, splitLine: { lineStyle: { color: 'rgba(42,51,88,0.4)' } } },
     series: [
-      { name: '精力值', type: 'line', smooth: true, showSymbol: false, data: lineData, yAxisIndex: 0, areaStyle: { opacity: 0.12 } },
-      { name: '消耗/投喂', type: 'bar', data: barData, yAxisIndex: 1 },
+      { name: '精力值', type: 'line', smooth: true, showSymbol: false, data: lineData, areaStyle: { opacity: 0.12 } },
     ],
   }
   if (energyChartHandle) disposeChart(energyChartHandle)
