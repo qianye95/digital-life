@@ -203,22 +203,48 @@ class WeChatClawBotAdapter:
             logger.warning("ClawBot send: missing context_token — ClawBot requires it to associate the reply")
             return False
 
+        # 超长文本分段发送（替代旧的静默截断 content[:max]）。
+        # 详见 interfaces/ingress/text_segmenter.py。
+        from interfaces.ingress.text_segmenter import split_text_for_send
+
+        segments = split_text_for_send(content, self.capabilities.max_text_length)
         url = f"{self._domain}/ilink/bot/sendmessage"
         headers = self._build_headers()
-        payload = {
-            "context_token": context_token,
-            "to_user_id": chat_id,
-            "item_list": [{"type": 1, "content": content[: self.capabilities.max_text_length]}],
-        }
+        sent_count = 0
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(url, headers=headers, json=payload)
-                resp.raise_for_status()
-                result = resp.json()
-                if result.get("ret") == 0 or result.get("errcode") == 0:
-                    return True
-                logger.warning("ClawBot send response: %s", result)
-                return False
+                for idx, seg in enumerate(segments):
+                    payload = {
+                        "context_token": context_token,
+                        "to_user_id": chat_id,
+                        "item_list": [{"type": 1, "content": seg}],
+                    }
+                    try:
+                        resp = await client.post(url, headers=headers, json=payload)
+                        resp.raise_for_status()
+                        result = resp.json()
+                        if result.get("ret") == 0 or result.get("errcode") == 0:
+                            sent_count += 1
+                            continue
+                        logger.warning(
+                            "ClawBot send segment %d/%d response: %s",
+                            idx + 1, len(segments), result,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "ClawBot send segment %d/%d failed: %s",
+                            idx + 1, len(segments), exc,
+                        )
+                    # ClawBot 限速比飞书紧，段间稍等避免被风控；末段无需 sleep
+                    if idx < len(segments) - 1:
+                        await asyncio.sleep(0.3)
+            if sent_count == len(segments):
+                return True
+            # 部分送达：保留已成功段（不回滚），但按 IngressAdapter 契约返回 False
+            logger.warning(
+                "ClawBot send partial: %d/%d segments delivered", sent_count, len(segments),
+            )
+            return False
         except Exception as exc:
             logger.error("ClawBot send failed: %s", exc)
             return False

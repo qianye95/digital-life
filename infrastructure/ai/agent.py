@@ -1123,10 +1123,19 @@ class AIAgent:
             sender = payload.get("sender_name", "")
             display = str(ev.get("display_name") or ev.get("kind", ""))
 
+            # 平台标签依据 payload.source（形如 "gateway:wechat"/"gateway:feishu"）推导。
+            # 历史 bug:这里曾硬编码为「飞书消息」,导致微信/其它平台消息在 wake_signal
+            # 注入时也被标成飞书（见 wake-13 日志里微信消息被打成「[飞书消息 #38]」）。
+            # 无 source 时回退为中性「消息」,不再默认飞书。
+            _src = str(payload.get("source") or "")
+            if _src.startswith("gateway:"):
+                _src = _src.removeprefix("gateway:")
+            pf_label = {"wechat": "微信", "feishu": "飞书", "lark": "飞书"}.get(_src, "消息")
+
             if text:
-                content = f"[飞书消息 #{eid}] {'(' + sender + ') ' if sender else ''}{text}\n> 注意：消息已自动标记为已读，稍后回复即可。"
+                content = f"[{pf_label}消息 #{eid}] {'(' + sender + ') ' if sender else ''}{text}\n> 注意：消息已自动标记为已读，稍后回复即可。"
             else:
-                content = f"[飞书消息 #{eid}] {display}\n> 注意：消息已自动标记为已读，稍后回复即可。"
+                content = f"[{pf_label}消息 #{eid}] {display}\n> 注意：消息已自动标记为已读，稍后回复即可。"
 
             assistant_msg, tool_msg = self._sys_tool_call("wake_signal", content)
             messages.append(assistant_msg)

@@ -578,6 +578,9 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
     # Send via feishu direct API (primary path)
     sent = False
     err = None
+    # 分段发送统计（仅飞书工具直发路径会填；其它路径保持 None 兼容老契约）
+    segments_sent: int | None = None
+    segments_total: int | None = None
     # 私聊路径的默认目标：仅用当前实例自己的回复上下文（DM/group），不读全局 FEISHU_FALLBACK。
     # 全局值跨实例串味（alpha 会拿 zero 的 chat 撞 cross app）。找不到时留空，
     # 由闭包内的 DM 分支按 channel 显式失败（提示模型用 sense_contacts 查 ID）。
@@ -614,6 +617,9 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
                         app_id[:12], _get_instance_id_for_context()[:8])
             _token_url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
             _msg_url = "https://open.feishu.cn/open-apis/im/v1/messages"
+            # 飞书 text 消息字符上限（与 FeishuAdapter.capabilities.max_text_length 对齐，
+            # 见 interfaces/ingress/feishu.py:96）。超长→分段发送而非静默截断。
+            FEISHU_MAX_LEN = 4000
 
             # Outer-scope state shared with _send_feishu_direct — values needed
             # after run_async returns for the fan-out path. Closure-internal
@@ -628,16 +634,63 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
             # 导致 conversation_log 把私聊全部误标为 group（污染 social_context）。
             real_chat_type = "dm"
 
+            async def _send_segments_in_loop(
+                segments: list[str],
+                post_one,
+                asyncio_mod,
+            ) -> tuple[bool, str | None, int, int]:
+                """循环发送多段文本：保留已成功段，部分成功即 True。
+
+                Args:
+                    segments: 已切好段的文本列表（split_text_for_send 产物）。
+                    post_one: async callable(seg) -> (ok: bool, err: str | None)。
+                    asyncio_mod: asyncio 模块（用于 sleep；外层注入避免重复 import 查找）。
+
+                Returns:
+                    (any_sent, first_err, sent_count, total)
+                """
+                sent_count = 0
+                first_err: str | None = None
+                for idx, seg in enumerate(segments):
+                    try:
+                        ok, e = await post_one(seg)
+                    except Exception as exc:
+                        # 单段异常：记录但不中断，继续后续段（保留已发段）
+                        logger.warning(
+                            "express_to_human feishu: segment %d/%d exception: %s",
+                            idx + 1, len(segments), exc,
+                        )
+                        ok, e = False, str(exc)
+                    if ok:
+                        sent_count += 1
+                    elif first_err is None:
+                        first_err = e
+                    # 段间适度等待，避免触发飞书发消息 QPS 限制；末段不 sleep
+                    if idx < len(segments) - 1:
+                        await asyncio_mod.sleep(0.2)
+                return sent_count > 0, first_err, sent_count, len(segments)
+
             async def _send_feishu_direct():
+                """发送飞书消息。超长文本自动分段循环发送。
+
+                返回 tuple[Any, str | None, int, int]：
+                    (ok_or_partial, err, segments_sent, segments_total)
+                - ok_or_partial: bool —— 至少一段成功即 True（保留已发段语义）
+                - err: 首个失败原因（全成功为 None）
+                - segments_sent/total: 给外层 fan-out / JSON 透出用
+                """
                 # routed_id 在 DM 分支赋值，group 分支读不到会 UnboundLocalError —— 在
                 # group 分支失败时 _explain_feishu_send_failure 读 routed_id 就会炸
                 # （单测 hit 不到这条路径）。一并加入 nonlocal。
                 nonlocal target_chat, send_text, channel, routed_id, real_chat_type
+                import asyncio as _aio
+                from interfaces.ingress.text_segmenter import split_text_for_send
+
                 async with httpx.AsyncClient(timeout=30) as c:
                     tr = await c.post(_token_url, json={"app_id": app_id, "app_secret": app_secret})
                     token = tr.json().get("tenant_access_token", "")
                     if not token:
-                        return False, "failed to get token"
+                        return False, "failed to get token", 0, 0
                     # 由 channel 决定发送目标（channel 前缀 feishu: 或历史遗留 lark: 均识别）：
                     #   - <pf>:group:<chat_id> 或 <pf>:<group_chat_id>（_GROUP_REPLY_CHAT_ID 命中）→ 群聊
                     #   - <pf>:dm:<open_id (ou_)>                                  → 私聊（按 open_id）
@@ -657,6 +710,9 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
                         if tail.startswith("oc_"):
                             channel = f"feishu:group:{tail}"
                             is_group_channel = True
+
+                    # 超长文本分段（飞书 text 消息上限，与 FeishuAdapter.capabilities.max_text_length=4000 对齐）。
+                    # send_text 已含 mention 前缀（群聊）或 cleaned text（私聊）；先解析出实际要发的文本。
                     if is_group_channel:
                         # 群聊路径：从 channel 解析 group chat_id，不用 FEISHU_CHAT_ID
                         # （那个可能被 DM context 污染）
@@ -676,7 +732,7 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
                         ats_already_in_text = set()
                         import re as _re_at
                         for m_ou in _re_at.findall(
-                            r'<at user_id="(ou_[a-zA-Z0-9_-]+)"></at>', send_text if 'send_text' in dir() else text
+                            r'<at user_id="(ou_[a-zA-Z0-9_-]+)"></at>', text
                         ):
                             ats_already_in_text.add(m_ou)
                         prepend_ids = [ou for ou in mention_user_ids if ou not in ats_already_in_text]
@@ -687,19 +743,34 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
                             send_text = mention_prefix + text
                         else:
                             send_text = text
-                        content_payload: dict = {"text": send_text}
-                        if mention_user_ids:
-                            content_payload["mentioned_list"] = mention_user_ids
-                        msg_resp = await c.post(
-                            _msg_url,
-                            headers={"Authorization": f"Bearer {token}"},
-                            params={"receive_id_type": "chat_id"},
-                            json={
-                                "receive_id": target_chat,
-                                "msg_type": "text",
-                                "content": json.dumps(content_payload),
-                            },
-                        )
+
+                        async def _post_one(seg: str) -> tuple[bool, str | None]:
+                            payload: dict = {"text": seg}
+                            # mentioned_list 仅随首段发送——避免分 N 段时群里把人 @ N 次。
+                            # 首段已含 <at> 标签前缀（mention_prefix），mentioned_list 与之配套。
+                            if mention_user_ids and _grp_seg_idx[0] == 0:
+                                payload["mentioned_list"] = mention_user_ids
+                            _grp_seg_idx[0] += 1
+                            msg_resp = await c.post(
+                                _msg_url,
+                                headers={"Authorization": f"Bearer {token}"},
+                                params={"receive_id_type": "chat_id"},
+                                json={
+                                    "receive_id": target_chat,
+                                    "msg_type": "text",
+                                    "content": json.dumps(payload),
+                                },
+                            )
+                            rd = msg_resp.json()
+                            if rd.get("code") == 0:
+                                return True, None
+                            return False, _explain_feishu_send_failure(rd, channel, target_chat)
+
+                        # mention 前缀只在首段附加（前缀在 send_text 开头，切分时随首段）；
+                        # mentioned_list 也只在首段发，避免群里多次 @。
+                        _grp_seg_idx = [0]  # 闭包计数器：标记当前段是否首段
+                        segments = split_text_for_send(send_text, FEISHU_MAX_LEN)
+                        return await _send_segments_in_loop(segments, _post_one, _aio)
                     else:
                         # 私聊路径：接受 open_id (ou_) 或 chat_id (oc_) 形式
                         target_chat = FEISHU_CHAT_ID
@@ -715,7 +786,7 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
                                 "私聊发送需要 ou_xxx(open_id) 或 oc_xxx(chat_id)，但你没填且无 DM 上下文。"
                                 "用 sense_contacts 查看联系人拿到 ou_xxx 后，"
                                 "调 express_to_human(text, chat_id='ou_xxx') 再发。"
-                            )
+                            ), 0, 0
                         routed_type = _feishu_receive_id_type(routed_id)
                         # DM path: strip 私聊不支持的 <at> 标签，避免显示多余 "@"
                         # 私聊本身是一对一，没必要 @ 谁。把 <at user_id=".."></at> 替换为 @<name> 或 删除
@@ -733,24 +804,24 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
                         except Exception:
                             pass
 
-                        msg_resp = await c.post(
-                            _msg_url,
-                            headers={"Authorization": f"Bearer {token}"},
-                            params={"receive_id_type": routed_type},
-                            json={
-                                "receive_id": routed_id,
-                                "msg_type": "text",
-                                "content": json.dumps({"text": dm_clean_text}),
-                            },
-                        )
-                    resp_data = msg_resp.json()
-                    if resp_data.get("code") == 0:
-                        return True, None
-                    # 把飞书面向开发者的错误翻译成模型可 actionable 的诊断
-                    # （否则模型只看到 "invalid receive_id" 不知道根因，会反复重试）。
-                    return False, _explain_feishu_send_failure(
-                        resp_data, channel, routed_id or target_chat
-                    )
+                        async def _post_one_dm(seg: str) -> tuple[bool, str | None]:
+                            msg_resp = await c.post(
+                                _msg_url,
+                                headers={"Authorization": f"Bearer {token}"},
+                                params={"receive_id_type": routed_type},
+                                json={
+                                    "receive_id": routed_id,
+                                    "msg_type": "text",
+                                    "content": json.dumps({"text": seg}),
+                                },
+                            )
+                            rd = msg_resp.json()
+                            if rd.get("code") == 0:
+                                return True, None
+                            return False, _explain_feishu_send_failure(rd, channel, routed_id)
+
+                        segments = split_text_for_send(dm_clean_text, FEISHU_MAX_LEN)
+                        return await _send_segments_in_loop(segments, _post_one_dm, _aio)
 
             from interfaces.tools.interrupt import is_interrupted
             if not is_interrupted():
@@ -763,10 +834,19 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
                     or (bool(_grp_ctx) and _channel_has_raw_suffix(channel, f"{_grp_ctx}"))
                 )
                 result = run_async(_send_feishu_direct())
-                if isinstance(result, tuple) and result[0]:
+                if isinstance(result, tuple) and len(result) == 4 and result[0]:
                     sent = True
-                    err = None
-                    logger.info("express_to_human: sent OK")
+                    seg_sent, seg_total = result[2], result[3]
+                    segments_sent, segments_total = seg_sent, seg_total
+                    # 部分送达：保留已成功段，但把首失败原因透出给模型
+                    if result[1] and seg_sent < seg_total:
+                        err = f"部分送达 {seg_sent}/{seg_total} 段：{result[1]}"
+                        logger.warning("express_to_human: partial send %d/%d: %s",
+                                       seg_sent, seg_total, result[1])
+                    else:
+                        err = None
+                    logger.info("express_to_human: sent OK (segments=%d/%d)",
+                                seg_sent, seg_total)
                     # Fan-out 到群消息聚合库 + fan-out 给其他实例事件。
                     # ⚠️ 必须用 real_chat_type=='group'（与 conversation_log 写入同源），
                     # 不能用 _is_group_send——后者在 oc_ 私聊被 rewrite 成 lark:group:oc_xxx
@@ -809,9 +889,18 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
                                 "express_to_human: group fan-out failed: %s", exc,
                                 exc_info=True,
                             )
-                elif isinstance(result, tuple):
+                elif isinstance(result, tuple) and len(result) == 4:
                     err = result[1] or "feishu direct send failed"
+                    segments_sent, segments_total = result[2], result[3]
                     logger.warning("express_to_human: send failed: %s", err)
+                else:
+                    # 兜底：旧式 2 元组或异常形态（防御性，正常不会到这）
+                    if isinstance(result, tuple) and result[0]:
+                        sent = True
+                        err = None
+                    elif isinstance(result, tuple):
+                        err = result[1] if len(result) > 1 else "feishu direct send failed"
+                        logger.warning("express_to_human: send failed: %s", err)
         else:
             err = "no FEISHU_APP_ID/SECRET in env"
             logger.warning("express_to_human: %s", err)
@@ -967,7 +1056,14 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
         pass
 
     if sent:
-        note = f"已送达（channel={channel}）。"
+        if segments_total and segments_total > 1:
+            if segments_sent == segments_total:
+                note = f"已送达（channel={channel}，共 {segments_total} 段）。"
+            else:
+                note = (f"已部分送达（channel={channel}，{segments_sent}/{segments_total} 段"
+                        f"{f'，失败：{err}' if err else ''}）。")
+        else:
+            note = f"已送达（channel={channel}）。"
     else:
         note = f"未送达（channel={channel}, error={err}）。"
     note += " 沉默是你的默认状态 — 没必要每件事都发言。"
@@ -978,6 +1074,8 @@ def _handle_express_to_human(args: Dict[str, Any], **context) -> str:
         "text_length": len(text),
         "error": err,
         "note": note,
+        "segments_sent": segments_sent,
+        "segments_total": segments_total,
     })
 
 
@@ -2366,13 +2464,17 @@ def _send_wechat_clawbot(
             "error": "ClawBot 需要 context_token 才能回复（当前会话没有微信上下文）。ClawBot 不支持主动推送。",
         }, ensure_ascii=False)
 
-    # 截断文本
-    max_len = 2000
-    send_text = text[:max_len]
+    # 超长文本分段发送（替代旧 text[:2000] 静默截断）。
+    # 详见 interfaces/ingress/text_segmenter.py。
+    from interfaces.ingress.text_segmenter import split_text_for_send
+
+    max_len = 2000  # ClawBot 单条上限，与 WeChatClawBotAdapter.capabilities.max_text_length 对齐
+    segments = split_text_for_send(text, max_len)
 
     # ClawBot 发送 header（跟 getupdates 一样）
     import base64 as _b64
     import random as _rnd
+    import uuid as _uuid
     headers = {
         "Content-Type": "application/json",
         "AuthorizationType": "ilink_bot_token",
@@ -2381,24 +2483,23 @@ def _send_wechat_clawbot(
         "iLink-App-Id": "bot",
         "iLink-App-ClientVersion": "132100",
     }
+
     # ClawBot 2.4.4 sendmessage 格式（来自 npm 包 send.js buildTextMessageReq）：
     # body = { msg: { to_user_id, client_id, message_type:2(BOT), message_state:2(FINISH),
     #                 item_list: [{type:1, text_item:{text:...}}], context_token } }
-    import uuid as _uuid
-    payload = {
-        "msg": {
-            "from_user_id": "",
-            "to_user_id": target_id,
-            "client_id": f"openclaw-weixin-{_uuid.uuid4().hex[:16]}",
-            "message_type": 2,
-            "message_state": 2,
-            "item_list": [{"type": 1, "text_item": {"text": send_text}}],
-            "context_token": context_token,
-        }
-    }
-
-    def _do_send():
+    def _do_send(seg_text: str) -> dict:
         import httpx
+        payload = {
+            "msg": {
+                "from_user_id": "",
+                "to_user_id": target_id,
+                "client_id": f"openclaw-weixin-{_uuid.uuid4().hex[:16]}",
+                "message_type": 2,
+                "message_state": 2,
+                "item_list": [{"type": 1, "text_item": {"text": seg_text}}],
+                "context_token": context_token,
+            }
+        }
         with httpx.Client(timeout=30) as c:
             r = c.post(
                 "https://ilinkai.weixin.qq.com/ilink/bot/sendmessage",
@@ -2408,12 +2509,46 @@ def _send_wechat_clawbot(
             r.raise_for_status()
             return r.json()
 
+    import time as _time
+    sent_count = 0
+    first_err: str | None = None
     try:
-        result = _do_send()
-        if isinstance(result, dict) and (not result or result.get("ret") == 0 or result.get("errcode") == 0):
-            logger.info("express_to_human wechat: sent OK (target=%s)", target_id[:20])
-            # 记录到 conversation_log（与飞书 out 路径对齐），让 sense_conversation 能读到微信史。
-            # 微信 ClawBot 仅私聊，chat_type 恒为 dm。
+        for idx, seg in enumerate(segments):
+            try:
+                result = _do_send(seg)
+            except Exception as exc:
+                # 单段失败：记录但不中断，继续发后续段（保留已发段）
+                logger.warning(
+                    "express_to_human wechat: segment %d/%d send failed: %s",
+                    idx + 1, len(segments), exc,
+                )
+                if first_err is None:
+                    first_err = str(exc)
+            else:
+                if isinstance(result, dict) and (
+                    not result or result.get("ret") == 0 or result.get("errcode") == 0
+                ):
+                    sent_count += 1
+                else:
+                    if first_err is None:
+                        first_err = f"ClawBot API returned: {result}"
+                    logger.warning(
+                        "express_to_human wechat: segment %d/%d rejected: %s",
+                        idx + 1, len(segments), result,
+                    )
+            # ClawBot 限速比飞书紧，段间稍等；末段无需 sleep
+            if idx < len(segments) - 1:
+                _time.sleep(0.3)
+
+        if sent_count > 0:
+            logger.info(
+                "express_to_human wechat: sent %d/%d segments OK (target=%s)",
+                sent_count, len(segments), target_id[:20],
+            )
+            # 记录到 conversation_log：只记第一段，避免一条回复拆成 N 条污染对话史检索。
+            # text 字段加尾标记表明这是分段回复的首段。
+            first_seg = segments[0]
+            log_text = first_seg if len(segments) == 1 else first_seg + " ……（共 %d 段）" % len(segments)
             try:
                 from domain.lifecycle.conversation_log import log_conversation
                 from infrastructure.config import get_instance_display_name
@@ -2423,7 +2558,7 @@ def _send_wechat_clawbot(
                     conversation_id=target_id,
                     chat_type="dm",
                     direction="out",
-                    text=send_text,
+                    text=log_text,
                     sender_name=out_sender,
                 )
             except Exception as _le:
@@ -2431,19 +2566,26 @@ def _send_wechat_clawbot(
             return json.dumps({
                 "sent": True,
                 "channel": channel,
-                "text": send_text,
+                "text": first_seg,          # 向后兼容：取首段
+                "segments_sent": sent_count,
+                "segments_total": len(segments),
+                **({"error": first_err} if first_err else {}),
             }, ensure_ascii=False)
         else:
             return json.dumps({
                 "sent": False,
                 "channel": channel,
-                "error": f"ClawBot API returned: {result}",
+                "segments_sent": 0,
+                "segments_total": len(segments),
+                "error": first_err or "ClawBot send failed",
             }, ensure_ascii=False)
     except Exception as exc:
         logger.error("express_to_human wechat send failed: %s", exc)
         return json.dumps({
             "sent": False,
             "channel": channel,
+            "segments_sent": sent_count,
+            "segments_total": len(segments),
             "error": str(exc),
         }, ensure_ascii=False)
 

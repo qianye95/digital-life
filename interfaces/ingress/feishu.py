@@ -222,6 +222,40 @@ class FeishuAdapter(IngressAdapter):
     async def send(self, chat_id: str, content: str, reply_to: str = "") -> bool:
         if not self._http:
             return False
+        # 超长文本分段发送（飞书 text 消息上限由 capabilities.max_text_length 声明）。
+        # 详见 interfaces/ingress/text_segmenter.py。
+        from interfaces.ingress.text_segmenter import split_text_for_send
+
+        segments = split_text_for_send(content, self.capabilities.max_text_length)
+        sent_count = 0
+        try:
+            for idx, seg in enumerate(segments):
+                # reply_to 仅作用于首段（飞书 reply 语义绑单条消息）
+                rt = reply_to if idx == 0 else ""
+                ok = await self._post_one(chat_id, seg, rt)
+                if ok:
+                    sent_count += 1
+                else:
+                    logger.warning("Feishu send segment %d/%d failed", idx + 1, len(segments))
+                # 段间适度等待，避免触发飞书发消息 QPS 限制
+                if idx < len(segments) - 1:
+                    import asyncio
+
+                    await asyncio.sleep(0.2)
+            if sent_count == len(segments):
+                return True
+            logger.warning(
+                "Feishu send partial: %d/%d segments delivered", sent_count, len(segments),
+            )
+            return False
+        except Exception as exc:
+            logger.warning("Feishu send error: %s", exc)
+            return False
+
+    async def _post_one(self, chat_id: str, content: str, reply_to: str) -> bool:
+        """发送单段文本。返回是否成功。"""
+        if not self._http:
+            return False
         try:
             if reply_to:
                 req = (
@@ -256,7 +290,7 @@ class FeishuAdapter(IngressAdapter):
 
             return await asyncio.to_thread(_do_send)
         except Exception as exc:
-            logger.warning("Feishu send error: %s", exc)
+            logger.warning("Feishu send one error: %s", exc)
             return False
 
     # ── Reaction API(三态收条:👀 收到 → ⚙️ 思考中 → 发送后撤回) ──
