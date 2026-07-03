@@ -254,6 +254,35 @@ class AIAgent:
                 if '"__l4_block__": true' in result or '"__l4_block__":true' in result:
                     session_blocked = True
             if session_blocked:
+                # rest-boundary 消息保留：rest() 完成后检查内存池里是否有未在本 wake
+                # 注入过的新事件。若有 → 撤销 rest 副作用（回滚 affair → RUNNING、清
+                # WaitIntent、cancel 本次新建的闹钟），让 for 循环进入下一次 _chat；
+                # 下一次 _chat 开头的 _inject_signalled_events 会把事件注入给模型，
+                # 模型重新决定是否真的休息。
+                #
+                # 历史 bug（wake-469 案例 #256）：消息恰好在 rest()→l4_block→return
+                # 这个窗口内到达，注入内存池但当前 wake 直接 return 不再 _chat，事件
+                # 只能等下一个 wake 才被捡到（延迟数分钟到数小时）；若进程崩溃则永久
+                # 丢失（DB 已 consumed、内存池蒸发）。详见 events.py:_inject_to_running_session
+                # + 本函数 _inject_signalled_events。
+                if self._has_uninjected_signalled_events():
+                    rest_result = next(
+                        (r for r in tool_calls_seen if '"__l4_block__"' in (r.get("result") or "")),
+                        None,
+                    )
+                    if rest_result and self._revoke_rest_and_resume(rest_result):
+                        uninjected = [
+                            e for e in self._peek_signalled()
+                            if e.get("event_id") not in self._injected_signal_event_ids
+                        ]
+                        logger.info(
+                            "agent: rest revoked — %d uninjected event(s) pending; "
+                            "resuming loop instead of blocking",
+                            len(uninjected),
+                        )
+                        # 不 return —— for 循环自然进入下一次 _chat，
+                        # _inject_signalled_events 会把事件注入给模型
+                        continue
                 final = content or "已进入休息。"
                 return {"final_response": final, "tool_calls": tool_calls_seen, "status": "blocked"}
         final = "达到最大迭代次数，已停止本轮执行。"
@@ -1065,6 +1094,87 @@ class AIAgent:
             "list_directory", "search_files", "web_fetch",
         }
         return tool_name in archiveable
+
+    def _peek_signalled(self) -> list[dict]:
+        """只读取内存信号池（不清空）。失败返回空 list。"""
+        try:
+            from domain.lifecycle.session_events import peek_signalled_events
+            return peek_signalled_events()
+        except Exception:
+            return []
+
+    def _has_uninjected_signalled_events(self) -> bool:
+        """内存池里是否有「未在本 wake 注入过」的新事件。
+
+        _injected_signal_event_ids 记录本 session 已经注入给模型的事件 id，
+        用于去重——避免模型在同一 wake 里被同一事件反复打断。
+        """
+        events = self._peek_signalled()
+        if not events:
+            return False
+        return any(
+            e.get("event_id") not in self._injected_signal_event_ids
+            for e in events
+        )
+
+    def _revoke_rest_and_resume(self, rest_call: dict) -> bool:
+        """撤销 rest() 的副作用，让 affair 回到 RUNNING 以便处理新事件。
+
+        rest() 返回的 sentinel 字段决定回滚策略：
+        - set_alarm=True / reused_alarm_id：本次 rest 新建了闹钟 → cancel 它
+        - affair_id 非空：本次 rest 把 affair 改了 BLOCKED → 改回 RUNNING +
+          clear_wait_intent
+        - reused_alarm_id 仅在 reuse 路径出现：那个闹钟是别处管理的，**不 cancel**，
+          只回滚 affair 副作用（模型会重新决定，可能再次 rest 复用它）
+
+        任何一步失败都返回 False（保持原 rest 生效，让 cron 兜底处理新事件）。
+        成功返回 True，调用方据此决定是否继续循环。
+        """
+        try:
+            import json as _json
+            raw = rest_call.get("result") or ""
+            # 从 tool result 字符串里解析 rest 的 sentinel 字段
+            try:
+                data = _json.loads(raw)
+            except Exception:
+                return False
+
+            aid = data.get("affair_id")
+            reused_id = data.get("reused_alarm_id")
+            set_alarm_field = data.get("set_alarm", None)
+            wake_at = data.get("wake_at") or ""
+
+            # 判断是否本次 rest 新建了闹钟：
+            # - reuse 路径：set_alarm=False + reused_alarm_id=<id> → 复用，**不取消**
+            # - until 路径：set_alarm 字段缺失（None）→ 隐含新建了，需取消
+            # - 无 affair 兜底路径：affair_id=None 但也新建了闹钟
+            is_new_alarm = (set_alarm_field is None) and bool(wake_at) and not reused_id
+
+            # 1. cancel 本次 rest 新建的闹钟（reuse 的不动，那是别处管理的）
+            if is_new_alarm:
+                try:
+                    from domain.lifecycle.alarms import list_pending_alarms, cancel_alarm
+                    # dedup 保证 (timer, wake_at) 唯一；按 fire_at 精确匹配后取消
+                    for a in list_pending_alarms("timer"):
+                        if (a.get("fire_at") or "") == wake_at:
+                            cancel_alarm(a.get("id"))
+                            break
+                except Exception as exc:
+                    logger.warning("revoke_rest: cancel alarm failed: %s", exc)
+
+            # 2. 回滚 affair：BLOCKED → RUNNING + clear WaitIntent
+            if aid:
+                from domain.lifecycle.affairs.runtime import (
+                    update_affair, clear_wait_intent,
+                )
+                from domain.lifecycle.state_machine import AffairStatus
+                update_affair(aid, status=AffairStatus.RUNNING)
+                clear_wait_intent(aid)
+
+            return True
+        except Exception as exc:
+            logger.warning("revoke_rest: failed (keeping rest as-is): %s", exc)
+            return False
 
     def _inject_signalled_events(self, messages: list[dict[str, Any]]) -> None:
         """Notify the model when new events arrive mid-session (RUNNING state).
