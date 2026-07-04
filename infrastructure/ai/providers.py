@@ -69,6 +69,12 @@ class _BaseProvider:
 
     name: str = "base"
     thinking_keep_mode: str = "drop"
+    # reuse 模式下最多把几轮历史 reasoning 拼回去。0 = 等价于 drop。
+    # 太大会让轻量模型（如 StepFun Flash）把自己的历史推理当成 todo 累积执行，
+    # 形成"自我指令循环"—— wake-499 案例:25 轮 LLM 调用全在执行 reasoning 里写的
+    # "继续升级 lesson"。每个家族按自身对历史 reasoning 的"服从度"独立设：
+    # GLM-5.2 实测可以 5 轮不漂移；StepFun Flash 累积效应更强，限制到 3 轮。
+    reuse_max_rounds: int = 10
 
     def extract_reasoning(self, message: Mapping[str, Any]) -> str:
         """国内主流模型（GLM/DeepSeek/Qwen/Kimi）出站 reasoning_content 字段同名。
@@ -88,18 +94,23 @@ class _BaseProvider:
         messages: list[dict[str, Any]],
         reasonings: list[str],
         *,
-        max_rounds: int = 10,
+        max_rounds: int | None = None,
     ) -> list[dict[str, Any]]:
         """按 family 声明的 thinking_keep_mode 决定是否拼回历史 reasoning。
 
         reuse：把 reasoning_content 写回对应 assistant message（GLM/Kimi/Qwen）。
         drop ：直接 return（DeepSeek-Reasoner 服务端要求；OpenAI o 系列官方建议）。
 
+        拼回轮数 = max_rounds 参数 ?? self.reuse_max_rounds（每家族声明自己的上限）。
         单轮 reasoning 截到 600 chars（300 头 + 300 尾），避免无限堆叠。
         """
         if self.thinking_keep_mode != "reuse" or not reasonings:
             return messages
-        recent = reasonings[-max_rounds:]
+        # max_rounds=None → 用 provider 类声明的默认上限；显式传参则覆盖（用于测试）
+        effective_max = max_rounds if max_rounds is not None else self.reuse_max_rounds
+        if effective_max <= 0:
+            return messages
+        recent = reasonings[-effective_max:]
         assistant_idx = [
             i for i, m in enumerate(messages)
             if m.get("role") == "assistant"
@@ -148,6 +159,9 @@ class GLMProvider(_BaseProvider):
 
     name = "glm"
     thinking_keep_mode = "reuse"
+    # GLM-5.2 实测可以维持 5 轮 reasoning 跨轮延续而不漂移；更多轮易让早期思考
+    # 在长 context 里反复出现、误导当前决策。
+    reuse_max_rounds = 5
 
     def customize_payload(
         self,
@@ -156,6 +170,36 @@ class GLMProvider(_BaseProvider):
         reasoning_config: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """GLM：reasoning_effort 字段原生支持（minimal/low/medium/high/xhigh）。"""
+        out = dict(payload)
+        if reasoning_config and reasoning_config.get("effort"):
+            out["reasoning_effort"] = reasoning_config["effort"]
+        return out
+
+
+class StepFunProvider(_BaseProvider):
+    """阶跃星辰 Step 系列（step-3 / step-3.5-flash / step-3.7-flash 等）。
+
+    出站：message.reasoning_content（与 GLM 同名，国内 OpenAI 兼容 API 通用字段）。
+    入站：reuse —— 把历史 reasoning_content 拼回下一轮 messages，跨轮延续思路。
+          实测 step-3.7-flash 在多轮中能正确读取并延续（2026-07 接入验证）。
+    reasoning_effort：原生接受 minimal/low/medium/high/xhigh 五档（实测均不报错，
+                      内部如何使用未公开，保守按与 GLM 同样的字段透传）。
+    """
+
+    name = "stepfun"
+    thinking_keep_mode = "reuse"
+    # StepFun Flash 把历史 reasoning 当 todo 累积执行的倾向比 GLM 强（wake-499
+    # 案例：10 轮累积导致 25 轮 LLM 调用全在执行"继续升级 lesson"的自我指令）。
+    # 收紧到 3 轮：足够延续近期思路，又限制累积效应。
+    reuse_max_rounds = 3
+
+    def customize_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        reasoning_config: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """StepFun：透传 reasoning_effort（与 GLM 同协议）。"""
         out = dict(payload)
         if reasoning_config and reasoning_config.get("effort"):
             out["reasoning_effort"] = reasoning_config["effort"]
@@ -240,6 +284,11 @@ def resolve_provider(model: str) -> LLMProvider:
         return OpenAIReasoningProvider()
     if "glm" in m:
         return GLMProvider()
+    if m.startswith("step-") or "stepfun" in m:
+        # step-3 / step-3.5-flash / step-3.7-flash / step-2-16k 等。
+        # 区分于 OpenAI 兼容代理里可能出现的其它 "step" 子串，用 "step-" 前缀+ "stepfun" 双重匹配。
+        # 注意：step-1x-medium / step-tts 等非文本模型本仓不调用，不会被误匹配（无 LLM 调用入口）。
+        return StepFunProvider()
     # deepseek / qwen / kimi / moonshot / gpt-* / claude / 其他 OpenAI 兼容
     # 默认走 GenericOpenAIProvider（thinking_keep_mode=drop），不拼历史 reasoning。
     # Claude 经 LiteLLM 代理时也走这条，但无法维持 thinking 闭环（见 file docstring）。
@@ -249,6 +298,7 @@ def resolve_provider(model: str) -> LLMProvider:
 __all__ = [
     "LLMProvider",
     "GLMProvider",
+    "StepFunProvider",
     "GenericOpenAIProvider",
     "OpenAIReasoningProvider",
     "resolve_provider",
