@@ -123,6 +123,54 @@ class EmployeeConsoleAPIService:
         except Exception as exc:
             return web.json_response({"error": str(exc)}, status=500)
 
+    async def _handle_console_budget_series(self, request: web.Request) -> web.Response:
+        """Token 用量时序明细（按时间桶 + kind 拆分），给前端图表。
+
+        返回 { buckets: [{at_iso, input, output, total, input_summary,
+        output_summary, total_summary, count_429}],
+        day_total_used, hour_used }
+        """
+        try:
+            from infrastructure.config import get_app_instance_id
+            from infrastructure.budget import get_token_tracker
+            data = await self._input(request)
+            hours = self._int(data.query.get("hours"), 24)
+            bucket = (data.query.get("bucket") or "hour").strip()
+            iid = get_app_instance_id() or ""
+            tracker = get_token_tracker()
+            series = tracker.usage_series(hours=hours, bucket=bucket, instance_id=iid)
+            day_used = tracker.usage_today(iid)
+            hour_used = tracker.usage_last_hour(iid)
+            return web.json_response({
+                "buckets": series,
+                "day_total_used": day_used,
+                "hour_used": hour_used,
+                "hours": hours,
+                "bucket": bucket,
+            })
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _handle_console_vitals_series(self, request: web.Request) -> web.Response:
+        """精力采样序列（连续恢复曲线）+ nurture_log 事件点，给前端图表。
+
+        返回 { samples: [{at_unix, energy, affair_state}],
+               events: [recent_nurture_log entries] }
+        """
+        try:
+            from domain.vital.state import vital_history_series, recent_nurture_log
+            data = await self._input(request)
+            hours = self._int(data.query.get("hours"), 24)
+            samples = vital_history_series(hours=hours)
+            events = recent_nurture_log(hours=hours)
+            return web.json_response({
+                "samples": samples,
+                "events": events,
+                "hours": hours,
+            })
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
     async def _handle_console_sessions(self, request: web.Request) -> web.Response:
         data = await self._input(request)
         return self._response(self.sessions.list_sessions(self._int(data.query.get("limit"), 20)))
@@ -1175,6 +1223,8 @@ def _add_console_api_routes(app: web.Application, api_prefix: str, service: Empl
     app.router.add_post(f"{api_prefix}/projects/{{project_id}}/tasks", service._handle_console_create_project_task)
     app.router.add_patch(f"{api_prefix}/projects/{{project_id}}/tasks/{{task_id}}", service._handle_console_update_project_task)
     app.router.add_get(f"{api_prefix}/budget", service._handle_console_budget)
+    app.router.add_get(f"{api_prefix}/budget/series", service._handle_console_budget_series)
+    app.router.add_get(f"{api_prefix}/vitals/series", service._handle_console_vitals_series)
 
 
 def register(app: web.Application, adapter: Any) -> None:

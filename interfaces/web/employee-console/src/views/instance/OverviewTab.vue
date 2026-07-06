@@ -61,15 +61,34 @@
       >立即解卡 / reset</el-button>
     </div>
 
-    <!-- 精力曲线（暂时禁用，待专门的 vitals 历史 endpoint） -->
+    <!-- Token 消耗趋势（明细拆分：主调用 / 摘要 / 429 频次） -->
+    <div class="neon-card" style="margin-bottom: var(--space-5);">
+      <h3 style="font-family: var(--font-display); color: var(--text-secondary); margin: 0 0 var(--space-3);">
+        Token 消耗趋势
+      </h3>
+      <div style="display: flex; gap: var(--space-4); margin-bottom: var(--space-3); flex-wrap: wrap;">
+        <span class="brand-sub" style="color: var(--text-muted);">
+          今日累计 <strong style="color: var(--neon-cyan, #00f0ff);">{{ Number(tokenSeries.day_total_used || 0).toLocaleString() }}</strong> tokens
+        </span>
+        <span class="brand-sub" style="color: var(--text-muted);">
+          本时已用 <strong style="color: var(--neon-cyan, #00f0ff);">{{ Number(tokenSeries.hour_used || 0).toLocaleString() }}</strong>
+        </span>
+        <span v-if="token429Today > 0" class="brand-sub" style="color: var(--neon-pink, #ff2d9c);">
+          ⚠ 今日 429 共 {{ token429Today }} 次
+        </span>
+      </div>
+      <div ref="tokenChartEl" style="height: 240px;"></div>
+    </div>
+
+    <!-- 精力值波动（连续采样折线：涨=自然恢复，跌=消耗） -->
     <div class="neon-card" style="margin-bottom: var(--space-5);">
       <h3 style="font-family: var(--font-display); color: var(--text-secondary); margin: 0 0 var(--space-4);">
-        Energy Timeline
+        精力值波动
       </h3>
-      <p class="brand-sub" style="color: var(--text-muted);">
-        ⚡ 当前精力 {{ Math.round(Number(energy) || 0) }}%
-        —— 详细 24h 曲线需要新增 vitals 历史 endpoint（次迭代再做）。
+      <p class="brand-sub" style="color: var(--text-muted); margin-bottom: var(--space-3);">
+        ⚡ 当前精力 {{ Math.round(Number(energy) || 0) }}% —— 折线为精力值变化（上涨=自然恢复，下跌=消耗）。
       </p>
+      <div ref="energyChartEl" style="height: 240px;"></div>
     </div>
 
     <!-- 通道连接状态 -->
@@ -218,6 +237,7 @@ import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { instanceApi, systemApi, safeFetch } from '@/api/client'
 import { fmtTs } from '@/composables/useFormat'
+import { createChart, disposeChart, NEON_PALETTE } from '@/composables/useEcharts'
 
 const route = useRoute()
 const router = useRouter()
@@ -239,6 +259,19 @@ const resettingAffair = ref(false)
 const wakes = ref([])
 const todos = ref([])
 const budget = ref({})
+
+// 图表：token 消耗趋势 + 精力值波动
+const tokenChartEl = ref(null)
+const energyChartEl = ref(null)
+let tokenChartHandle = null
+let energyChartHandle = null
+const tokenSeries = ref({})
+const vitalsSeries = ref({ samples: [], events: [] })
+const token429Today = computed(() => {
+  // 汇总今日所有桶的 count_429（前端简单求和，桶默认按小时切）
+  return (tokenSeries.value.buckets || []).reduce((s, b) => s + (Number(b.count_429) || 0), 0)
+})
+let chartTimer = null
 // 通道状态（从 meta.channels 推出）
 const channels = ref([])
 const qrloading = ref(false)
@@ -451,9 +484,78 @@ async function loadAll() {
   await Promise.all([loadMeta(), loadStatus(), loadSummary()])
 }
 
+// ── 图表：拉 token 序列 + 精力序列，渲染两张图 ──
+// 60s 拉一次（比 15s poller 慢，降低开销；曲线粒度本身是分钟/小时级）
+async function loadCharts() {
+  try {
+    const [ts, vs] = await Promise.all([
+      instanceApi(iid.value).budgetSeries(24, 'hour'),
+      instanceApi(iid.value).vitalsSeries(24),
+    ])
+    if (ts && !ts.error) {
+      tokenSeries.value = ts
+      renderTokenChart(ts.buckets || [])
+    }
+    if (vs && !vs.error) {
+      vitalsSeries.value = vs
+      renderEnergyChart(vs.samples || [])
+    }
+  } catch {}
+}
+
+function renderTokenChart(buckets) {
+  if (!tokenChartEl.value || !buckets.length) return
+  const labels = buckets.map(b => (b.at_iso || '').slice(11, 16))  // HH:MM
+  const mainInput = buckets.map(b => Number(b.input) || 0)
+  const mainOutput = buckets.map(b => Number(b.output) || 0)
+  const summaryTotal = buckets.map(b => (Number(b.total_summary) || 0))
+  const count429 = buckets.map(b => Number(b.count_429) || 0)
+  const option = {
+    backgroundColor: 'transparent',
+    color: [NEON_PALETTE[0], NEON_PALETTE[1], NEON_PALETTE[4]],
+    grid: { top: 30, left: 50, right: 50, bottom: 30, containLabel: true },
+    tooltip: { trigger: 'axis', backgroundColor: 'rgba(10,14,36,0.95)', borderColor: 'rgba(0,240,255,0.32)', textStyle: { color: '#e8ecff' } },
+    legend: { data: ['主输入', '主输出', '摘要', '429次数'], textStyle: { color: '#9aa4cf' }, top: 0 },
+    xAxis: { type: 'category', data: labels, axisLabel: { color: '#7a85ad' }, axisLine: { lineStyle: { color: '#2a3358' } } },
+    yAxis: [
+      { type: 'value', name: 'tokens', axisLabel: { color: '#7a85ad' }, splitLine: { lineStyle: { color: 'rgba(42,51,88,0.4)' } } },
+      { type: 'value', name: '429次数', axisLabel: { color: '#7a85ad' }, splitLine: { show: false } },
+    ],
+    series: [
+      { name: '主输入', type: 'line', smooth: true, data: mainInput, yAxisIndex: 0 },
+      { name: '主输出', type: 'line', smooth: true, data: mainOutput, yAxisIndex: 0 },
+      { name: '摘要', type: 'line', smooth: true, data: summaryTotal, yAxisIndex: 0, lineStyle: { type: 'dashed' } },
+      { name: '429次数', type: 'bar', data: count429, yAxisIndex: 1, itemStyle: { color: NEON_PALETTE[1] } },
+    ],
+  }
+  if (tokenChartHandle) disposeChart(tokenChartHandle)
+  tokenChartHandle = createChart(tokenChartEl.value, option)
+}
+
+function renderEnergyChart(samples) {
+  if (!energyChartEl.value) return
+  // 单一精力值折线：涨=自然恢复，跌=消耗。
+  const lineData = samples.map(s => [Number(s.at_unix) * 1000, Number(s.energy).toFixed(1)]).filter(p => p[0])
+  const option = {
+    backgroundColor: 'transparent',
+    color: [NEON_PALETTE[0]],
+    grid: { top: 20, left: 40, right: 20, bottom: 30, containLabel: true },
+    tooltip: { trigger: 'axis', backgroundColor: 'rgba(10,14,36,0.95)', borderColor: 'rgba(0,240,255,0.32)', textStyle: { color: '#e8ecff' }, valueFormatter: v => `${v}%` },
+    xAxis: { type: 'time', axisLabel: { color: '#7a85ad' }, axisLine: { lineStyle: { color: '#2a3358' } } },
+    yAxis: { type: 'value', name: '精力%', min: 0, max: 100, axisLabel: { color: '#7a85ad' }, splitLine: { lineStyle: { color: 'rgba(42,51,88,0.4)' } } },
+    series: [
+      { name: '精力值', type: 'line', smooth: true, showSymbol: false, data: lineData, areaStyle: { opacity: 0.12 } },
+    ],
+  }
+  if (energyChartHandle) disposeChart(energyChartHandle)
+  energyChartHandle = createChart(energyChartEl.value, option)
+}
+
 onMounted(() => {
   loadAll()
+  loadCharts()  // 首次拉曲线
   poller = setInterval(() => { loadStatus(); loadSummary() }, 15000)
+  chartTimer = setInterval(loadCharts, 60000)  // 曲线 60s 刷新一次
 })
 
 // 加鸡腿 / 能量包：调 /api/employee/<iid>/nurture-energy，注入 energize 事件。
@@ -486,6 +588,9 @@ async function nurture(amount, label) {
 
 onUnmounted(() => {
   if (poller) { clearInterval(poller); poller = null }
+  if (chartTimer) { clearInterval(chartTimer); chartTimer = null }
+  if (tokenChartHandle) { disposeChart(tokenChartHandle); tokenChartHandle = null }
+  if (energyChartHandle) { disposeChart(energyChartHandle); energyChartHandle = null }
   if (nurtureHintTimer) { clearTimeout(nurtureHintTimer); nurtureHintTimer = null }
 })
 watch(iid, loadAll)
