@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -929,10 +930,36 @@ class AIAgent:
     # 压缩：把 >depth 轮以前、且 >min_chars 的 tool 行 content 替换为指针，DB
     # 不动（recall_tool_result 工具查 DB 拿回原文）。
 
-    # fake 注入项的 tool_call_id 前缀——这些不进 payload 计数、也不压缩。
-    # （sys_NNN = agent _sys_tool_call，narrative_xxx = segment 叙事替换，
-    #  fake_xxx = assembly 审计侧渲染。三者都不在 messages 表落库，单独识别。）
-    _FAKE_TOOL_ID_PREFIXES = ("sys_", "narrative_", "fake_")
+    # 真实 LLM tool_call_id 白名单（厂商格式正则）——与 _is_fake 标记双门校验。
+    # 当前覆盖（DB 实测）：
+    #   - call_-xxx       GLM / StepFun（OpenAI 兼容格式）
+    #   - chatcmpl-xxx    OpenAI 原生 response format
+    # 接入新厂商时若其 tool_call_id 不匹配任一正则，真实调用会被误判为 fake 而
+    # 免疫压缩——加新正则到此即可。
+    _REAL_TOOL_ID_PATTERNS = (
+        re.compile(r"^call_"),
+        re.compile(r"^chatcmpl-"),
+    )
+
+    def _is_real_tool_call(self, m: dict[str, Any]) -> bool:
+        """判定一行 tool message 是否为真实 LLM 工具调用。
+
+        双门与逻辑（两者都满足才为真实，任一不满足即视为 fake 免疫）：
+          1. tool_call_id 命中白名单正则（已知 LLM 厂商格式）
+          2. 没有显式 _is_fake=True 标记（assembly 审计侧/段叙事会打标）
+
+        为什么是与门：
+          - 仅用白名单：老 fake 注入若沿用旧前缀仍能免疫，但不防"未来不小心造
+            了新前缀"的情况；_is_fake 兜底加强。
+          - 仅用 _is_fake：DB 读回的 messages（_load_prior_messages）不一定
+            带这个 marker（schema 没存），白名单兜底识别为真实。
+        """
+        if m.get("_is_fake") is True:
+            return False
+        tid = str(m.get("tool_call_id") or "")
+        if not tid:
+            return False
+        return any(p.match(tid) for p in self._REAL_TOOL_ID_PATTERNS)
 
     def _get_tool_history_depth(self) -> int:
         """最近 N 轮真实 tool 消息不入压缩，给活跃窗口。默认 8。"""
@@ -966,9 +993,8 @@ class AIAgent:
         for idx, m in enumerate(messages):
             if m.get("role") != "tool":
                 continue
-            tid = str(m.get("tool_call_id") or "")
-            # fake 注入项识别：sys_NNN / narrative_xxx / fake_xxx
-            if tid.startswith(self._FAKE_TOOL_ID_PREFIXES):
+            if not self._is_real_tool_call(m):
+                # fake / 未识别格式 → 不计入 depth、不参与压缩
                 continue
             real_tool_indices.append(idx)
 
