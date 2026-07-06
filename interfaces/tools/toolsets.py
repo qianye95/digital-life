@@ -48,6 +48,7 @@ TOOLSETS = {
             "sense_contacts",
             "skills_list",
             "skill_view",
+            "recall_tool_result",
         ],
         "includes": [],
     },

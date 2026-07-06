@@ -437,3 +437,26 @@ class SessionDB:
             ).fetchone()
         return row["tool_call_count"] or 0 if row else 0
 
+    def get_tool_message_by_call_id(
+        self, session_id: str, tool_call_id: str
+    ) -> dict[str, Any] | None:
+        """精确按 tool_call_id 取回一条 tool 消息原文。
+
+        给 recall_tool_result 工具用：上下文压缩只发生在发给 LLM 的 payload，
+        DB 永远保留原始 content。LLM 调 recall_tool_result(tool_call_id=...) 时，
+        通过本方法拿回该次工具调用的完整结果。
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT tool_name, content, timestamp FROM messages "
+                "WHERE session_id=? AND tool_call_id=? AND role='tool' LIMIT 1",
+                (session_id, tool_call_id),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "tool_name": row["tool_name"] or "",
+            "content": row["content"] or "",
+            "timestamp": float(row["timestamp"] or 0),
+        }
+

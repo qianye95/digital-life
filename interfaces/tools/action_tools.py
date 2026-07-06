@@ -2082,6 +2082,77 @@ registry.register(
 )
 
 
+# ──────────────────────────────── recall_tool_result ────────────────────────────────
+
+
+def _handle_recall_tool_result(args: Dict[str, Any], **context) -> str:
+    """取回之前被上下文压缩的工具结果原文。
+
+    agent 的 _compact_old_tool_messages 会把 >depth 轮以前且 >min_chars 的真实
+    tool 消息在「发给 LLM 的 payload」里就地替换为指针("该结果已压缩"),DB 保留
+    原文。当模型在历史里看到 "[旧工具结果已压缩] ... → recall_tool_result(...)"
+    并需要再次读取该次调用的完整结果时，通过本工具按 tool_call_id 精确取回。
+    """
+    session_id = str(context.get("session_id") or "")
+    tool_call_id = (args.get("tool_call_id") or "").strip()
+    if not tool_call_id:
+        return registry.tool_error("tool_call_id is required")
+    if not session_id:
+        # 没有 session 上下文无法定位；按协议报错而不是隐式跨 session 全扫，
+        # 避免取到同名工具调用但不相关的历史行。
+        return registry.tool_error(
+            "session 上下文缺失，无法定位 tool_call_id（多半是工具被在 session 外调用）"
+        )
+
+    from infrastructure.ai.session_db import SessionDB
+    db = SessionDB()
+    row = db.get_tool_message_by_call_id(session_id, tool_call_id)
+    if not row:
+        return registry.tool_error(
+            f"未找到 tool_call_id={tool_call_id} 的历史结果。"
+            "可能是：(1) id 来自其他 session；(2) 旧 session 已被清理；"
+            "(3) 该 id 不是真实工具调用（fake 注入项不会被压缩，也无原文可召回）。"
+        )
+    return _j({
+        "tool_call_id": tool_call_id,
+        "tool_name": row.get("tool_name", ""),
+        "timestamp": row.get("timestamp", 0),
+        "content": row.get("content", ""),
+    })
+
+
+registry.register(
+    name="recall_tool_result",
+    toolset="senses",
+    schema={
+        "name": "recall_tool_result",
+        "description": (
+            "取回之前被上下文压缩的工具结果原文。"
+            "当历史消息中出现 '[旧工具结果已压缩] ... → recall_tool_result(...)' "
+            "提示、且你需要再次读取该次工具调用的完整结果时使用。注意只有"
+            "同时「够老」且「够大」的工具结果才会被压缩；最近几轮的、或短结果"
+            "仍然在上下文里，不必召回。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tool_call_id": {
+                    "type": "string",
+                    "description": "消息里标注的工具调用 id（形如 call_xxx）",
+                },
+            },
+            "required": ["tool_call_id"],
+        },
+    },
+    handler=_handle_recall_tool_result,
+    check_fn=lambda: True,
+    emoji="🔍",
+    # 召回的就是「当初被压掉的全量」，不能用默认 8KB 再截一道——
+    # 否则花一次调用却还是拿不到完整内容，召回机制失效。
+    max_result_size_chars=50000,
+)
+
+
 # ──────────────────────────────── rest ────────────────────────────────
 
 def _handle_rest(args: Dict[str, Any], **kwargs) -> str:

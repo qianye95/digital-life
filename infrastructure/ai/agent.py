@@ -302,7 +302,13 @@ class AIAgent:
             headers["Authorization"] = f"Bearer {self.api_key}"
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": self._maybe_compress_messages(messages, system_prompt=None, ref_context=None),
+            # 两层压缩串联：
+            #   1. _maybe_compress_messages — segment 级叙事化(用 narrative_xxx 替换整段)
+            #   2. _compact_old_tool_messages — 同段/跨段真实 tool 行就地压成指针
+            # 两者都只改 payload、DB 不动。
+            "messages": self._compact_old_tool_messages(
+                self._maybe_compress_messages(messages, system_prompt=None, ref_context=None),
+            ),
             "tools": registry.get_definitions(set(self._enabled_tool_names()), quiet=True),
         }
         # provider 是模型知识的唯一家园 —— reasoning_effort / tools 格式
@@ -913,6 +919,101 @@ class AIAgent:
             return threshold
         except Exception:
             return 76800
+
+    # ── tool 上下文压缩（与 _maybe_compress_messages 互补的另一层）──────────
+    # _maybe_compress_messages 处理「整 segment 范围」的叙事化（用 narrative_xxx
+    # 把历史段替换成摘要），但它对「同 wake 内 ReAct loop N 轮 tool 消息累积」
+    # 的覆盖很弱——长单段 session（如 tx_initiative_0705_1143，80+ 轮把上下文从
+    # 21K 推到 101K）仍然会膨胀。
+    # 本层在 _maybe_compress_messages 之后跑，专门处理「真实 tool 消息」的就地
+    # 压缩：把 >depth 轮以前、且 >min_chars 的 tool 行 content 替换为指针，DB
+    # 不动（recall_tool_result 工具查 DB 拿回原文）。
+
+    # fake 注入项的 tool_call_id 前缀——这些不进 payload 计数、也不压缩。
+    # （sys_NNN = agent _sys_tool_call，narrative_xxx = segment 叙事替换，
+    #  fake_xxx = assembly 审计侧渲染。三者都不在 messages 表落库，单独识别。）
+    _FAKE_TOOL_ID_PREFIXES = ("sys_", "narrative_", "fake_")
+
+    def _get_tool_history_depth(self) -> int:
+        """最近 N 轮真实 tool 消息不入压缩，给活跃窗口。默认 8。"""
+        try:
+            import os
+            return max(0, int(os.environ.get("DIGITAL_LIFE_TOOL_HISTORY_DEPTH", "8")))
+        except Exception:
+            return 8
+
+    def _get_tool_compact_min_chars(self) -> int:
+        """content 字符数低于此值的 tool 行不压（短结果压成指针反而变大）。默认 100。"""
+        try:
+            import os
+            return max(0, int(os.environ.get("DIGITAL_LIFE_TOOL_COMPACT_MIN_CHARS", "100")))
+        except Exception:
+            return 100
+
+    def _compact_old_tool_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """就地压缩 payload 里的旧 tool 消息——只改 content，不动 DB。
+
+        条件（AND）：真实 tool 行 且 > depth 轮之前 且 len(content) > min_chars。
+        fake（sys_/narrative_/fake_ 前缀）一律跳过。
+
+        返回新 list（不修改入参，与 _maybe_compress_messages 范式一致）。
+        """
+        depth = self._get_tool_history_depth()
+        min_chars = self._get_tool_compact_min_chars()
+
+        # 从后往前数真实 tool 行，定位"最近 depth 个真实 tool 行"之前的那些行
+        real_tool_indices: list[int] = []
+        for idx, m in enumerate(messages):
+            if m.get("role") != "tool":
+                continue
+            tid = str(m.get("tool_call_id") or "")
+            # fake 注入项识别：sys_NNN / narrative_xxx / fake_xxx
+            if tid.startswith(self._FAKE_TOOL_ID_PREFIXES):
+                continue
+            real_tool_indices.append(idx)
+
+        # depth=0 表示无活跃窗口，全部候选；depth>0 时最近 depth 条不压
+        if depth > 0 and len(real_tool_indices) <= depth:
+            return list(messages)
+        candidates_to_compress = set(real_tool_indices[:-depth]) if depth > 0 else set(real_tool_indices)
+
+        if not candidates_to_compress:
+            return list(messages)
+
+        result: list[dict[str, Any]] = []
+        for idx, m in enumerate(messages):
+            if idx not in candidates_to_compress or m.get("role") != "tool":
+                result.append(m)
+                continue
+            content = str(m.get("content") or "")
+            if len(content) <= min_chars:
+                # 短结果保留——压成 ~150 字符指针反而扩大上下文
+                result.append(m)
+                continue
+            tid = str(m.get("tool_call_id") or "")
+            name = str(m.get("name") or "")
+            result.append({
+                "role": "tool",
+                "tool_call_id": tid,
+                "name": name,
+                "content": self._render_tool_pointer(m, tid, name),
+            })
+        return result
+
+    @staticmethod
+    def _render_tool_pointer(m: dict[str, Any], tid: str, name: str) -> str:
+        """生成"已压缩"指针文本——LLM 可直读，并指引它调 recall_tool_result。"""
+        args_summary = ""
+        # tool_calls 在配对的 assistant 行上（不在 tool 行），无法直接拿到 args；
+        # 这里从 content 头部抓 key 字段做最简摘要，便于 LLM 辨识是什么调用。
+        content_preview = (str(m.get("content") or "")[:60]).replace("\n", " ").strip()
+        if content_preview:
+            args_summary = content_preview
+        return (
+            f"[旧工具结果已压缩] name={name} id={tid}"
+            + (f" preview={args_summary!r}" if args_summary else "")
+            + f"\n→ recall_tool_result(tool_call_id=\"{tid}\")"
+        )
 
     def _split_by_user_message(self, messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
         """按 user 消息切分段。
