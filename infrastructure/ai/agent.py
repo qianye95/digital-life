@@ -146,8 +146,10 @@ class AIAgent:
             # 关键纠正：之前做法是把 think 剥成末尾 fake user 消息——位置和结论对不上。
             # 正确形式 think 应跟 tool_calls 同在一条 assistant message，位置一一对应。
             # provider.inject_into_messages 返回新 list（不动 messages 入参），临时发不下不落库。
+            # max_rounds 不传——由 provider 自己声明 reuse_max_rounds（GLM=5, StepFun=3），
+            # 避免轻量模型把自己的历史推理当 todo 累积执行（wake-499 案例）。
             _messages_for_call = self._provider.inject_into_messages(
-                messages, self._reasoning_history, max_rounds=10,
+                messages, self._reasoning_history,
             ) if self._reasoning_history else messages
 
             # ── 字面 dump：每次 LLM 调用前保存 _messages_for_call 的字面副本 ──
