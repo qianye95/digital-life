@@ -453,128 +453,61 @@ def _wake_or_inject(triggering_event_id: int) -> None:
 
 
 def _inject_to_running_session(event_id: int, instance_id: str) -> None:
-    """RUNNING 中 emit 新事件 → mid-session 注入到运行中会话。
+    """RUNNING 中 emit 新事件 → mid-session 通知运行中的会话。
 
-    本函数是 refactor/emit-driven-wake 之后**唯一**的 mid-session 注入入口。
-    handler._inject_msg_to_running_session 的旧实现被搬到这里——但**去掉了**
-    `_delayed_wake_check` 那段(emit→wake 路径已经被 events._wake_or_inject 接管)。
+    设计原则（不区分 kind、完全统一）：
 
-    保留原实现的副作用:
-      1. 写 messages.db(role=user) — 让 sessions 列表能展示这条消息
-      2. 镜像到 runtime_log.turn(若有活动 wake)— 让前端 Transcript 看得到
-      3. signal_new_events 内存池 — check_before_send 下次感知
+    RUNNING 中新事件到达时**不打断正在跑的 wake**，只把"有何新东西到了"
+    这件事写到内存 ``signalled_events`` 池。所有事件类型走同一条路——
 
-    ⚠ bug2 修复 (2026-06)：旧实现重新 `pop_due_events(limit=20)` 盲扫全队列注入，
-    导致同一事件既被 events.py 写库又被 agent signal-pool 消费、双重出现；且
-    传入的 triggering_event_id 被忽略。
-    现在改为：**只注入 triggering_event_id 这一条**（它才是本次 emit 进来、需要
-    注入的），外加注入后 consume 掉，既去重又防幽灵事件。
+    - **不写 sessions.db**（不渲染 wake-prompt 模板，那是叫醒用的；也不是
+      "user 消息"——它没有 user 角色）。
+    - **不立即 consume**：DB events 队列里事件原样保留。
+    - **不镜像到 runtime_log.turn**（前端 Transcript 的纳管由 agent 层
+      ``wake_signal`` 写 audit_ctx 时一起做）。
+    - **不做任何按 kind 分流的处理**。
 
-    任一步骤失败都不抛——只是 log。
+    后处理交给模型自己——它在自己下一轮 LLM call 启动时主动扫内存池
+    （``agent._inject_signalled_events``）。模型那一层**才**按事件类型决定渲染
+    与消费策略：message/group_message 展示全文 + 同步消费；其它 kind 只展示
+    ID+类型、由模型主动 ``sense_event_detail`` 决定查看。
+
+    **rest 边界（所有 kind 一致）**：本函数不提前消费 DB 事件。即使模型在扫到
+    内存池之前就 ``rest()`` 结束当前 wake，事件依然完整保留在 events 队列，cron
+    下一轮 ``pop_due_events`` 自然取它、走正常 wake 流程——没有"消息丢失"风险。
     """
     try:
         from domain.lifecycle.event_registry import get_event_type
 
-        # ⚠ bug2 fix: 只处理本次触发的这条事件，不再 pop 全队列盲注。
-        # 用 peek(只读)+consume 的组合替代原来的 pop_due_events。
         ev = _peek_single_event(event_id)
         if not ev:
             logger.debug("mid-session inject: event %d not found, skip", event_id)
             return
-        kind = ev.get("kind", "")
-        if kind not in ("message", "group_message"):
-            # 非 message 类事件：旧逻辑也只处理 message/group_message。
-            # 其它 kind 的 mid-session 通知走 signal 即可，不写 user message。
-            _consume_event_safe(event_id)
-            return
 
-        eid = ev.get("event_id")
+        kind = ev.get("kind", "")
+        eid = ev.get("event_id", event_id)
         ev_type = get_event_type(kind)
         payload = ev.get("payload", {}) if isinstance(ev.get("payload"), dict) else {}
-        text = payload.get("text", "") or ""
-        sender_name = payload.get("sender_name", "") or ""
-        chat_name = payload.get("chat_name", "") or ""
-        chat_id = payload.get("chat_id", "") or ""
-        mentions_bot = bool(payload.get("mentions_bot", False))
-        is_group = kind == "group_message"
 
-        # 1. 拼完整 wake-prompt 文本(按当前 event_types.yaml 模板格式)
-        wf = (
-            f"## ── ↓ 当下事件 ↓ ──\n\n"
-            f"### 唤醒原因\n\n"
-            f"💬 {'群聊有新消息' if is_group else '新消息'}。\n"
-            + f"{sender_name}：{text}\n"
-            + f"\n如需回应，必须用 `express_to_human` 工具发送。\n"
-            + f"── /当下事件 ──"
-        )
-
-        # 2. 持久化为 user message(manager 线程不知道 session_id，需自己查最新的 running session)
-        cur_sid = ""
+        # 统一对所有 kind 走同一条路：仅 signal 到内存 signalled_events 池。
+        # 不渲染、不写 DB、不消费 events 队列、不镜像 audit。
+        summary = {
+            "event_id": eid,
+            "kind": kind,
+            "display_name": ev_type.display_name if ev_type else kind,
+            "description": ev_type.description if ev_type else "",
+            "payload": payload,
+        }
         try:
-            from infrastructure.ai.session_db import SessionDB
-            from infrastructure.config import get_current_session_id
-            cur_sid = get_current_session_id() or ""
-            if not cur_sid:
-                import sqlite3
-                from infrastructure.config import get_runtime_state_db_path
-                sdb_path = get_runtime_state_db_path()
-                if sdb_path.exists():
-                    conn = sqlite3.connect(str(sdb_path))
-                    try:
-                        row = conn.execute(
-                            "SELECT id FROM sessions WHERE ended_at IS NULL "
-                            "ORDER BY started_at DESC LIMIT 1"
-                        ).fetchone()
-                        if row:
-                            cur_sid = row[0]
-                    finally:
-                        conn.close()
-            if cur_sid:
-                sdb = SessionDB()
-                sdb.append_message(
-                    cur_sid, "user", wf,
-                    chat_id=chat_id if is_group else "",
-                )
-
-                # 3. 同步镜像到 runtime_log.turn(前端 Transcript 数据源)
-                #    归属:挂到当前在跑的 wake 的 turn 序列末尾。
-                try:
-                    _mirror_inject_to_audit_turn(
-                        instance_id=instance_id,
-                        text=wf,
-                        chat_id=chat_id if is_group else "",
-                    )
-                except Exception as exc:
-                    logger.debug("mid-session inject audit mirror failed: %s", exc)
-        except Exception as exc:
-            logger.debug("mid-session inject DB persistence failed: %s", exc)
-
-        # 4. signal 内存信号池(check_before_send 下次感知)
-        try:
-            summary = {
-                "event_id": eid,
-                "kind": kind,
-                "display_name": ev_type.display_name if ev_type else kind,
-                "description": ev_type.description if ev_type else "",
-                "payload": {
-                    "text": text,
-                    "sender_name": sender_name,
-                    "chat_name": chat_name,
-                    "mentions_bot": mentions_bot,
-                },
-            }
             from domain.lifecycle.session_events import signal_new_events
             signal_new_events([summary], instance_id=instance_id)
             logger.info(
-                "WAKE_OR_INJECT mid-session injected %s event %d to RUNNING %s",
+                "WAKE_OR_INJECT mid-session signaled %s event %d to RUNNING %s "
+                "(no early consume; awaits model next-turn pickup or cron fallback)",
                 kind, eid, instance_id,
             )
         except Exception as exc:
             logger.debug("signal_new_events failed: %s", exc)
-
-        # 5. ⚠ bug2 fix: 注入完成即 consume 掉，防止 cron 下次 POP_DUE 再取它、
-        #    也防止 agent signal-pool 与 events 写库的双重消费。
-        _consume_event_safe(event_id)
     except Exception as exc:
         logger.warning("mid-session inject failed for event %d: %s", event_id, exc)
 
@@ -592,7 +525,8 @@ def _peek_single_event(event_id: int) -> dict | None:
         try:
             row = conn.execute(
                 "SELECT event_id, channel, payload, created_at, fire_at, kind, "
-                "consumed_at, resurrect_count FROM events WHERE event_id = ?",
+                "consumed_at, resurrect_count FROM events "
+                "WHERE event_id = ? AND consumed_at IS NULL",
                 (event_id,),
             ).fetchone()
             if not row:
@@ -618,113 +552,6 @@ def _peek_single_event(event_id: int) -> dict | None:
     except Exception as exc:
         logger.debug("_peek_single_event failed for %d: %s", event_id, exc)
         return None
-
-
-def _consume_event_safe(event_id: int) -> None:
-    """consume 一条事件（标记 consumed_at）。失败只 log，不抛。"""
-    try:
-        from domain.lifecycle.events import consume_event
-        consume_event(event_id)
-    except Exception as exc:
-        logger.debug("consume_event failed for %d: %s", event_id, exc)
-
-
-def _mirror_inject_to_audit_turn(*, instance_id: str, text: str, chat_id: str = "") -> None:
-    """把 mid-session 旁路注入消息镜像到 runtime_log.turn 表对应当前在跑的 wake。
-
-    Transcript 前端组件按 wake_id 拉取 turn 列表渲染。旁路注入只写 state.db.messages
-    时,Transcript 看不到——但 chat_stream injection 拉到了 messages.db,所以
-    "完整详情"看得到。两套数据源不一致导致用户感觉"消息丢了一半"。
-
-    本函数补一份 turn 表写入,让 Transcript 在当前在跑 wake 的序列末尾看到这条消息。
-
-    边界处理:
-      - 没有在跑的 wake(affair 刚好转 BLOCKED 的几毫秒空隙)→ 只 log,不写孤 turn
-      - 多实例隔离:按 instance_id 查 wake 表,确保不会写错别人实例的 wake
-      - llm_call_seq / position_in_call 取该 wake 已有 turn 的最大值 +1:
-        语义上"在上一个 LLM call 之间插入了一条 user 输入"
-        (而非开启新的 LLM call,所以 llm_call_seq 不递增)
-    """
-    if not instance_id:
-        return
-    try:
-        import time as _time
-        from infrastructure.persistence.instance import get_audit
-        audit = get_audit(instance_id)
-    except Exception:
-        return
-
-    try:
-        # 找当前在跑的 wake —— 优先用 contextvar（scheduler 在 wake 作用域内 set 的），
-        # 精确归属到本 wake。fallback 才查 wake 表（ended_at IS NULL + 时间窗）。
-        #
-        # ⚠ bug1 修复：旧实现只靠 "ended_at IS NULL + 1h 窗" 查表猜归属，一旦失败 wake
-        # 的 ended_at 因异常被吞而留 NULL（scheduler finally 静默吞 WakeContext.end），
-        # 下一条消息的注入就会被 SELECT 命中那个 NULL 失败 wake，把 user turn 错挂到
-        # 上一组——前端按 wake_id 分组就显示成"消息归到了上一个 wake"。
-        wake_id = None
-        wake_seq = None
-        try:
-            from domain.lifecycle.runtime_context import get_current_wake_id
-            _ctx_wake_id = get_current_wake_id()
-        except Exception:
-            _ctx_wake_id = ""
-        if _ctx_wake_id:
-            row = audit.fetchone(
-                "SELECT id, wake_seq FROM wake WHERE instance_id = ? AND id = ?",
-                (instance_id, _ctx_wake_id),
-            )
-            if row:
-                wake_id = row.get("id") or row["wake_seq"]
-                wake_seq = row["wake_seq"]
-        if wake_id is None:
-            # fallback：contextvar 没设（如非 wake 作用域的旁路注入）才走老的查表猜
-            import time as _time
-            row = audit.fetchone(
-                "SELECT id, wake_seq FROM wake "
-                "WHERE instance_id = ? AND ended_at IS NULL "
-                "AND started_at >= ? "
-                "ORDER BY started_at DESC LIMIT 1",
-                (instance_id, _time.time() - 3600),
-            )
-            if row:
-                wake_id = row.get("id") or row["wake_seq"]
-                wake_seq = row["wake_seq"]
-
-        if wake_id is None:
-            # contextvar 没设 + fallback 也没命中 → 当前没有在跑的 wake，不写孤 turn
-            logger.debug(
-                "mid-session inject: no active wake for %s, skip turn mirror",
-                instance_id[:8],
-            )
-            return
-
-        # 找该 wake 现有 turn 的最后一行,继承 llm_call_seq
-        last = audit.fetchone(
-            "SELECT llm_call_seq AS c, position_in_call AS p "
-            "FROM turn WHERE wake_id = ? "
-            "ORDER BY id DESC LIMIT 1",
-            (wake_id,),
-        )
-        last_call = (last or {}).get("c") or 0
-        last_pos = (last or {}).get("p") or 0
-        # position_in_call +1 表示插入到当前 call 的最新 tool 之后。
-        # 不递增 llm_call_seq(不属于新 LLM call,只是 mid-call 的 user 输入)
-        audit.append_turn(
-            wake_id=wake_id,
-            wake_seq=wake_seq,
-            llm_call_seq=last_call,
-            position_in_call=last_pos + 1,
-            role="user",
-            content=text,
-            chat_id=chat_id or None,
-        )
-        logger.debug(
-            "mid-session inject mirrored to turn (wake=%s/%s call=%s pos=%s)",
-            wake_id, wake_seq, last_call, last_pos + 1,
-        )
-    except Exception as exc:
-        logger.debug("mid-session inject audit mirror failed: %s", exc)
 
 
 # lazy import for choose_reason — 避免模块加载时循环依赖
