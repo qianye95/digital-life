@@ -183,6 +183,9 @@ def render_skill_index(instance_id: str | None = None) -> str:
     """渲染已注册 skill 的索引段落（供 system prompt 注入）。
 
     返回 markdown 格式的技能列表，或空字符串（无注册 skill）。
+
+    精简约束：每条 description 截到 60 字符。详情模型需要时调 ``skill_view(name)``
+    拿全文（progressive disclosure）。description 长度超过 60 时按整词截断 + 省略号。
     """
     registered = get_instance_registered_skills(instance_id)
     if not registered:
@@ -194,15 +197,26 @@ def render_skill_index(instance_id: str | None = None) -> str:
         if meta is None:
             # skill 不存在或 platform 不兼容，跳过
             continue
-        desc = meta.get("description", "")
-        if desc:
-            items.append(f"- `{name}`：{desc}")
+        desc = (meta.get("description", "") or "").strip()
+        if not desc:
+            continue
+        if len(desc) > 60:
+            # 按整词截断（避免半个中文/英文词），加省略号
+            cut = desc[:60]
+            # 找最后一个空格或中文边界
+            for sep in (" ", "，", "、", "——"):
+                idx = cut.rfind(sep)
+                if idx > 30:
+                    cut = cut[:idx]
+                    break
+            desc = cut + "…"
+        items.append(f"- `{name}`：{desc}")
 
     if not items:
         return ""
 
     skill_index = "\n".join([
-        "**技能**（需要时调 `skill_view(name)` 查看完整说明）：",
+        "**技能**（详情调 `skill_view(name)`）：",
         *items,
     ])
     return skill_index

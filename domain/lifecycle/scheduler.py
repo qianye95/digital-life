@@ -543,10 +543,10 @@ def wake_digital_life(
 def _render_workspace_intro(instance_id: str, my_projects: list | None = None) -> str:
     """Render the "your workspace" prompt section.
 
-    Tells the model where its home is, where it can write, where it can read,
-    what code/skill/docs it can reference. Makes the model aware of the
-    three-layer space (personal → project → shared) so it can self-iterate
-    without destroying project structure.
+    精简版：只给根路径 + 三层区分级 + 实际项目列表。详细子目录模型用 terminal
+    ls 自查（实测模型已熟练使用 projects/<pid>/... 路径）。每个项目的代码/文档/
+    记忆子目录结构（code/tools/, docs/, memory/ 等）历史版本给过描述，但模型日常
+    写文件靠 ls，无需每次重打。
     """
     try:
         from domain.project.loader import load_all_projects
@@ -562,39 +562,22 @@ def _render_workspace_intro(instance_id: str, my_projects: list | None = None) -
                     mine.append((pid, cfg))
         else:
             mine = my_projects if my_projects and isinstance(my_projects[0], tuple) else []
-        proj_lines: list[str] = []
-        for pid, cfg in mine:
-            proj_lines.append(
-                f"- projects/{pid}/（{cfg.name}）\n"
-                f"    code/tools/ — 项目工具代码\n"
-                f"    code/strategies/ — 项目策略代码\n"
-                f"    skills/ — 项目方法论\n"
-                f"    docs/ — 复盘/笔记/决策记录\n"
-                f"    memory/ — 项目级共享记忆"
-            )
-        projects_block = "\n".join(proj_lines) if proj_lines else "（你还没参与任何 active 项目）"
+
+        proj_lines = "\n".join(f"- projects/{pid}/（{cfg.name}）" for pid, cfg in mine)
+        if not proj_lines:
+            proj_lines = "（你还没参与任何 active 项目）"
+
         return (
-            "### 你的工作空间（自我迭代时知道写到哪里）\n\n"
-            f"**项目根目录（绝对路径）**：`{_repo_root}`\n"
-            "terminal/execute_code 默认路径基于此。所有路径在下方都相对这个根。\n\n"
-            "你拥有 3 层空间，每次动手前先想 **「这个东西该放到哪一层？」**：\n\n"
-            f"**个人草稿**（`apps/{instance_id[:8]}…/`）：\n"
-            "  workspace/ — 设计草稿 / 临时实验\n"
-            "  tools/ — 注册的个人工具（试错都用这里）\n"
-            "  skills/ — 个人经验方法论\n\n"
-            "**你参与的项目空间**：\n"
-            f"{projects_block}\n\n"
-            "**系统共享空间**（`shared/`）：\n"
-            "  capabilities/ — 通用能力模块（OCR / TTS / 算法库）\n"
-            "  tools/ — 跨项目通用工具\n"
-            "  skills/ — 跨项目通用方法论\n\n"
-            "**只读参考**：`docs/architecture/`（系统设计）、`interfaces/skills/*/SKILL.md`（skill 格式参考）、`CLAUDE.md` + `docs/development/`（系统行为守则）\n\n"
-            "**关键约束**：\n"
-            "- 临时实验写 workspace/、项目专属能力写 projects/<pid>/code/、skills/\n"
-            "- 跨项目能力写 shared/\n"
-            "- **不要新建顶层目录**（不要在项目根 mkdir my_module）\n"
-            "- 不要写 domain/ infrastructure/ config/ 源码（这是系统维护者的事）\n"
-            "- 注册新工具/技能用 `register_tool` / `register_skill` 工具"
+            "### 你的工作空间\n\n"
+            f"**项目根**：`{_repo_root}`（terminal/execute_code 默认基于此）\n\n"
+            "**三层空间**（动手前想「该放哪一层」）：\n"
+            f"- 个人：`apps/{instance_id[:8]}…/` (workspace/tools/skills/)\n"
+            "- 项目：写到这里对应的 `projects/<pid>/`（拆成 code/docs/memory/skills）\n"
+            "- 共享：`shared/` (capabilities/tools/skills 跨项目通用)\n\n"
+            f"**你参与的项目**：\n{proj_lines}\n\n"
+            "**约束**：注册新工具/技能走 `register_tool`/`register_skill`；"
+            "不要新建顶层目录、不要写 domain/infrastructure/config/ 源码。"
+            "只读参考：`docs/architecture/`、`CLAUDE.md`。"
         )
     except Exception:
         return ""

@@ -1028,18 +1028,26 @@ class AIAgent:
 
     @staticmethod
     def _render_tool_pointer(m: dict[str, Any], tid: str, name: str) -> str:
-        """生成"已压缩"指针文本——LLM 可直读，并指引它调 recall_tool_result。"""
-        args_summary = ""
-        # tool_calls 在配对的 assistant 行上（不在 tool 行），无法直接拿到 args；
-        # 这里从 content 头部抓 key 字段做最简摘要，便于 LLM 辨识是什么调用。
-        content_preview = (str(m.get("content") or "")[:60]).replace("\n", " ").strip()
-        if content_preview:
-            args_summary = content_preview
-        return (
-            f"[旧工具结果已压缩] name={name} id={tid}"
-            + (f" preview={args_summary!r}" if args_summary else "")
-            + f"\n→ recall_tool_result(tool_call_id=\"{tid}\")"
-        )
+        """生成"已压缩"指针文本——LLM 可直读，并指引它调 recall_tool_result。
+
+        精简设计（每条 ~70-110 chars，含 preview；旧版 182-196 chars）：
+        - 单行紧凑格式 ``{CMP} name=X id=Y pv="…" → recall_tool_result(ID)``
+        - preview 固定保留 ``content[:40]``：实战发现不同 tool 的头部都有用 ——
+          ``terminal`` 是 zsh 错误或命令输出，``recall_entity`` 是 entity 名+summary，
+          ``express_to_human`` 是 sent 状态。短到 40 chars 不显著拖 token，但让模型
+          能不调 recall 就粗判"这条工具结果的语义"，避免老去拉原文。
+        - tid 仅出现一次（旧版末尾 recall 重复了一次 tool_call_id）。
+        - 全 ASCII + 单行、无中文前缀。
+
+        历史：旧版 ``[旧工具结果已压缩] name=X id=Y preview="…" (60c)\n→ recall_tool_result(tool_call_id="Y")`` 约 190 chars。
+        精简后 ~70-110 chars，省 ~45%。
+        实测 wake 1752 跨段 85 条指针省 ~9K chars ≈ 4-5K token。
+        """
+        # preview: 取 content 头 40 chars, 去 newline 收紧
+        raw = str(m.get("content") or "")
+        preview = raw[:40].replace("\n", " ").strip()
+
+        return f"{{CMP}} name={name} id={tid} pv={preview!r} → recall_tool_result({tid})"
 
     def _split_by_user_message(self, messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
         """按 user 消息切分段。
