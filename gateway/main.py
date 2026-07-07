@@ -52,7 +52,6 @@ def _var_run_dir() -> Path:
 
 
 def _setup_logging(instance_id: str = "") -> None:
-    runtime_home = get_runtime_home()
     config_path = get_runtime_config_path()
     try:
         from infrastructure.ai import load_runtime_config
@@ -61,7 +60,8 @@ def _setup_logging(instance_id: str = "") -> None:
     except Exception:
         log_level = "INFO"
 
-    base_format = f"%(asctime)s [{instance_id or 'master'}] [%(name)s] %(levelname)s %(message)s"
+    instance_tag = instance_id or "master"
+    base_format = f"%(asctime)s [{instance_tag}] [%(name)s] %(levelname)s %(message)s"
     formatter = logging.Formatter(base_format, datefmt="%Y-%m-%d %H:%M:%S")
 
     root = logging.getLogger()
@@ -75,13 +75,21 @@ def _setup_logging(instance_id: str = "") -> None:
     root.addHandler(stream_handler)
 
     # 2) 主日志文件 — 每 1 天 rotate，保留 1 份历史（共 2 天：今天 + 昨天）
-    # 语义对齐：「清理 2 天之前的数据」 —— 超过 2 天的（前天及更早）自动删除。
-    # 不是「每 2 天 truncate 一次」，而是按天滚动 + 控制保留份数。
-    # 之前 interval=2,backupCount=3 会保留 6 天，不符需求。
+    # 路径必须显式按 instance_id 解析：
+    #   - instance 子进程 → apps/{id}/data/var/logs/digital-life.log（per-instance 审计）
+    #   - master 进程     → 项目根 var/logs/digital-life.log（项目级审计）
+    # 不能用 get_runtime_home()：它走 ContextVar/env fallback 到 registry 第一个（=c2a5c8e8），
+    # 结果 3 个子进程的 logger 全绑到 zero 的文件 —— alpha/beta 的实例日志自启动起从未被打开。
+    # master 必须避开 per-instance 路径（和 _var_run_dir / PID 文件那条同款姿势）。
     try:
         from logging.handlers import TimedRotatingFileHandler
-        from pathlib import Path as P
-        log_path = P(runtime_home) / "var" / "logs" / "digital-life.log"
+        from infrastructure.config import get_instance_data_dir
+        if instance_id:
+            data_dir = get_instance_data_dir(instance_id)
+            log_dir = data_dir / "var" / "logs"
+        else:
+            log_dir = _project_root() / "var" / "logs"
+        log_path = log_dir / "digital-life.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         file_handler = TimedRotatingFileHandler(
             str(log_path),
@@ -94,7 +102,7 @@ def _setup_logging(instance_id: str = "") -> None:
         file_handler.setFormatter(formatter)
         file_handler.suffix = "%Y-%m-%d.log"
         root.addHandler(file_handler)
-    except Exception as exc:
+    except Exception:
         # fall back: 仅 stdout
         pass
 
