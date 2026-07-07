@@ -103,9 +103,11 @@ class TokenUsageTracker:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._db_path), timeout=5.0)
         conn.row_factory = sqlite3.Row
-        # WAL 减少锁竞争（cron 读、agent 写、console 读三个进程）
+        # WAL 减少锁竞争（cron 读、agent 写、console 读三个进程）；
+        # FULL synchronous 防 WAL 半写损坏（系统睡眠频繁环境下高发）。
         try:
             conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=FULL")
         except Exception:
             pass
         return conn

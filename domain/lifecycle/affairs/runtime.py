@@ -199,6 +199,8 @@ def init_db(db_path: Optional[Path] = None) -> Path:
     path = db_path or _get_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = _real_sqlite3.connect(str(path))
+    # durability：ALL/FULL synchronous 让 schema 初始化时也走 fsync，跟 _conn() 对齐。
+    conn.execute("PRAGMA synchronous=FULL")
     conn.execute("PRAGMA busy_timeout = 5000;")
     try:
         conn.executescript(SCHEMA)
@@ -220,6 +222,8 @@ def _conn() -> Generator[sqlite.Connection, None, None]:
     """SQLite 连接上下文管理器——自动设置 row_factory、foreign_keys、busy_timeout。"""
     c = _real_sqlite3.connect(str(_get_db_path()), timeout=10, isolation_level=None)
     c.row_factory = sqlite.Row
+    c.execute("PRAGMA journal_mode=WAL;")
+    c.execute("PRAGMA synchronous=FULL;")
     c.execute("PRAGMA foreign_keys = ON;")
     c.execute("PRAGMA busy_timeout = 5000;")
     try:

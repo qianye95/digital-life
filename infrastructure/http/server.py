@@ -16,6 +16,7 @@ import signal
 import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Optional
 
 from aiohttp import web
@@ -184,7 +185,19 @@ async def run_instance_gateway(instance_id: str) -> None:
         from domain.lifecycle.schema import init_all_schemas
         init_all_schemas()
     except Exception as exc:
-        logger.warning("Instance %s schema init failed: %s", instance_id[:8], exc)
+        # StateDbCorruptError 是 state.db 主库损坏的硬故障——继续启动会变成
+        # "EMIT 全 FAILED，事件被静默吞掉"的植物人。务必 ERROR 显眼，便于发现。
+        from domain.lifecycle.schema import StateDbCorruptError
+
+        if isinstance(exc, StateDbCorruptError):
+            logger.error(
+                "Instance %s STATE_DB_CORRUPT — continuing start in degraded mode; "
+                "EMIT writes will fail until restored from backup. Detail: %s",
+                instance_id[:8],
+                exc,
+            )
+        else:
+            logger.warning("Instance %s schema init failed: %s", instance_id[:8], exc)
 
     stop_event = asyncio.Event()
 
@@ -279,6 +292,16 @@ async def run_instance_gateway(instance_id: str) -> None:
     cron_thread.start()
     logger.info("Instance %s cron loop started", instance_id[:8])
 
+    # 启动 WAL checkpoint 循环（防 Mac 睡眠打断自动 checkpoint 导致主库损坏）
+    ck_stop = threading.Event()
+    ck_thread = threading.Thread(
+        target=_instance_wal_checkpoint_loop,
+        args=(instance_id, ck_stop),
+        name=f"walck-{instance_id[:8]}",
+        daemon=True,
+    )
+    ck_thread.start()
+
     await stop_event.wait()
     logger.info("Instance %s shutting down...", instance_id[:8])
 
@@ -289,6 +312,8 @@ async def run_instance_gateway(instance_id: str) -> None:
             pass
     cron_stop.set()
     cron_thread.join(timeout=5)
+    ck_stop.set()
+    ck_thread.join(timeout=5)
     logger.info("Instance %s stopped", instance_id[:8])
 
 
@@ -318,6 +343,95 @@ def _instance_cron_loop(instance_id: str, stop_event: threading.Event) -> None:
         while slept < interval and not stop_event.is_set():
             time.sleep(min(5, interval - slept))
             slept += 5
+
+
+def checkpoint_state_db(db_path: Path) -> tuple[int, int, int]:
+    """对单个 SQLite 文件执行 PRAGMA wal_checkpoint(TRUNCATE)。
+
+    返回 SQLite checkpoint 原生三元组 ``(busy, log_pages, checkpointed_pages)``：
+    - busy != 0 表示有未结束的事务无法 checkpoint（不致命，下次再试）；
+    - log_pages 归零意味着 WAL 被裁剪到 0，是健康状态。
+
+    设计动机：Mac 频繁睡眠会让 SQLite 自动 checkpoint（默认 WAL > 1000 page 触发）
+    在睡眠瞬断时写到一半 → 主库 b-tree 指针错乱（已 3 次复发）。本函数由后台
+    daemon thread 周期性调用，把 WAL 在低风险时机主动清零，避免等到 4MB+ 大事务
+    时被睡眠打断。IO 失败静默吞掉——别拖死 checkpoint loop。
+    """
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5.0)
+        try:
+            row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        logger.debug("wal_checkpoint skipped for %s: %s", db_path, exc)
+        return (1, -1, -1)
+    except OSError as exc:  # system sleep / disk transient (曾出现 disk I/O error)
+        logger.debug("wal_checkpoint skipped for %s: %s", db_path, exc)
+        return (1, -1, -1)
+
+    if row is None:
+        return (1, -1, -1)
+    return (int(row[0]), int(row[1]), int(row[2]))
+
+
+def _instance_wal_checkpoint_loop(instance_id: str, stop_event: threading.Event) -> None:
+    """每个实例独立的 WAL checkpoint 循环。
+
+    每 ``DIGITAL_LIFE_DB_CHECKPOINT_INTERVAL_S``（默认 1800s = 30min）周期性把
+    state.db（以及同进程的几个 .db，如果存在）的 WAL 用 ``wal_checkpoint(TRUNCATE)``
+    主动归零。沿用 cron loop 的 set/reset ContextVar 范式，让路径解析拿到正确实例。
+    """
+    import time
+    from infrastructure.config import (
+        get_instance_state_db_path,
+        set_current_instance_id,
+        reset_current_instance_id,
+    )
+    from domain.lifecycle.events import set_instance_context, reset_instance_context
+
+    interval = int(os.environ.get("DIGITAL_LIFE_DB_CHECKPOINT_INTERVAL_S", "1800"))
+    logger.info(
+        "Instance %s wal_checkpoint loop interval=%ds", instance_id[:8], interval
+    )
+
+    while not stop_event.is_set():
+        ctx1 = set_current_instance_id(instance_id)
+        ctx2 = set_instance_context(instance_id)
+        try:
+            state_db = get_instance_state_db_path()
+            if state_db.exists():
+                busy, log_pages, cked = checkpoint_state_db(state_db)
+                if busy == 0 and log_pages == 0:
+                    logger.debug(
+                        "Instance %s wal_checkpoint ok: checkpointed=%d pages",
+                        instance_id[:8],
+                        cked,
+                    )
+                else:
+                    logger.debug(
+                        "Instance %s wal_checkpoint pending: busy=%d log_pages=%d",
+                        instance_id[:8],
+                        busy,
+                        log_pages,
+                    )
+        except Exception as exc:
+            logger.debug(
+                "Instance %s wal_checkpoint loop tick failed: %s",
+                instance_id[:8],
+                exc,
+            )
+        finally:
+            reset_instance_context(ctx2)
+            reset_current_instance_id(ctx1)
+
+        # interval 内分 10s 一段 sleep，便于快速响应 stop
+        slept = 0
+        while slept < interval and not stop_event.is_set():
+            time.sleep(min(10, interval - slept))
+            slept += 10
 
 
 # ──────────────────────────────── Master 主进程模式 ────────────────────────────────

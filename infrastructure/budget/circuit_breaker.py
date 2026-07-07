@@ -93,7 +93,10 @@ def get_circuit_breaker_db() -> _sqlite.Connection:
     """
     db = _sqlite.connect(str(_db_path()))
     db.row_factory = _sqlite.Row
+    # durability: WAL + FULL synchronous 防 WAL 半写损坏。
     db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=FULL")
+    db.execute("PRAGMA busy_timeout=5000")
     db.executescript(_SCHEMA_SQL)
     db.commit()
     return db

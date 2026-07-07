@@ -144,7 +144,10 @@ def get_global_todos_db() -> sqlite.Connection:
     """
     db = sqlite.connect(str(_db_path()))
     db.row_factory = sqlite.Row
+    # durability: WAL + FULL synchronous 防 WAL 半写损坏。
     db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=FULL")
+    db.execute("PRAGMA busy_timeout=5000")
     db.execute("PRAGMA foreign_keys=ON")
     # 幂等迁移：老库没有这些列 → 补一次。新库由 schema 自动建。
     try:

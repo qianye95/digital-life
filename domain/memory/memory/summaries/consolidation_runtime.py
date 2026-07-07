@@ -131,7 +131,10 @@ def _extract_energy(text: str) -> Optional[float]:
 def _get_db() -> sqlite.Connection:
     db = sqlite.connect(str(_get_db_path()))
     db.row_factory = sqlite.Row
+    # durability: WAL + FULL synchronous 防 WAL 半写损坏。
     db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=FULL")
+    db.execute("PRAGMA busy_timeout=5000")
     db.executescript("""
         CREATE TABLE IF NOT EXISTS memory_layers (
             id INTEGER PRIMARY KEY,

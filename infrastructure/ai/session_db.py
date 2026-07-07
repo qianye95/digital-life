@@ -55,9 +55,12 @@ class SessionDB:
         self.db_path = db_path or get_runtime_state_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=3.0)
+        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=5.0)
         self._conn.row_factory = sqlite3.Row
+        # durability: WAL + FULL synchronous 防 WAL 半写损坏。
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=FULL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
 
         # 创建表（不含 segment_index）
         self._conn.executescript(SCHEMA_SQL)

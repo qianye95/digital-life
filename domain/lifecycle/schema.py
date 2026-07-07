@@ -18,8 +18,68 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+class StateDbCorruptError(RuntimeError):
+    """state.db 完整性自检失败时抛出。
+
+    根因：本机 Mac 频繁睡眠 + 早期未启用 synchronous=FULL，反复出现
+    ``database disk image is malformed``（6/29、7/3、7/7 三次复发）。一旦主库
+    b-tree 损坏，所有 EMIT 写入都会失败但 handler 会把 ``event_id=-1`` 当成
+    "FAILED-or-merged" 静默吞掉，导致实例长期植物人状态。该异常由启动入口
+    ``init_all_schemas`` 抛出，由 supervisor 决定是否继续启动；不应被普通
+    业务代码 catch。
+    """
+
+
+def _check_state_db_integrity(db_path: Path | None = None) -> None:
+    """启动前对 state.db 跑 PRAGMA integrity_check。
+
+    仅在文件已存在时执行；新实例（state.db 不存在）跳过——子模块会自动建库。
+    若发现损坏：log ERROR 显眼告警 + 抛 ``StateDbCorruptError``。
+
+    可选 ``db_path`` 参数：生产调用方传 None 走 ``get_instance_state_db_path``
+    （基于实例 context）；测试可直接传 tmp_path。
+    """
+    if db_path is None:
+        try:
+            from infrastructure.config import get_instance_state_db_path
+        except Exception as exc:  # pragma: no cover - defensive: config import 链故障
+            logger.warning("integrity check skipped: %s", exc)
+            return
+        db_path = get_instance_state_db_path()
+
+    if not db_path.exists():
+        return  # 新实例，子模块 schema init 时会创建
+
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5.0)
+        try:
+            row = conn.execute("PRAGMA integrity_check;").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        logger.error(
+            "STATE_DB_INTEGRITY_FAIL path=%s reason=sqlite_error (%s) — "
+            "instance may be corrupted; restore from backup before restarting",
+            db_path,
+            exc,
+        )
+        raise StateDbCorruptError(f"state.db unreadable at {db_path}: {exc}") from exc
+
+    result = row[0] if row else "unknown"
+    if result != "ok":
+        logger.error(
+            "STATE_DB_INTEGRITY_FAIL path=%s result=%r — EMIT/loader will fail; "
+            "restore from backup before restarting",
+            db_path,
+            result,
+        )
+        raise StateDbCorruptError(f"state.db corrupted at {db_path}: {result}")
 
 
 def init_all_schemas() -> None:
@@ -28,6 +88,10 @@ def init_all_schemas() -> None:
     必须在 set_current_instance_id / set_instance_context 设置好之后调用。
     若 state.db 不存在，各模块会自动创建（含父目录）。
     """
+    # 启动时完整性自检：损坏则抛 StateDbCorruptError，避免像之前那样静默腐败一周。
+    # 由调用方（supervisor / init script）决定 catch 后是停机还是带病启动。
+    _check_state_db_integrity()
+
     failed: list[str] = []
 
     # 1) affairs / wait_intents / events / heartbeats / vitals / wallet / nurture_log / timers

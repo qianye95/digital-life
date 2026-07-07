@@ -22,7 +22,10 @@ def _ensure_table() -> sqlite3.Connection:
     db_path = get_instance_state_db_path()
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
+    # durability: WAL + FULL synchronous 防 WAL 半写损坏（state.db 是 corruption 高发库）。
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=FULL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS conversation_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

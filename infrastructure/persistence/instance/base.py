@@ -24,10 +24,14 @@ class InstanceDB:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(
-            str(db_path), check_same_thread=False, timeout=3.0
+            str(db_path), check_same_thread=False, timeout=5.0
         )
         self._conn.row_factory = sqlite3.Row
+        # durability: WAL + FULL synchronous 让 commit 强制 fsync，避免系统睡眠/异常
+        # 退出时 WAL 半写导致主库 b-tree 损坏（曾反复发生 rowid out of order 故障）。
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=FULL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._apply_schema()
 
