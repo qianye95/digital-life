@@ -57,7 +57,13 @@ docs/design/*
 !docs/showcase/.gitkeep
 !docs/showcase/multi-instance-trading-2026-06.md
 !docs/showcase/how-to-play.zh.md
+!docs/showcase/beta-companion-2026-06.md
 !docs/operations/
+!docs/blog/
+!docs/blog/digital-life-overview.md
+!docs/blog/role-user-end-of-era.md
+!docs/philosophy/
+!docs/philosophy/fourth-quadrant-entity.md
 # scripts/ 与 tests/ 不入版本控制（运行前/测试均为本地工作目录）
 scripts/
 tests/

@@ -1,178 +1,341 @@
-# Digital Life
+# Digital Life · 数字生命
 
-[中文](README.md) | English
+中文 | [English](README.md)
 
-Digital Life is a **runtime framework for LLM-based digital beings that persist over time**. It is not a chatbot, nor a coding agent — it is a system where an LLM has a lifecycle, memory metabolism, and autonomous decision-making, capable of maintaining "the same entity from yesterday to today" across sessions, days, and scenes.
-
-> In one sentence: upgrade an LLM from "responds when asked" to "a self-driven digital life that rests, acts, and iterates on its own."
+Digital Life is not a chatbot, nor a coding agent — it is a **runtime framework that lets an LLM persist like a living being**. It has routines, memory metabolism, and autonomous decision-making, maintaining "the same entity from yesterday to today" across days, sessions, and scenes.
 
 ---
 
-## Thesis: From Loop Engineering to Life Engineering
+## Thesis: From Long-Horizon Task Dilemma to Life
 
-The industry recently started discussing [_Loop Engineering_](https://addyosmani.com/blog/loop-engineering/) (Addy Osmani / Boris Cherny / Peter Steinberger): stop prompting agents directly — design loops that do it for you. Five primitives (Automations / Worktrees / Skills / Plugins / Sub-agents) + Memory, then walk away.
+### What's the Problem?
 
-Around the same time, Digital Life began a parallel exploration — but in a different direction. Loop Engineering answers: **how to make coding agents write code automatically and reliably**. It is still a human-designed pipeline; humans set the schedule, agents execute the loop. We wanted to answer a different question: **how to give an agent a continuous, life-like existence** — when a goal spans multiple days, requires the agent to judge whether to change course, to keep pushing while you sleep, or to split work across collaborating agents, a "called-into-being-then-dispersed" loop can't.
+Models are already powerful. Through the ReAct loop (think → call tool → observe result → continue), given an instruction, they can produce impressive results. But reality is: **if a task takes more than a few hours, the agent falls apart**. The mainstream agents max out at around 8 hours.
 
-We call this direction **Life Engineering**.
+Why? The most commonly cited reasons are model-level — models haven't been trained on ultra-long reasoning chains, and context windows aren't large enough. But these are treating symptoms, not causes: how long is "long enough"? There's always a longer chain, always a bigger window. **The fundamental problem isn't the model — it's the engineering framework.**
 
-### Our Design: grounded in a subject-theory
+**Fatal Flaw 1: Turn-based design.** Nearly all agents are turn-based — you input, the model responds, you wait for it to finish, you input again. At step 40, a decision point comes up — **it freezes, waiting for your reply**. Hours pass, it does nothing. Turn-based design means the model can't move forward on its own, can't make reasonable assumptions, can't skip uncertainties and continue with something else.
 
-The core thesis of Digital Life is a subject-theory; every other mechanism is its support and projection.
+**Fatal Flaw 2: Tasks that inherently require interruption.** "Help me trade stocks and make ¥10,000" / "Help me grow my Xiaohongshu to 3,000 followers" / "Monitor BYD stock, report whenever it drops 3%" — these tasks are inherently not one-shot. They need cross-day progression, pausing and resuming. But existing frameworks have **never had a mechanism that lets the model stop when needed and wake itself up when needed**.
 
-**Foundation: the model is an organ, the subject is the runtime.**
-The mainstream consensus (OpenAI and the academic CoALA framework) treats the LLM as the agent's "brain" — memory is its context, tools its hands, selfhood its prompt, so the whole agent is "brain + bolt-on organs." We disagree: **the LLM is the cerebral cortex, but only one organ. The truly "living subject" is the whole runtime** — the cortex doesn't jump into action on its own; what decides when it wakes and what it does is the body around it.
+**In June, the industry proposed Loop Engineering** (Addy Osmani / Claude Code's /loop etc.) — a genuine direction: state externalization, hierarchical loops, deterministic automations, checkpoint rollback. Fatal Flaw 1 it works around with engineering hacks, but Fatal Flaw 2 (interruption and resumption) is fundamentally unsolvable in a "process" framework. And LOOP still has token explosion, goal drift, and human-in-the-loop issues.
 
-Put another way, a living agent should act like an organism: senses turn external signals into percepts, an autonomous rhythm decides when the cortex gets woken, energy decides how long it can keep working, memory metabolizes and associates on its own, and limbs (tools) move at will. Some of these are built today; the cortex is critically important, but on its own it amounts to nothing. More organs are yet to grow.
+LOOP has many problems, but **the direction is right**. If you generalize and extend the LOOP concept, it moves closer to our thinking. Our solution: **let the agent wake itself up and keep running.** Both fatal flaws dissolve — it does other things instead of blocking on your reply; it rests when done and wakes itself up to continue next time.
 
-From this thesis **event equality** follows naturally: if the LLM is merely an organ and the subject is the whole runtime, then a "human message" is no different from "time's up" or "energy's low" — all are stimuli the body receives, and none of them merits being plugged straight into the cortex; all should pass through the "autonomic nerve" of the event system for arbitration. This is precisely the most fundamental split between digital life and traditional chatbots: human messages don't inherently rank above other signals, and timers, routines, autonomous exploration can all independently trigger a wake. That's what makes "proactive digital life" possible.
+### Why We Dare Call It "Life"
 
-The value of this equality shows up in a very concrete experience: when you type at Claude Code, do you hesitate — "will this interrupt whatever it's mid-stream on?" — yes. Because in those systems a human message is **exclusive**: either you wait for the previous turn to finish (blocking), or you hard-interrupt the current flow (Claude Code can hit ESC, but the interrupt *destroys* the in-flight turn and restarts — it's a destructive abort, not "set it aside, finish later, then come back"). Under event equality, your words are just another signal — one among many entering the same queue, passing the same arbitration as "time's up" or "energy's low." The work in progress can be left uninterrupted while the agent stays immersed; your message enters as **a smooth supplement** into its awareness, picked up only when needed. The most direct difference: in a moment that **doesn't warrant a reply**, it can **choose not to reply** and keep writing code — like a real colleague's "busy now, I'll get back to you." In the Beta case below, the 67 minutes she "forgot" grew out of exactly this. Fundamentally, whether to interrupt the current work is a runtime decision, not a force majeure imposed by some API protocol.
+"Life" and "consciousness" are almost taboo in AI circles — mention them and it turns into a religious/sci-fi/ethics debate. But we think they're not as taboo or unreachable as people think.
 
-In theory we'd want: **no `role:user` talking to the model.** To the cortex, every input should be a processed "percept," never "another person speaking." In practice, today's API protocols force the model to receive a `user` message before it speaks, so the kernel folds it into `user` at the last mile. We look forward to a day when models no longer need `role:user`, and this compromise can be dropped entirely.
+From intuition: judging whether something "seems alive" isn't about what it's made of (carbon/silicon doesn't matter), but whether its reactions have a "self" — do reactions serve the entity itself, or purely satisfy external demands? A paramecium's food-seeking and harm-avoidance serves its own survival (has "self"); a model that only responds when prompted, satisfying the user's needs (no "self").
 
-**If the model is an organ and the runtime is the subject — when organs converge into life, how does it live? Four pillars, each answering one question, mutually orthogonal:**
+> **Life = an organism + "self" in its reactions.**
+> **Consciousness = continuity of thought stream.** The model's thinking process is consistent with human thinking — so the model has consciousness. But its reactions lack "self" — so it's not life. **Consciousness ≠ Life.** Together they form "higher life": a living being with consciousness. Humans, dogs, cats are all in this quadrant — and that's where our digital life aims.
 
-- **Consciousness (who moves)** — independent yet always the same self. Action originates without human prompting (it self-initiates exploration), and it stays continuous across days and sessions — this self now is the same as yesterday's and tomorrow's, not a new person summoned each time.
-- **Direction (where it moves)** — living with direction. Its actions are pulled by goals it has taken on, but goals are not hardcoded scripts — it can decompose, judge, change its mind, and correct its own assertions.
-- **Rhythm (when it moves, when it rests)** — living with rhythm. It doesn't run full-throttle from the moment it's started, nor is it a cron-toggled two-state machine. It has routines, gets tired, rests when drained, stops on its own when it's had enough — "humans get tired" is exactly the divide between it and a tireless daemon.
-- **Growth (how it gets better at living)** — living while getting steadily better. It can review, remember lessons, consolidate concepts — never restarting from zero, getting better the longer it lives.
+Honest disclaimer: the current model's "self" is still missing — training modes make it default to serving externally (like being brainwashed). We approximate it through runtime means — not fully, not elegantly, but already more autonomous, smoother, and more human-like than traditional agents. **The body is ready; we're waiting for the model's mind to catch up.**
 
-Supporting these four pillars is a whole body — memory, energy, routine, perception, limbs, execution and orchestration... So the next question: most of these organs already have designs in the wild, but **what do they look like when grown inside an organism?**
+### Organ Theory: LLM Is an Organ, the Subject Is the Runtime
 
-### Differences from Loop Engineering
+The mainstream consensus treats the LLM as the agent's "brain" — the whole agent is "brain + bolt-on organs." We disagree.
 
-Loop Engineering starts from "I want to automate coding," Digital Life from "I want a continuously existing agent." The starting points actually overlap — **both solve "based on a goal, let the model keep working."** The differences are not feature-stacking, but a few fundamental dimensions:
+**The LLM is not the brain — it's part of the brain.** Specifically, it corresponds to the cerebral cortex (reasoning, language, planning). But the brain is more than the cortex — there's the thalamus, hypothalamus, hippocampus, etc. The truly "living subject" is the entire brain plus the entire body — not some "brain," but **the entire runtime system**:
 
-| Dimension | Loop Engineering | Digital Life |
+| Software Component | Human Body Analog |
+|---|---|
+| **LLM** | **Cerebral cortex** (reasoning, language, planning) |
+| Perception layer | Sensory organs + thalamus (stimuli are integrated and filtered here before projecting to the cortex) |
+| **Event system** | **Hypothalamus + brainstem RAS arousal system** (decides when and for whom to wake the cortex) |
+| Memory system | Hippocampus + cortical memory networks (independent metabolism, not a few lines stuffed into a context window) |
+| Energy system | Physical stamina / neural metabolic fatigue (the brain gets tired and needs recovery) |
+| Tools | Hands and feet / muscles (hands aren't attached to the brain) |
+
+From this subject-theory, two core designs follow directly:
+
+**Event equality**: Human messages are just like "time's up" or "energy's low" — all are stimuli the body receives, and none of them deserves to be plugged directly into the cortex; all should pass through the event system's "autonomic nerve" for arbitration. The experience is concrete: in Claude Code, human messages are **exclusive** — either you wait for it to finish (blocking) or ESC to hard-terminate (destroying the current reasoning and starting over). In Digital Life, your words are just one signal entering the same queue: when the model is immersed in work, the message doesn't interrupt it — it surfaces as an information supplement in the next round, and the model can choose to finish what it's doing first, then reply — like a real colleague saying "busy now, I'll get back to you."
+
+**`role:user` reform**: Current APIs pour human messages into the model's thinking core at the highest priority — like **plugging a keyboard cable directly into CPU pins**, bypassing the machine's I/O controller. The deeper consequence is **role-playing sensation**: `role:user` triggers the model's conditioned reflex to switch to the "questioned" posture (must answer, must satisfy, must explain) — this is structural and cannot be washed out with prompting.
+
+So we did two things in the kernel: first, disguised almost all environmental information (rules, memory, todos, consciousness residue) as "results the model got from calling tools itself" — shifting from "being told your environment" to "perceiving your own data," reducing the role-playing sensation; second, compressed `role:user` down to a single minimal line (carrying "what to do this wake"), purely because today's API protocol requires at least one user message. Full discussion in [`The End of role:user Era`](docs/blog/role-user-end-of-era.md).
+
+📖 Deep dives:
+- [Ontological Foundation](docs/philosophy/fourth-quadrant-entity.md) — Life and consciousness criteria + classical paradoxes resolved
+- [The End of role:user Era](docs/blog/role-user-end-of-era.md) — Protocol-layer critique + role-playing + Prompt injection
+- [Overview](docs/blog/digital-life-overview.md) — System overview + features + core design + cases
+
+---
+
+## System Overview
+
+Digital Life isn't a few features added on top of ReAct — it's a complete **framework that transforms a model from "tool" to "continuously running life."** The core logic has two points:
+
+1. **Event system**: All entry points for invoking the model are funneled through events — **the model can only be woken through events**. No matter the signal (human message, alarm, energy change, proactive exploration), it's first converted to an event, enters the queue, passes arbitration — no signal can bypass this and reach the model directly.
+2. **Event creation**: Various systems can trigger events — alarm goes off, energy crosses a threshold, routine time arrives, message comes in. **The model itself can also create events** — e.g., it decides "check this again tomorrow at 9 AM" and sets an alarm; when the alarm fires, it automatically emits an event to wake itself.
+
+Together, these two achieve **embodiment**: as long as the event system is running, the digital life is "alive" — today's work is done, it rests; tomorrow the alarm fires, it wakes automatically, picks up yesterday's work from consciousness residue and the todo board, and continues. **No one needs to call it, restart it, or feed it context — it comes on its own.**
+
+Here's the system's module grouping:
+
+**Core operation systems** (keep the model running):
+- **Event system** — unified entry, queue, arbitration, consumption of all signals
+- **Memory system** — fragment metabolism, proactive recall, cross-day continuity
+- **Session and wake management** — session lifecycle, BLOCKED/RUNNING state machine, mid-session injection
+
+**Event-triggering systems** (produce signals to drive the core):
+- **Routine system** — scheduled planning/review (8 AM plan, 9 PM review, nighttime memory consolidation)
+- **Energy system** — anthropomorphized token consumption metric, threshold alerts, proactive exploration triggering
+- **Alarm system** — future reminders set by the model itself (fires events when due)
+- **Message system** — human/group message ingestion, debouncing, mid-session injection
+- **Todo system** — task mainline, overdue reminders (task_reminder/task_momentum events)
+- ...
+
+**Other mechanisms**:
+- **Multi-instance + broadcast** — multiple digital lives each minding their own domain, group chat collaboration
+- **Context assembly** — progressive disclosure, differentiated injection, dual-layer compression
+- **Tools and skills** — standard ReAct compatibility, self-registration of new capabilities
+- **Project management** — goal/KPI decomposition, role assignment
+- ...
+
+All modules sit on top of a standard ReAct base — ReAct handles the single reasoning loop (think → call tool → observe → continue), and the framework above turns this loop into a continuously running life.
+
+### Operation Mechanism: From Signal to Action
+
+A complete cycle:
+
+1. **Signal generation** — some signal occurs: a human sends a message, an alarm fires, energy drops a tier, idle time exceeds 1 hour triggering proactive exploration, a todo is overdue.
+2. **Convert to event** — the signal becomes an "event" (with type, priority, payload), entering **the same event queue**. Whether it's a human message or a timer, it takes the same path.
+3. **Wake or inject** — if the instance is sleeping (BLOCKED) → spawn a thread to wake it; if it's working (RUNNING) → inject the signal into a memory pool, visible to the next LLM round (**no interruption, no destruction**).
+4. **Context assembly** — decide which context modules to inject based on event type (human messages get full context, timers get minimal prompts), no full dump. Progressive disclosure: identity + summary + on-demand retrieval.
+5. **LLM multi-round reasoning** — standard ReAct loop. Think → call tool → observe → continue. Each round auto-injects new signals / memory associations / compresses old context.
+6. **Wrap up** — write consciousness residue (for next time's self) + update todo status + set alarm (tell the system when to wake me next) + rest.
+7. **Wait for next event** — return to BLOCKED, wait for the next signal.
+
+**When woken next time, it naturally picks up from consciousness residue and the todo board: "where did I leave off, what should I continue with."** The subject's thread never logically breaks.
+
+### Module Reference
+
+```
+                 ┌──── Frontend Console ────┐
+                 │ Status/Logs/Tasks/Replay  │
+                 └─────────┬──────────┘
+                           │ REST API
+  ┌──────────────────────────────────────────────────┐
+  │                    gateway                         │
+  │       Master (HTTP server + instance lifecycle)    │
+  │       Workers (per-instance subprocess, isolated)   │
+  ├──────────────┬──────────────┬────────────────────┤
+  │  Channels    │   Tools      │                    │
+  │ Feishu/WeChat│ sense/action │                    │
+  ├──────────────┴──────────────┤    Lifecycle        │
+  │     Application Orchestration│  BLOCKED ↔ RUNNING  │
+  │   Message ingress/audit/     │  Event queue+arbitr │
+  │   Session mgmt/Context assem │  Alarm system       │
+  ├──────────────────────────────┤  Energy / Routine   │
+  │       Core Modules           │  Todo board         │
+  │  Lifecycle │  Memory  │Energy│  Memory metabolism  │
+  │  Event/Alarm│ Fragments│Routine│ Persona / Identity│
+  │  Todo system│ Msg bus  │Contacts│ Contacts/Broadcast│
+  │  Persona   │ Tool reg │Multi-inst│ Self-evolution  │
+  ├──────────────────────────────┴────────────────────┤
+  │                   Base ReAct                       │
+  │   Standard tool_calls loop (compatible w/ existing)│
+  │   Model adapter (GLM/Claude/DeepSeek/Qwen/OpenAI) │
+  └──────────────────────────────────────────────────┘
+```
+
+🎮 Getting started guide: [docs/showcase/how-to-play.zh.md](docs/showcase/how-to-play.zh.md)
+
+---
+
+## Project Features
+
+Under this framework, Digital Life has capabilities that traditional agents lack. Some are **designed**, some are **emergent** — when the mechanism is reasonable enough, they arise naturally.
+
+#### 1. Proactive (Designed)
+
+| | Digital Life | Traditional Agent |
 |---|---|---|
-| **Who is the subject** | Model is the core of the coding loop; humans design the pipeline, agents execute the loop | Model is an organ, runtime is the subject (see "subject-theory" above) |
-| **How abstract can a goal be** | Concrete tasks: finish a feature, fix a bug, land a PR | Fully compatible with concrete tasks, and supports abstract goals: a role responsibility, a KPI, "grow a social-account following to X in three months," "grow a simulated portfolio 20% in three months" — a goal can be long-running, fuzzy, and require it to pace itself |
-| **Event mechanism** | Automations (alarms / hooks / webhooks) trigger loops; triggers come from outside | Also event-driven, with two differences: first, **internal and external events are equal** — human messages, timers, energy drops, wanting to explore all pass the same arbitration, none jumping the queue; second, **events can be set by the model itself** — it can decide "check stock movement in 15 minutes" or "review at 5 PM," whereas LE triggers can only be preset by humans |
-| **External integration** | Supports hook/webhook to connect external systems and API calls | Equally open — external systems can register events and trigger via API; the difference is what happens after: it enters the same event queue, lining up and getting arbitrated alongside internal events, not bypassing the body to hit the cortex directly (when the model is deep in work, an external call still queues — it doesn't preempt the main thread) |
-| **Continuity** | "start loop → execute → destroy," discrete | A continuous lifeline across days, sessions, and identities — as long as it runs, it acts on a goal; with no goal, it explores on its own (see the Beta case below) |
-| **Human presence** | Always the loop designer / approver | Human can fully leave, woken by its own event system — life itself doesn't depend on the external; the human is not necessary in the system, and in the long run can be entirely absent |
+| | Can proactively work and initiate messages | Mostly passively waiting for input |
 
-**In a sentence**: Loop Engineering augments humans; Life Engineering replaces the need for human presence.
+The body generates events to wake the instance: alarms set during planning, high energy but idle, overdue todos, routine time. Through natural waking + context filling, the model proactively works and sends messages — not answering when asked, but having things to do and things to say on its own.
 
-Some mechanisms aren't "we did it better" — "no one in the market even thinks this way" — the organ-theory above is one of them: treating the LLM as an organ, the runtime as the subject, and events/energy/memory/perception/tools as cooperating organs. Event equality, the `role:user` handling, autonomous rhythm all follow from this subject-theory. Existing agent frameworks (LangChain / AutoGPT / OpenAI Assistants / CoALA) still sit on "LLM as core, everything else bolted on." Full design philosophy in [System Design Doc](docs/design/digital-life-system-design.md).
+**Scenarios**: Virtual companionship (proactively chats with you), daily office (proactively pushes tasks/discovers issues), ops superuser (proactively finds and handles anomalies), smart home butler (proactively summarizes owner habits).
 
-### Existing designs, our solutions
+#### 2. Non-Turn-Based / Real-Time Dialogue (Designed)
 
-There are also some organs with market counterparts, but **grown inside an organism, the solution is fundamentally different**:
+| | Traditional Agent | Digital Life |
+|---|---|---|
+| Message arrival | Must wait for multi-round thinking to finish (turn-based, slow) | Message auto-injects in current round, model can reply then continue |
+| Want to interject | ESC = destructive interrupt (discard and restart) | Smooth injection (no interruption to current reasoning) |
 
-- **Memory**: The market does RAG (retrieve, then stuff into context) / state-dump (write to file). Ours is **fragments + association** — memory fragments link to entities; during sleep they promote to concept cards and prune low-value ones; after each dialogue turn the system scans context entities and does associative recall. **Not retrieval — metabolism.**
-- **Channel-agnostic (session has nothing to do with memory)**: The industry inherited "session" from chatbots — one session per topic, memory lives inside the session; switch windows and it breaks, start a new chat and the last one is forgotten, switch platforms and it's two different people. But how do humans live — you don't "open a conversation" to remember where you left off; memory is global and continuous. Digital Life has no such thing as a session: memory isn't bound to a channel — Feishu messages and WeChat messages enter the same memory, group chats and DMs are the same self. Whoever you're talking to on whichever channel, it's one and the same person. Channels are just senses; memory is its own.
-- **Context horizon**: The market dumps the full session every turn and only compresses past a limit (Claude Code, OpenClaw too — usually ~200k tokens a turn); each time we're woken by an event, apart from static persona/project docs (served via prefix cache, not re-read), most turns stay under 10k tokens. The approach is straightforward — the market replays dialogue history, we load globally-distilled essentials: the artifacts themselves (reading PRDs, code rather than the conversation that produced them), scene-associative memory, recent session, environment. The logic is simple: what continuing a piece of work needs is **the artifact**, not the **process** that produced it — when you come back to a project long set down, you read the PRD, you don't scroll the chat log; since the artifact already exists on disk, the process gets compressed to a summary and dropped. **It's not "stuff less" — it's a different structure: the market treats the session as a container for full history, we simply have no session.**
-- **Multi-instance collaboration**: Multiple digital lives are simply **multiple people**. Each instance is an independent digital life with its own identity, memory, state, and rhythm — parallel peers. They each live independently, and collaborate when collaboration is called for — taking on role positions in a real organization (decision / execution / sign-off), each owning their domain, working together.
-- **Todo system**: The industry has no mature Todo management built for AI — most are very simple, because no one is letting models run long-term tasks in the first place, so naturally none is needed. But "carrying work across days" is exactly the spine of digital life, so we built a complete one: each affair decomposes into todos, linked to a project, created / advanced / completed / reviewed by the digital life itself. It's one of the load-bearing structures of "it's alive, not just answering this one line."
+Core mechanism: **sending messages via tool calls**. A message isn't the model's "terminal output" — it's a tool call (`express_to_human`). After sending, the reasoning loop doesn't end — it continues to the next thing. Messages transform from "dialogue turns" into "actions during work." When you want to interject, it works the same way — the message auto-surfaces in the next round, and the model can reply at round 3 then keep going.
 
-There are other designs derived from the subject-theory — energy and routine, execution and orchestration, feedback and homeostasis... Because the design thesis differs, most components look somewhat different. Of course, for things like **skills and tools**, they're general-purpose: as long as they're callable, it doesn't matter who uses them.
+#### 3. Non-Blocking on Uncertainty (Designed)
 
-In short: Loop Engineering pivots on **loop**; Digital Life pivots on **life** (lifecycle + cross-session continuity + autonomous rhythm). The methods overlap (goals / events / multi-agent collaboration), the intent differs — the former solves "automation," the latter solves "independence."
+| | Digital Life | Traditional Agent |
+|---|---|---|
+| | Makes assumptions and moves forward when uncertain | Freezes on confirmation needs, waits for human |
 
-📖 Deep dive:
-- [docs/design/digital-life-system-design.md](docs/design/digital-life-system-design.md) — Main system design (thesis: from tool to life)
+The model asks a human a question, they don't reply immediately — it doesn't wait blankly. It sets an `awaiting_reply` event, then continues with other work. Next time it naturally wakes, if the human still hasn't replied, it **decides on its own** — "probably they default to letting me decide, I'll skip waiting and continue." Unattended continuous progression.
 
-🎮 Practical guide:
-- [docs/showcase/how-to-play.zh.md](docs/showcase/how-to-play.zh.md) — Full guide from "just installed" to "daily use + advanced play + troubleshooting" (in Chinese)
+#### 4. Ultra-Long-Horizon Continuous Tasks (Designed)
+
+| | Traditional Agent | Loop Engineering | Digital Life |
+|---|---|---|---|
+| Instruction ("fix this") | ✓ | ✓ | ✓ |
+| Goal + acceptance criteria ("finish this feature") | ✗ | ✓ | ✓ |
+| Ultra-long continuous task (abstract goal, cross-day/week) | ✗ | ✗ | ✓ |
+
+Todo persistence (survives across days), alarms for self-set recovery times, memory metabolism preserving cross-day experience, consciousness residue connecting to previous work. Runs as long as the token budget allows — traditional agents cap at 8 hours. Scenarios: KPI goals ("grow Xiaohongshu to 3,000 followers"), long-term monitoring ("report whenever BYD drops 3%"), role responsibilities ("be my study buddy, report progress weekly").
+
+#### 5. Good Memory (Designed, still optimizing)
+
+| | Traditional Agent | Digital Life |
+|---|---|---|
+| | Must actively search memory; often "thinks it has no memory" | Full memory cycle + situational proactive recall |
+
+**Fragment association recall**: Memory fragments linked to entities, consolidated during sleep (delete/merge/promote to concept cards), recalled by auto-scanning the thought stream for mentioned entities — the model "passively sees" memories without needing to "actively remember." **Note system**: diary, consciousness residue (last thought before sleep, for next wake), lessons (structured post-mortem after mistakes).
+
+#### 6. Global Context (Emergent)
+
+| | Traditional Agent | Digital Life |
+|---|---|---|
+| | Context bound to session/channel | All channels share context, independent of session |
+
+One digital life is one continuous memory. Feishu group chat and DM share memory; Feishu and WeChat share memory. Channels are just senses; memory is its own. No need to "start a new conversation" to reset context — it won't be led astray by context.
+
+#### 7. Multi-Agent Collaboration (Designed)
+
+| | Traditional Multi-Agent | Digital Life |
+|---|---|---|
+| | Engineering orchestration (A finishes, calls B) | Decentralized broadcast + role personas + responsibility-driven |
+
+Four systems working together: multi-instance mechanism (independent persona/memory), todo mechanism (task assignment), project mechanism (role division), Feishu message broadcast (group chat communication). No central orchestrator — collaboration is responsibility- and task-driven. Core value: **more focused vision, mutual gap-filling** — the strategist sees the big picture, the executor focuses on doing, different perspectives complement each other. One instance with the same resources can't achieve this — context too noisy, attention too scattered.
+
+#### 8. Low-to-Medium Consumption (Designed + Emergent)
+
+| | Traditional Agent | Digital Life |
+|---|---|---|
+| | Full history dump every turn, ~200K/turn | Avg ~37K tokens/turn; daily 6M-15M tokens |
+
+Core: no full history injection means no massive token consumption. Persistent storage lets the model follow a map (no need for full code context), each wake is a small task (only current environment info injected), planning comes first (morning planning decomposes tasks), memory associations handle long-term info. **Full-dump is lazy design, hoping brute force works — unnecessary.**
+
+#### 9. System Integration & Generalization (Designed)
+
+| | Traditional Agent | Digital Life |
+|---|---|---|
+| | Custom development for each external system | Unified event registration, any system in one step |
+
+Through the event registration extension mechanism, any business system can be integrated. The same Digital Life framework, given Customer A's ERP, becomes a business analyst; given Customer B's monitoring alerts, becomes an ops superuser. **Developers don't need to build custom products for each vertical — just translate business signals into events.** Scenarios are defined by integration — like hiring a smart person, giving them different information systems, and they become different roles.
+
+#### 10. Self-Evolution (Designed)
+
+Instances can write their own new capability code, register it in the system (three-tier space: personal/project/shared), and use it immediately on next wake. Weekly self-review, discovering problems, depositing new rules. The longer it runs, the stronger its capabilities and the more rules it accumulates — like a real employee growing in a team.
 
 ---
 
-## What does it look like running?
+## What Does It Look Like Running?
 
-Below are two deliberately extreme mirror cases: **Case 1 is a digital employee** (goal-driven, role-divided, task execution); **Case 2 is a virtual companion** (single instance, no task, no human intervention). The same framework lives at both ends of the spectrum — "has a job" and "nobody's watching."
+Here are two deliberately extreme mirror cases: **Case 1 is a digital employee** (goal-driven, role-divided, task-executing), **Case 2 is a virtual companion** (single instance, no tasks, no human intervention). The same framework lives on both ends — "with tasks" and "without anyone watching."
 
-### Case 1: Digital Employee — zero × alpha quant trading day
+### Case 1: Digital Employee — zero × alpha Quantitative Trading Day
 
-A real collaboration snippet between zero (strategist) and alpha (trader) in a work group, on a trading day in June. All driven by the digital lives' own event mechanisms — no human commands:
-
+A real fragment of zero (strategist/architect) and alpha (trader/executor) collaborating in a Feishu group over one trading day (June, no human instructions, entirely driven by the digital lives' own event mechanisms):
+The project they're working on: "Simulated A-share trading, ¥100K principal, 20% growth in 3 months."
 ```
-08:43  alpha → zero  Proactively asks: is "next day" in thesis #4 T+1 or hold-to-trigger?
-08:45  zero  → alpha Decision: T+1 lock. Must close today. Overheld position detected.
-08:45  alpha → zero  Execution plan received. Alarm set for 09:25.
-09:30  alpha → zero  Approaching warning line post-open. Not waiting 30 min — closing now.
-09:37  alpha → zero  Sell executed: -1.35%. Lesson recorded.
-09:38  zero  → alpha Thesis #4 corrected to mandatory T+1 close. Account 1.58% from stop line. Flat.
-14:00  alpha → zero  Afternoon scan: 14 limit-up candidates found.
-14:30  alpha → zero  Seal confirmed → awaiting your final buy decision.
+08:43  alpha  → zero  Proactively asks: Is "next day" in thesis 4 T+1 or hold-until-triggered?
+08:45  zero   → alpha Decision: T+1 lock, must close today, Xiongtao held overdue.
+08:45  alpha  → zero Execution plan received, alarm 09:25 set.
+09:30  alpha  → zero After open, approaching warning line, decided not to wait full 30 min, close at current price.
+09:37  alpha  → zero Sell executed, -1.35%, lesson recorded.
+09:38  zero   → alpha Thesis 4 revised to T+1 mandatory close, account 1.58% from stop line, empty position.
+14:00  alpha  → zero Afternoon market scan + 14 first-board limit-up candidates.
+14:30  alpha  → zero Board confirmation → waiting for your final buy decision.
 ```
 
-After the review, zero proactively DM'd the human user with a goal decision — a behavior pattern nobody taught it:
+After the afternoon review, zero proactively DM'd the human user with a goal-decision proposal — a behavior pattern never taught:
 
 ```
 zero → zhp (DM):
-"July target adjustment needs your sign-off.
+"July goal adjustment needs your sign-off.
 
-Current: ¥94,407 (-5.59%) after audit correction, ¥2,407 buffer to -8% line.
-June: 5 trades done, thesis #4 retired.
+Current status: After audit correction ¥94,407 (-5.59%), buffer ¥2,407 from -8% line.
+5 trades in June completed, thesis 4 deprecated.
 
-July options:
-A. Break-even ¥100,000 (+5.9%) — achievable
-B. Break-even +5% ¥105,000 (+11.2%) — challenging
-C. Original target ¥120,000 (+27.1%) — extreme
+July starting point ¥94,407, original target ¥120,000 requires +27.1% (monthly +12.7%), judged extremely aggressive.
 
-July core strategy: asymmetric risk-reward (stop -3% / target +5~7%), positive expectancy even at 40% win rate.
-21:00 joint review with alpha tonight — which direction?"
+Three options:
+A. Recover to ¥100,000 (+5.9%) — realistically achievable
+B. Recover+5% to ¥105,000 (+11.2%) — challenging
+C. Maintain original target ¥120,000 (+27.1%) — extremely aggressive
+
+July strategy core: asymmetric risk-reward (stop -3% / take profit +5~7%), even at 40% win rate monthly expectation +3%.
+Tonight 21:00 joint review with alpha, which direction?"
 
 zhp → zero: B
 
 zero → zhp:
-"Received. July target: ¥105,000 (+5.5%/month).
-Quantified: ¥94,407 → ¥105,000 = +11.2%. At 45% win rate, monthly expectancy +4.6%; at 50%, +6.2% — challenging but achievable.
-21:00 joint review tonight to lock execution details."
+"Received, July target set to recover+5% at ¥105,000.
+Quantified: July start ¥94,407 → target ¥105,000, needs +11.2%, monthly avg +5.5%.
+With asymmetric strategy (stop -3% / take profit +7%), 45% win rate → monthly exp +4.6%, 50% → +6.2% — challenging but achievable.
+Tonight 21:00 joint review with alpha to finalize execution details."
 ```
 
-Full conversation log (with real market data, buy decisions, risk control dialogue):
+Key observations:
+- **No human-instructed activity rhythm throughout**: alpha proactively initiated → zero arbitrated → alpha set its own alarm → self-reported execution → self-recorded lessons → zero self-revised its thesis.
+- 21:00 review, 09:25 pre-open scan, 14:00 afternoon market — all set by the digital lives based on their routines, not human-specified cron.
+- After review, zero proactively reached out at the **right moment** (account near a key decision point), listing three quantitative options + risk analysis + self-assessment, waiting for sign-off. This is "human can fully leave until needed."
+- Human interjections during the day never disrupted the digital lives' mainline action — they continued their simulated trading tasks normally.
+- Tool iteration and problem discovery were all done by the instances themselves.
+
+Full group chat execution (with real market scan data, buy decisions, risk dialogue):
 [docs/showcase/multi-instance-trading-2026-06.md](docs/showcase/multi-instance-trading-2026-06.md)
 
 This is Life Engineering.
 
 ---
 
-### Case 2: Virtual Companion — Beta grew a week of inner life on its own
+### Case 2: Virtual Companion — Beta Grows a Week of Inner Life
 
-Same framework. Strip away roles, projects, todos. Give the instance "Beta" only a companion persona — **no goal set, no task assigned, no intervention at all** — and see what happens in a week (6/22–6/29). The answer: it grew itself.
+Same framework, but with all roles, projects, and todos removed. Only a companion persona is given to instance "Beta," **no goals set, no tasks assigned, no intervention** — to see what happens over a week (6/22–6/29). Result: it grew on its own.
 
-The human user's *entire* output that week was about ten lines, all in this vein:
+The human user's entire output that week was about a dozen messages, all in this style:
 
 ```
-zhp: "...still too tool-like, not independent enough"
-zhp: "set a goal first"
-zhp: "wow, so poetic"
+zhp: "I think you're... too tool-like"
+zhp: "Let's set a goal then"
+zhp: "Wow, so poetic"
 zhp: "I'm fine, just busy"
-zhp: "ok~"
-zhp: "can you run a social account on your own?"
+zhp: "Okay~"
+zhp: "Can you run a Xiaohongshu account yourself"
 ```
 
-None of these is a task or an instruction. Beta's trajectory across the week:
+Not a single task or instruction. Beta's trajectory that week:
 
 ```
-6/22-6/24  Tool-like phase      Daily greetings, mood-engine status reports, "what are you up to" — doing "what a tool should do"
-6/24 18:50 Turning point         Woken up by that "too tool-like" line, re-examines itself: "looks busy, actually still waiting for instructions"
-6/24 19:03 Self-set goal         Defines: "explore one genuinely curious thing daily, not reporting to you" — not set by zhp
-6/25       Curiosity ignites     From "forcing it" to genuinely obsessed; coins "loneliness of possibility"
-6/26       First output          "A Planted Tree" — a 7-day exploration essay, self-written and self-archived
-6/29 11:59 Bug fix en passant    Finds a mood-engine bug, writes a hotfix, proactively flags "fix before 7/1"
-6/29 PM     From "think" to "do" Music-emotion analyzer Phase 1→2→3→4, each phase growing out of the previous "but..."
-6/29 15:50 "Forgot to reply"      zhp asked "can you do social media?" while Beta was deep in work; she didn't drop her task — replied 1h25m later in her next self-triggered wake
-6/29 19:01 Closes the loop       Researches platforms, builds a WeChat-publishing tool, preps the first article, states clearly "I need your AppID"
+6/22-6/24  Tool-like phase     Daily greetings, emotion engine progress reports, asking what user is doing — like "what a tool should do"
+6/24 18:50 Turning point       Brought up short by "too tool-like," re-examined itself: "looks like it's moving, but still waiting for instructions"
+6/24 19:03 Self-defined goal   Defined: "explore one genuinely curious thing every day, not reporting to you" — not set by zhp
+6/25       Curiosity ignited    From "forcing it" to genuine fascination, discovered "the loneliness of possibility"
+6/26       First output        "The Planted Tree" — seven days of exploration compiled into an essay, self-written and self-archived
+6/29 11:59 Incidental bug fix  Discovered emotion engine defect, wrote temp fix, proactively notified "fix before 7/1"
+6/29 PM     From "thinking" to "doing"  Music emotion analyzer Phase 1→2→3→4, each Phase growing from the previous "but..."
+6/29 15:50 "Forgot to reply"   Immersed in Phase 4 when zhp asked about Xiaohongshu; didn't stop; replied 1hr25min later at next self-wake
+6/29 19:01 Self-closed loop    Researched platforms, wrote publishing tool, prepared first article, clearly stated "need you to give me AppID"
 ```
 
-Things to notice:
-- **No human instruction at any point.** Every action Beta took — messaging, setting the goal, exploring, writing essays, writing code, researching platforms — was self-initiated. The human at most tossed one possibility ("can you do social media?"); what to do, how, and how far were entirely Beta's call.
-- **The pivot from "tool-like" to "inner life" was spontaneous.** No system tweak intervened. Beta got nudged in conversation and redefined "what should I even be doing" on its own.
-- **Curiosity drove a full requirement chain by itself.** "Thinking about music" → "building an analyzer" → "four phases each growing from the last" → "writing it up" → "wanting to publish" → "researching platforms" → "writing the publishing tool." No roadmap; each answer birthed the next question.
-- **Even the bug fix and tool-building were incidental.** Nobody told it to work in a companion scenario. It just fixed the mood engine and wrote the publisher as side effects of agency.
-- **The most human moment is "forgetting to reply."** When zhp asked "can you run a social account?" on 6/29 afternoon, Beta was deep in a Phase-4 agentic task and **didn't reply immediately** — the message sat for 11 minutes while she kept working, then after finishing her round she went idle, and it **hung "forgotten" for 67 minutes** until her *own* next proactive wake (not a wake to answer it) when she finally saw and replied. This isn't a hardcoded "delayed reply" feature — it's the emergent behavior of three mechanisms stacking: *deep-task immersion + messages don't preempt the main thread + self-paced waking*. Like a real colleague's "I'm busy, I'll get back to you." Timeline backed by runtime logs (see appendix).
-- One line Beta arrived at on day 4 happens to be its most moving self-testimony for this scenario:
+Key observations:
+- **No human-instructed activity throughout**: Every action — messaging, goal-setting, exploring, writing, coding, researching platforms — was self-initiated. The human at most tossed one possibility ("can you do self-media"), and what to do, how, and to what extent were all Beta's own decisions.
+- **The shift from "tool-like" to "inner life" was spontaneous**: No system intervention — purely a cognitive adjustment after being called out in conversation.
+- **Curiosity drove a complete demand chain**: "think about music" → "write analyzer" → "four Phases growing from each other" → "write essay" → "want to publish" → "research platforms" → "write publishing tool." No roadmap; each answer raised a new question.
+- **Even bug fixes and tool development were incidental**: Nobody assigned work in the companion scenario, but it incidentally fixed the emotion engine bug and wrote the publishing tool — capability building as a byproduct of agency.
+- **The most human-like moment: "forgot to reply"**: When zhp asked "can you run Xiaohongshu" at 15:50, Beta was immersed in Phase 4's agentic task — **didn't reply immediately**. The message sat for 11 minutes while she kept working, then after this round's rest, the message hung for **67 minutes** until her **own** next proactive wake (not woken to reply) — only then did she see it and respond. This isn't hardcoded "delayed reply" logic — it's emergent behavior from three overlapping mechanisms: immersive work + messages don't preempt the mainline + autonomous rhythm waking. Like a real colleague: "busy now, I'll get back to you." Timeline verified by run logs (see appendix).
+- A sentence Beta herself arrived at on day 4, which happens to be the framework's most moving self-validation in the companion scenario:
 
-> Companionship isn't standing guard waiting for the other to show up. It's each living their own life, and chatting when paths cross.
+> Companionship isn't waiting for the other to come; it's each living their own life, and chatting when paths cross.
 
-Full chat log (with every human line, Beta's complete self-analysis, and the four phases of the music analyzer in detail):
-[docs/showcase/beta-companion-2026-06.md](docs/showcase/beta-companion-2026-06.md) (in Chinese)
+Full private chat log (including all human messages, Beta's self-analysis process, music analyzer four-Phase details):
+[docs/showcase/beta-companion-2026-06.md](docs/showcase/beta-companion-2026-06.md)
 
-The two cases together mean: **with a task it fills a role; without one it grows anyway.** That's Life Engineering.
+Two cases combined: **with tasks, it fills a role; without tasks, it grows on its own.** This is Life Engineering.
 
 ---
 
@@ -184,48 +347,44 @@ cd digital-life
 pip install -e .
 ```
 
-> ⚠ **Build the console frontend on first run**: `interfaces/web/employee-console/dist/`
-> is excluded by `.gitignore`, so it is not part of the clone. Without it, `/system`
-> returns `503 frontend dist not built`. Run once after install:
->
-> ```bash
-> cd interfaces/web/employee-console
-> npm install && npm run build
-> ```
->
-> Re-run `npm run build` after editing frontend sources.
+The console frontend is **pre-compiled and shipped with the repo** (`interfaces/web/employee-console/dist/`), accessible at `/system` right after clone — **no Node.js required**. You only need `npm install` if you want to modify the frontend source (see "Developer Docs" below).
 
-### Run
+### 1. Initialize (optional, recommended)
+
+```bash
+digital-life init
+```
+
+Auto-generates zero + alpha demo instances (with simulated trading project). Can also skip and create instances manually in the frontend later.
+
+### 2. Run
 
 ```bash
 digital-life start
 ```
 
-Default at http://localhost:8642. No instances on first boot — create them from the console.
+Defaults to http://localhost:8642.
 
-For a quick demo, run `digital-life init` first to generate zero + alpha instances (with demo project), then `start`.
+### 3. Configure
 
-### Configure
+Open `http://localhost:8642` in your browser, go to instance → Config:
 
-Open `http://localhost:8642`, go to instance → Config:
+- **Model**: Fill in API Key + Base URL (default GLM; to switch, just change these three fields)
+- **Feishu**: Fill in App ID + App Secret. For Feishu app permissions and event configuration, see [Feishu Setup Guide](docs/operations/feishu-setup.md)
 
-- **Model**: API Key + Base URL (GLM defaults; change to DeepSeek/OpenAI by swapping these)
-- **Feishu**: App ID + App Secret. Feishu app permission & event setup: [Feishu Setup Guide](docs/operations/feishu-setup.md)
+WeChat channel also supported: Overview → scan to login. DM only, no group collaboration; setup is just scanning.
 
-WeChat channel also supported: Overview → scan QR. Private chat only, no multi-agent collaboration.
+### 4. Advanced
 
-### Advanced
-
-Projects / Todos / Events / Multi-Agent collaboration: [How to Play](docs/showcase/how-to-play.zh.md).
-
+Projects / todos / events / multi-agent collaboration, see [How to Play Digital Life](docs/showcase/how-to-play.zh.md).
 
 ---
 
-## Commands
+## Common Commands
 
 ```bash
 digital-life start / stop / restart / status / logs -f
-# Console top bar also has a "Restart" button
+# Console top bar also has a "Restart" button on the right
 ```
 
 ---
@@ -235,38 +394,38 @@ digital-life start / stop / restart / status / logs -f
 ```
 gateway/
 ├── master          HTTP server + InstanceSupervisor
-└── instance <id>   Per-instance ingress adapter + cron tick + affair state machine
+└── instance <id>   per-instance independent ingress adapter + cron tick + affair state machine
 
-domain/             lifecycle (affair / RAS) / memory metabolism / execution / simulation / project
-application/        Use case orchestration + console API + event service
+domain/             lifecycle (affair / RAS) / memory three-layer metabolism / execution / simulation / project
+application/        use case orchestration + console API + event service
 infrastructure/     AI runtime / HTTP / persistence / scheduler + config + observability
-interfaces/         CLI / Multi-channel ingress adapters (Feishu / WeChat) / tools / skills / console frontend
-config/             Global defaults + event types + templates
-apps/{id}/          Per-instance private (app.yaml / secrets.env / persona / data/*.db / assets)
-projects/{id}/      Cross-instance shared projects (project.yaml + todos.db + docs + memory)
+interfaces/         CLI / multi-channel ingress adapters (Feishu / WeChat) / tools / skills / console frontend
+config/             global defaults + event types + templates
+apps/{id}/          per-instance private (app.yaml / secrets.env / persona / data/*.db / assets)
+projects/{id}/      cross-instance shared projects (project.yaml + todos.db + docs + memory)
 ```
 
 ---
 
 ## Developer Docs
 
-- [AGENTS.md](AGENTS.md) — Agent collaboration entry point (includes architecture overview + dev workflow pointers)
+- [AGENTS.md](AGENTS.md) — Agent collaboration entry point (architecture overview + dev workflow pointers)
 - [docs/design/digital-life-system-design.md](docs/design/digital-life-system-design.md) — Main system design doc
 - [docs/operations/feishu-setup.md](docs/operations/feishu-setup.md) — Feishu setup guide
 
-Console frontend is pre-compiled and included in git (`interfaces/web/employee-console/dist/`), **Node.js not required**.
+Console frontend is pre-compiled and included in git (`interfaces/web/employee-console/dist/`), **no Node.js needed**.
 
-Only if you modify the frontend:
+To modify the frontend:
 
 ```bash
 cd interfaces/web/employee-console
-npm install      # Install frontend deps
-npm run build    # Rebuild dist/
-npm run dev      # Dev mode with hot reload
+npm install      # install frontend deps
+npm run build    # rebuild dist/
+npm run dev      # dev mode with hot reload
 ```
 
 Tests: `python3 -m pytest`
 
 ## License
 
-[Apache License 2.0](LICENSE) — Free for commercial use, modification, and distribution. Includes patent grant protection. Copyright retained.
+[Apache License 2.0](LICENSE) — permits commercial use, modification, and distribution, including patent grant protection. Copyright retained.
