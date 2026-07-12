@@ -88,6 +88,12 @@ FIELDS: tuple[ConfigField, ...] = (
         default="https://open.feishu.cn",
         description="国内 open.feishu.cn / 国际 open.larksuite.com。",
     ),
+    ConfigField(
+        "channels.feishu.enable_streaming", "飞书流式输出", "feishu", "yaml", "boolean",
+        path="channels.feishu.enable_streaming",
+        default=True,
+        description="开启后消息会逐字显示（打字机效果），关闭则一次性发送完整消息。",
+    ),
 
     # ════════════ 微信通道（固定展示）════════════
     ConfigField(
@@ -199,6 +205,14 @@ class ConfigCenterWorkflow:
                     env_updates[field.key] = self._env_text(value, field)
                 elif field.source == "yaml" and field.path:
                     yaml_updates[field.path] = value
+
+            # 飞书通道同步：前端配置中心只暴露 messenger.app_id，但 ingress registry
+            # 在合并时以 channels.feishu 优先（不覆盖已有值）。当 channels.feishu.app_id
+            # 已是占位符（cli_xxx）或空串时，前端改动就落不到通道配置上，飞书适配器永远
+            # 读到占位符。这里把 messenger.app_id 同步写入 channels.feishu.app_id，保证
+            # 前端保存的值立即对通道生效。
+            if "messenger.app_id" in yaml_updates:
+                yaml_updates["channels.feishu.app_id"] = yaml_updates["messenger.app_id"]
 
             # 显式用 employee_id 定位实例文件,避免依赖 ContextVar(middleware 可能未覆盖
             # 的内部调用方直调时会读到错实例)。

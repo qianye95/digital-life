@@ -24,7 +24,7 @@ logger = logging.getLogger("digital_life.ingress.registry")
 
 def _build_feishu(cfg: dict[str, Any], secrets_env: dict[str, str]) -> Any:
     """飞书 adapter 工厂。凭证不全返回 None（跳过，不报错）。"""
-    from interfaces.ingress.feishu import FeishuAdapter
+    from interfaces.ingress.feishu_streaming_adapter import FeishuStreamingAdapter
 
     app_id = str(cfg.get("app_id") or "").strip()
     app_secret = (
@@ -33,10 +33,25 @@ def _build_feishu(cfg: dict[str, Any], secrets_env: dict[str, str]) -> Any:
         or ""
     ).strip()
     domain = str(cfg.get("feishu_domain") or "").strip() or None
+    enable_streaming = bool(cfg.get("enable_streaming", False))
+    
     if not app_id or not app_secret:
         logger.info("feishu channel skipped: missing app_id or app_secret")
         return None
-    return FeishuAdapter(app_id=app_id, app_secret=app_secret, domain=domain)
+    
+    adapter = FeishuStreamingAdapter(
+        app_id=app_id,
+        app_secret=app_secret,
+        domain=domain,
+        enable_streaming=enable_streaming,
+    )
+    
+    logger.info(
+        "feishu adapter created: app_id=%s, streaming=%s",
+        app_id[:8] + "...",
+        enable_streaming,
+    )
+    return adapter
 
 
 def _build_wechat_clawbot(cfg: dict[str, Any], secrets_env: dict[str, str]) -> Any:
